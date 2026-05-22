@@ -1,0 +1,206 @@
+{
+  "_doc": "Track config schema. Fields: track_id (slug for CLI flags and data/sessions/<slug>/ dirs). name (display). configuration (variant slug \u2014 currently always 'full'). official_length_m (published \u2014 display only). direction ('clockwise' | 'counter-clockwise' \u2014 affects diagnostics; lap segmentation is purely GPS-geometric). start_finish (lat/long; the lap-cut line; used by normalize.py to split sessions into laps). lap_length_internal_m (the per-lap dist_lap_m rescale target so the same physical point has the same dist_lap_m across laps; ~median GPS-integrated lap distance, NOT official_length_m; see normalize.py:146). reference_lap (synthetic centerline session ref; built by cli.build_centerline \u2192 cli.install_centerline; null until installed). calibration_anchors (Maps-pinned visual-apex coords for GPS drift correction via median offset across anchors; see labeler.compute_lap_drift). corners (per-corner {corner_id, start_m, end_m, ...} boxes in dist_lap_m units; populated by Task 2.4 seeding).",
+  "track_id": "pir",
+  "name": "Portland International Raceway",
+  "configuration": "full",
+  "official_length_m": 3166,
+  "direction": "clockwise",
+  "start_finish": {
+    "lat": 45.595014,
+    "long": -122.694484
+  },
+  "lap_length_internal_m": 3198,
+  "reference_lap": {
+    "session_id": "_synthetic_centerline",
+    "lap": 1,
+    "notes": "Synthetic centerline at 1m resolution built from corpus median. See data/corpus/pir_centerline.parquet."
+  },
+  "calibration_anchors": [
+    {
+      "corner_id": "T1",
+      "ref_lat": 45.59616,
+      "ref_long": -122.69815,
+      "confidence": "high"
+    },
+    {
+      "corner_id": "T2",
+      "ref_lat": 45.59653,
+      "ref_long": -122.69839,
+      "confidence": "high"
+    },
+    {
+      "corner_id": "T3",
+      "ref_lat": 45.59654,
+      "ref_long": -122.69987,
+      "confidence": "high"
+    },
+    {
+      "corner_id": "T4",
+      "ref_lat": 45.59804,
+      "ref_long": -122.70306,
+      "confidence": "high",
+      "notes": "real / regular T4 apex"
+    },
+    {
+      "corner_id": "T5",
+      "ref_lat": 45.59872,
+      "ref_long": -122.70177,
+      "confidence": "high"
+    },
+    {
+      "corner_id": "T6",
+      "ref_lat": 45.59798,
+      "ref_long": -122.70007,
+      "confidence": "high"
+    },
+    {
+      "corner_id": "T7",
+      "ref_lat": 45.59993,
+      "ref_long": -122.69923,
+      "confidence": "high"
+    },
+    {
+      "corner_id": "T8",
+      "ref_lat": 45.59955,
+      "ref_long": -122.69744,
+      "confidence": "high",
+      "notes": "full-throttle through this corner \u2014 apex more nominal than driven"
+    },
+    {
+      "corner_id": "T9",
+      "ref_lat": 45.59944,
+      "ref_long": -122.6961,
+      "confidence": "low",
+      "notes": "full-throttle through this corner \u2014 apex more nominal than driven"
+    },
+    {
+      "corner_id": "T10",
+      "ref_lat": 45.59537,
+      "ref_long": -122.68948,
+      "confidence": "high"
+    },
+    {
+      "corner_id": "T11",
+      "ref_lat": 45.59502,
+      "ref_long": -122.68853,
+      "confidence": "high"
+    },
+    {
+      "corner_id": "T12",
+      "ref_lat": 45.59388,
+      "ref_long": -122.68792,
+      "confidence": "high"
+    }
+  ],
+  "corners": [
+    {
+      "id": "T1",
+      "name": null,
+      "type": "right",
+      "start_m": 126,
+      "end_m": 373,
+      "apex_m": 293,
+      "notes": null
+    },
+    {
+      "id": "T2",
+      "name": null,
+      "type": "left",
+      "start_m": 276,
+      "end_m": 436,
+      "apex_m": 356,
+      "notes": null
+    },
+    {
+      "id": "T3",
+      "name": null,
+      "type": "right",
+      "start_m": 411,
+      "end_m": 571,
+      "apex_m": 491,
+      "notes": null
+    },
+    {
+      "id": "T4",
+      "name": null,
+      "type": "right",
+      "start_m": 648,
+      "end_m": 921,
+      "apex_m": 841,
+      "notes": "T4a 'throwaway' apex (user rarely hits); data shows 133 passes per 134 flying laps",
+      "secondary_apex_m": 739
+    },
+    {
+      "id": "T5",
+      "name": null,
+      "type": "right",
+      "start_m": 913,
+      "end_m": 1073,
+      "apex_m": 993,
+      "notes": null
+    },
+    {
+      "id": "T6",
+      "name": null,
+      "type": "left",
+      "start_m": 1095,
+      "end_m": 1255,
+      "apex_m": 1175,
+      "notes": null
+    },
+    {
+      "id": "T7",
+      "name": null,
+      "type": "right",
+      "start_m": 1284,
+      "end_m": 1475,
+      "apex_m": 1395,
+      "notes": null
+    },
+    {
+      "id": "T8",
+      "name": null,
+      "type": "left",
+      "start_m": 1489,
+      "end_m": 1649,
+      "apex_m": 1569,
+      "notes": null
+    },
+    {
+      "id": "T9",
+      "name": null,
+      "type": "right",
+      "start_m": 1596,
+      "end_m": 1756,
+      "apex_m": 1676,
+      "notes": null
+    },
+    {
+      "id": "T10",
+      "name": null,
+      "type": "left",
+      "start_m": 2198,
+      "end_m": 2456,
+      "apex_m": 2376,
+      "notes": null
+    },
+    {
+      "id": "T11",
+      "name": null,
+      "type": "right",
+      "start_m": 2404,
+      "end_m": 2564,
+      "apex_m": 2484,
+      "notes": null
+    },
+    {
+      "id": "T12",
+      "name": null,
+      "type": "right",
+      "start_m": 2550,
+      "end_m": 2710,
+      "apex_m": 2630,
+      "notes": null
+    }
+  ]
+}

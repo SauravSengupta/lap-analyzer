@@ -1,0 +1,89 @@
+"""Shared cached loaders and helpers for the visualizer pages."""
+from __future__ import annotations
+
+import json
+import os
+
+import pandas as pd
+import streamlit as st
+
+from lap_analyzer.analysis import lap_index, load_corpus, load_samples
+from lap_analyzer.config import tracks_dir
+
+
+def current_track() -> str:
+    """The track the visualizer is currently showing.
+
+    Priority: explicit user pick in st.session_state -> LAP_ANALYZER_TRACK env var -> 'ridge'.
+    The sidebar picker in app.py writes to st.session_state['track'].
+    """
+    return st.session_state.get("track") or os.environ.get("LAP_ANALYZER_TRACK", "ridge")
+
+
+def available_tracks() -> list[str]:
+    """List of track slugs found under tracks/.
+
+    Excludes dotfiles and stems containing a dot (e.g. `ridge.pre-apex-pin-update.json`
+    is a backup, not a real track). Clean track slugs are simple identifiers.
+    """
+    return sorted(
+        p.stem for p in tracks_dir().glob("*.json")
+        if not p.stem.startswith(".") and "." not in p.stem
+    )
+
+
+@st.cache_data(show_spinner=False)
+def corpus(track: str) -> pd.DataFrame:
+    return load_corpus(track)
+
+
+@st.cache_data(show_spinner=False)
+def laps(track: str) -> pd.DataFrame:
+    return lap_index(corpus(track), track=track)
+
+
+@st.cache_data(show_spinner=False)
+def track_def(track: str) -> dict:
+    return json.loads((tracks_dir() / f"{track}.json").read_text(encoding="utf-8"))
+
+
+@st.cache_data(show_spinner="loading samples")
+def samples(track: str, session_id: str, lap: int) -> pd.DataFrame:
+    """One lap's samples. long_g negated to automotive convention (+ = accel).
+
+    `rpm` is included so the downshift page can derive gear; app.py ignores it.
+    `track_dist_m`/`dist_lap_m` feed the fused distance axis (see fused_axis.py).
+    """
+    s = load_samples(track, session_id, lap)[
+        ["t", "lap", "track_dist_m", "dist_lap_m", "speed_mph", "speed_mph_gps",
+         "throttle_norm", "long_g", "lat_g", "rpm"]
+    ].copy()
+    s["long_g"] = -s["long_g"]
+    return s
+
+
+def drop_gps_glitches(s: pd.DataFrame) -> pd.DataFrame:
+    """Drop samples whose GPS projection disagrees with OBD-integrated distance.
+
+    Primary signal: |track_dist_m - dist_lap_m|. On clean data these track
+    within ~20-30m; on a TrackAddict inner-loop glitch they diverge by hundreds.
+    The cummax pass mops up residual non-monotonic samples.
+    """
+    s = s.sort_values("t").reset_index(drop=True)
+    small = s["track_dist_m"] < 500
+    if small.any():
+        s = s.iloc[small.idxmax():].reset_index(drop=True)
+    diff = (s["track_dist_m"] - s["dist_lap_m"]).abs()
+    s = s[diff < 50].reset_index(drop=True)
+    rmax = s["track_dist_m"].cummax()
+    return s[s["track_dist_m"] >= rmax - 1.0]
+
+
+def session_hhmm(sid: str) -> str:
+    return f"{sid[9:11]}:{sid[11:13]}"
+
+
+def format_lap_time(s: float) -> str:
+    """Lap time as M:SS.SS (e.g. 132.62s -> '2:12.62')."""
+    m, rem = divmod(s, 60)
+    return f"{int(m)}:{rem:05.2f}"

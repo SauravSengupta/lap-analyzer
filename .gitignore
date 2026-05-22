@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments (any location)
+.venv/
+**/.venv/
+venv/
+env/
+
+# Project data — large & personal. data/samples/ is carved back in at Phase 4.
+data/
+
+# Scratch (legacy notebooks, backups — created in Phase 3)
+scratch/
+
+# Local tooling / agent state
+.claude/
+.playwright-mcp/
+.streamlit/
+
+# Env & secrets (commit .env.example, never .env)
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
