@@ -12,7 +12,11 @@
 
 ## 📍 RESUME HERE (last updated 2026-05-22)
 
-**Status:** Phase 0 + Phase 1 + Phase 2 (PIR bootstrap) all done. **At CHECK-IN 2 — awaiting user decision on ORP (bootstrap now vs defer), then start Phase 3 (repo restructure).**
+**Status:** Phases 0-3 done. **At CHECK-IN 3 passed — ready for Phase 4 (sample data + finalize .gitignore).** CHECK-IN 2 resolved: ORP deferred to post-publish, PIR locked.
+
+**GIT IS NOW INITIALIZED (changed from the original plan).** User asked to set up git early to de-risk the Phase 3 restructure. Local-only, no remote yet (Phase 7 adds remote). Commits so far: `e3b51de` baseline (Phases 0-2), `5d9f6cc` Phase 3 restructure. `.gitignore` excludes data/ (samples carved back in Phase 4), .venv/, .claude/, scratch/, scripts/*.png. The old "comment out, don't delete" convention is relaxed (history preserved) — but don't retroactively delete pre-existing commented blocks without asking.
+
+**Phase 3 done — repo flattened:** `app/src/lap_analyzer/`→`lap_analyzer/`, `app/visualizer/`→`visualizer/`, `app/tracks/`→`tracks/`, `app/docs/*`→`docs/`, `app/pyproject.toml`→root. config.py APP_ROOT parents[2]→[1], DATA_ROOT default `../data`→`data`. Run cmd now `PYTHONPATH=. python -m streamlit run visualizer/app.py` from root. Notebooks triaged: `scripts/` kept = seed_pir_corners, plot_pir_map, verify_ridge, obd_distance_spread, corner_envelope; everything else → gitignored `scratch/` (incl cluster_ridge as superseded). `app/` and empty `tests/` removed entirely. Smoke-tested: identical 1608 PIR transits, visualizer imports, keeper scripts run.
 
 **Decisions locked in (Phase 0):**
 - Repo: `lap-analyzer` · License: MIT · Data tier: B (samples + Release-asset corpus)
@@ -38,7 +42,7 @@
 
 **Side effects from Phase 1 still relevant:** T8-T11 page renamed to `1_Ridge_Downshift_T8-T11.py` with `track!="ridge"` guard (verified: shows explainer + `st.stop()`, no crash on PIR) — Phase 5 owes `docs/NEW-TRACK.md` "writing track-specific pages". Backup-file filter in `available_tracks()` → backups move to `scratch/` in Phase 3 Task 3.6.
 
-**Next action when resuming:** Resolve CHECK-IN 2 (ORP now/defer + any PIR data-quality concerns). If defer → start Phase 3 Task 3.1 (move `app/src/lap_analyzer/` → `lap_analyzer/`). If bootstrap ORP → mirror Phase 2 (note ORP is bidirectional, 6 CSVs — new wrinkle the single-direction assumption hasn't been tested against).
+**Next action when resuming:** Phase 4 Task 4.1 — pick one Ridge + one PIR sample session (clean, top-third pace, all 4 outputs present), confirm with user, copy under `data/samples/`. Then Task 4.2 finalizes `.gitignore` (carve `!data/samples/` back in — note .gitignore already exists from the early git setup, so this is an EDIT not a create), Task 4.3 verifies sample-only mode (`DATA_ROOT=data/samples`). ORP deferred to post-publish.
 
 **Execution conventions:**
 - Subagent-driven was the CHECK-IN 0 decision, but Phase 2 ran mostly inline because the work was exploratory/iterative (data analysis with the user in the loop) — that's the right call when tasks need a tight feedback loop rather than a fixed spec.
