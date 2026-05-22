@@ -18,9 +18,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]  # scripts/ -> repo root
 CENTERLINE = REPO_ROOT / "data" / "corpus" / "pir_centerline.parquet"
-TRACK_JSON = REPO_ROOT / "app" / "tracks" / "pir.json"
+TRACK_JSON = REPO_ROOT / "tracks" / "pir.json"
 PINS_JSON = REPO_ROOT / "data" / "notes" / "pir_apex_pins.json"
 OUT_PATH = Path(__file__).parent / "pir_track_map.png"
 

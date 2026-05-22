@@ -1,14 +1,12 @@
-"""Lap Analyzer visualizer (Component 6).
+"""Lap Analyzer visualizer.
 
-Run (PowerShell):
-    cd app
-    $env:PYTHONPATH = "src"; python -m streamlit run visualizer/app.py
+Run from the repo root (PowerShell):
+    $env:PYTHONPATH = "."; python -m streamlit run visualizer/app.py
 
-Run (bash):
-    cd app
-    PYTHONPATH=src python -m streamlit run visualizer/app.py
+Run from the repo root (bash):
+    PYTHONPATH=. python -m streamlit run visualizer/app.py
 
-Design: app/docs/visualizer-design.md.
+Design: docs/visualizer-design.md.
 """
 from __future__ import annotations
 

@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+REPO_ROOT = Path(__file__).resolve().parents[1]  # scripts/ -> repo root
+
 M_PER_DEG_LAT = 111_132.0
 M_PER_DEG_LON = 111_132.0 * np.cos(np.radians(47.255))
 PRE = 100.0
@@ -34,9 +36,9 @@ def main():
                    help="Overlay on Esri World Imagery satellite basemap")
     args = p.parse_args()
 
-    root = Path(r"D:\Projects\lap-analyzer\data\sessions\ridge")
-    track_json = json.loads(Path(r"D:\Projects\lap-analyzer\app\tracks\ridge.json").read_text(encoding="utf-8"))
-    pins_path = Path(r"D:\Projects\lap-analyzer\data\notes\ridge_apex_pins.json")
+    root = REPO_ROOT / "data" / "sessions" / "ridge"
+    track_json = json.loads((REPO_ROOT / "tracks" / "ridge.json").read_text(encoding="utf-8"))
+    pins_path = REPO_ROOT / "data" / "notes" / "ridge_apex_pins.json"
     pins = {k: v for k, v in json.loads(pins_path.read_text(encoding="utf-8")).items() if not k.startswith("_")}
 
     corner = next(c for c in track_json["corners"] if c["id"] == args.corner)

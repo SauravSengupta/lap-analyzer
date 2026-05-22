@@ -36,3 +36,6 @@ scratch/
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated plot outputs from scripts/
+scripts/*.png

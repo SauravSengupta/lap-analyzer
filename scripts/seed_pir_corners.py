@@ -22,6 +22,17 @@ Algorithm:
      hit"; would skew drift correction).
   7. start_m / end_m = apex_m +/- 80m (labeler refines later via
      compute_corner_bounds_from_data).
+
+Methodology note (supersedes the older `scratch/cluster_ridge.py`):
+  The earlier Ridge approach did pure 1-D density clustering on `peak_dist_m`
+  alone. That breaks on chicanes and double-apex corners — several lat-G peaks
+  from one pass collapse into overlapping distance clusters and the turn
+  direction (L/R) is lost. This script instead matches candidate clusters to the
+  user's Maps pins by GPS-projected lap-distance and reads direction from each
+  cluster's lat-G sign, which is why PIR's Festival Curves (R-L-R) and the
+  T4/T5 double-apex resolve cleanly. This is PIR-specific as written (hardcoded
+  paths + the EXPECTED direction list + T4/T9 special-cases); generalizing it to
+  `--track <slug>` is the tooling half of docs/NEW-TRACK.md (deferred).
 """
 from __future__ import annotations
 
@@ -62,11 +73,11 @@ ANCHOR_PIN = {"T4": "T4b"}
 USE_PIN_LAP_DIST = {"T9"}
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]  # scripts/ -> repo root
 PINS_PATH = REPO_ROOT / "data" / "notes" / "pir_apex_pins.json"
 CANDIDATES_PATH = REPO_ROOT / "data" / "corpus" / "pir_candidates.csv"
 SESSIONS_DIR = REPO_ROOT / "data" / "sessions" / "pir"
-TRACK_PATH = REPO_ROOT / "app" / "tracks" / "pir.json"
+TRACK_PATH = REPO_ROOT / "tracks" / "pir.json"
 
 
 def hav(lat1, lon1, lat2, lon2):
