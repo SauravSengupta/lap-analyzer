@@ -1,7 +1,8 @@
 """Visualizer page: T8-T11 downshift comparison.
 
 Splits laps by whether a downshift was made entering T8, then compares the
-T8 -> T11 section. See docs/superpowers/specs/2026-05-17-t8-t11-downshift-comparison-design.md.
+T8 -> T11 section. A Ridge-specific worked example; see docs/VISUALIZER.md
+(track-specific pages) and docs/NEW-TRACK.md for how to write one.
 """
 from __future__ import annotations
 
