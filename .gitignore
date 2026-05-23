@@ -26,6 +26,9 @@ scratch/
 .playwright-mcp/
 .streamlit/
 
+# Internal planning docs (AI plans + specs) — kept on disk, not published
+docs/superpowers/
+
 # Env & secrets (commit .env.example, never .env)
 .env
 .env.local
