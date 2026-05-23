@@ -54,28 +54,6 @@ def _call_label_samples(lap, track, ref_index):
     return label_samples(lap, track, ref_index)
 
 
-def _call_build_session_corners(session_dir, track, ref_index):
-    """Invoke build_session_corners tolerant of arg SHAPE.
-
-    The spec describes the behavior + integration usage but not the signature.
-    Try documented-plausible call shapes (session dir alone; with a track; with a
-    track + reference index) without reading the implementation.
-    """
-    candidate_args = (
-        (session_dir, track, ref_index),
-        (session_dir, track),
-        (session_dir,),
-    )
-    last_exc = None
-    for args in candidate_args:
-        try:
-            return build_session_corners(*args)
-        except TypeError as exc:
-            last_exc = exc
-            continue
-    raise last_exc
-
-
 # ---------------------------------------------------------------------------
 # load_track
 # ---------------------------------------------------------------------------
@@ -385,15 +363,16 @@ def test_compute_lap_drift_disagreement_rms_of_deviations(make_lap_samples):
 # build_corner_transit — apex / latg / input-timing offsets and signs
 # ---------------------------------------------------------------------------
 
-def _make_corner(corner_id="T1", start_m=100.0, end_m=300.0, apex_m=200.0):
+def _make_corner(corner_id="T1", start_m=100.0, end_m=300.0, apex_m=200.0,
+                 secondary_apex_m=None, type="right"):
     """Construct a Corner via the dataclass.
 
-    The Corner needs at least id/start_m/end_m/apex_m for build_corner_transit's
-    documented metrics. Extra positional/keyword fields are filled with benign
-    defaults; if the dataclass signature differs the kwargs below name the four
-    documented fields explicitly.
+    Corner is a plain dataclass with all 8 fields required (id, name, start_m,
+    end_m, apex_m, secondary_apex_m, type, notes); name/notes are benign here.
     """
-    return Corner(id=corner_id, start_m=start_m, end_m=end_m, apex_m=apex_m)
+    return Corner(id=corner_id, name=None, start_m=start_m, end_m=end_m,
+                  apex_m=apex_m, secondary_apex_m=secondary_apex_m,
+                  type=type, notes=None)
 
 
 def test_build_corner_transit_too_few_samples_returns_none(make_lap_samples):
@@ -600,10 +579,17 @@ def test_label_samples_straight_label_format(ridge_labeled_lap):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def ridge_session_corners(sample_data_root, ridge_reference_index):
+def ridge_session_corners(sample_data_root):
+    # build_session_corners(samples, laps, track, session_id, date) operates on
+    # already-labeled samples (the sample bundle's samples.parquet carries
+    # track_dist_m/corner/drift columns) — it does not read a session dir.
     track = load_track("ridge")
-    session_dir = sample_data_root / "sessions" / "ridge" / "20260517-100304"
-    corners = _call_build_session_corners(session_dir, track, ridge_reference_index)
+    session_id = "20260517-100304"
+    session_dir = sample_data_root / "sessions" / "ridge" / session_id
+    samples = pd.read_parquet(session_dir / "samples.parquet")
+    laps = pd.read_csv(session_dir / "laps.csv")
+    date = f"{session_id[:4]}-{session_id[4:6]}-{session_id[6:8]}"
+    corners = build_session_corners(samples, laps, track, session_id, date)
     return track, corners
 
 

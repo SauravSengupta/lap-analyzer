@@ -102,7 +102,10 @@ Import: `from lap_analyzer.normalize import normalize_dataframe`.
 Signature: `(raw: pd.DataFrame, session_id: str, canonical_lap_length_m: float | None = None) -> tuple[pd.DataFrame, dict]`.
 The `raw` frame is assumed already column-renamed to canonical names (as
 `read_csv` does): `t, lap, lat, long, speed_mph, speed_mph_gps, lat_g, long_g,
-brake, rpm, throttle_raw, coolant_f, iat_f`, etc.
+brake, rpm, throttle_raw, coolant_f, iat_f`, etc. **The input must contain all 6
+canonical OBD channels — `rpm, speed_mph, throttle_raw, coolant_f, iat_f,
+manifold_psi` — because they are forward/back-filled together. `manifold_psi` is
+required on input even though it is dropped from the output.**
 
 - **Contract (PIPELINE.md):** returns `(out_df, {"throttle_max_observed": <float>})`
   where `out_df` has exactly the documented `samples.parquet` columns
@@ -170,6 +173,9 @@ Signature: `(track: str) -> set[str]`.
 ## normalize.normalize_session (MissingOBDError path)
 
 Import: `from lap_analyzer.normalize import normalize_session, MissingOBDError`.
+Signature: `normalize_session(csv_path, track, out_dir) -> SessionMeta` — `out_dir`
+is a required positional (the directory the `<session_id>/` output folder is
+created under).
 
 - **Edge case (KNOWN behavior — OBD dropout):** if the raw CSV is missing any of
   the 6 OBD columns, `normalize_session` raises `MissingOBDError` and writes no
@@ -252,6 +258,9 @@ Import: `from lap_analyzer.labeler import build_corner_transit`.
 Signature: `(lap_samples: pd.DataFrame, corner: Corner) -> dict | None`. Build a
 `Corner` via the dataclass (`from lap_analyzer.labeler import Corner`) and a lap
 via `make_lap_samples`, overriding `track_dist_m`, `speed_mph`, `lat_g`, etc.
+**`Corner` is a plain dataclass with all 8 fields required (no defaults):
+`id, name, start_m, end_m, apex_m, secondary_apex_m, type, notes`** — pass them
+all (`name`/`notes` may be `None`, `secondary_apex_m` `None` or a float).
 
 - **Edge case:** fewer than 3 samples inside `[start_m, end_m]` → returns `None`.
 - **Invariants (apex metrics — ARCHITECTURE §4):**
@@ -269,13 +278,20 @@ via `make_lap_samples`, overriding `track_dist_m`, `speed_mph`, `lat_g`, etc.
 
 ## labeler.build_session_corners
 
-Import: `from lap_analyzer.labeler import build_session_corners`.
+Import: `from lap_analyzer.labeler import build_session_corners`. Signature:
+`build_session_corners(samples, laps, track, session_id, date) -> pd.DataFrame`.
+**It operates on already-labeled `samples` (a DataFrame carrying `track_dist_m`,
+`corner`, and `gps_drift_*` columns) plus the `laps` DataFrame — it does NOT read
+a session directory or take a `ReferenceIndex`.** Drive it from a
+`sample_data_root` session, whose `samples.parquet` is already labeled:
+`build_session_corners(pd.read_parquet(.../samples.parquet),
+pd.read_csv(.../laps.csv), track, "<sid>", "<YYYY-MM-DD>")`.
 
 - **Contract:** emits one row per (clean lap × corner). Only laps with
   `is_clean == True` are processed; laps with < 50 samples are skipped; the
-  per-lap drift columns are pulled from the lap's first sample. Best exercised at
-  integration tier against a `sample_data_root` session (assert clean-lap-only and
-  the presence of `session_id, date, lap, corner_id` + drift columns).
+  per-lap drift columns are pulled from the lap's first sample. Assert
+  clean-lap-only and the presence of `session_id, date, lap, corner_id` + drift
+  columns.
 
 ---
 
@@ -482,6 +498,11 @@ Import: `from lap_analyzer.corners import extract_lap_candidates`. Signature:
     `"left"` (consistent with the positive=right convention).
   - offsets (`brake_on_offset_m`, etc.) are relative to the candidate's
     `entry_dist_m`, or `None` when the event doesn't occur.
+  - **brake/throttle-lift onset is detected over a lookback window extending
+    `LOOKBACK_M` (150 m) before `entry_dist_m`** (mirrors
+    `labeler.build_corner_transit`), so braking that begins before turn-in is
+    captured — `brake_on_offset_m` is **negative** when braking starts before the
+    lat-G entry. (Throttle-return is still measured post-apex.)
 - Construct a lap with one clear right-hand lat_g hump (e.g. a Gaussian bump > 0.4
   g) over ≥ 50 samples and assert a single `direction == "right"` candidate.
 
@@ -564,6 +585,10 @@ with `make_trackaddict_csv`; create raw CSVs under
 - **Contract (PIPELINE.md):** per-CSV status line is one of `ok`, `skip`
   (already normalized, no `--force`), `excl` (listed with `exclude` in notes),
   `noobd` (missing OBD), `FAIL` (other error).
+- **CSV format note:** the raw `UTC Time` column is a **numeric Unix epoch
+  (seconds)**, not an ISO string — `normalize` does `float(raw["utc"])` and
+  `datetime.fromtimestamp(...)`. A synthetic "valid" CSV must supply epoch
+  floats, e.g. `pd.Timestamp("2026-01-01T20:00:00Z").timestamp() + t`.
 - **Invariants:**
   - normalizing a valid CSV prints a line starting `ok ` and **returns 0**.
   - a CSV missing OBD columns prints `noobd ` and the run still **returns 0** (no

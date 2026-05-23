@@ -48,6 +48,9 @@ def _raw_columns(n=400, *, with_obd=True, with_gps=True):
     OBD and GPS/timing column groups can be omitted to exercise noobd / FAIL.
     """
     t = np.arange(n) * 0.05  # ~20 Hz
+    # TrackAddict's "UTC Time" column is a numeric Unix epoch (seconds), not an
+    # ISO string — normalize does float(raw["utc"]) and datetime.fromtimestamp().
+    utc0 = pd.Timestamp("2026-01-01T20:00:00Z").timestamp()
     # Drive lat/long in a repeating ramp that crosses the end point several times.
     cycles = 4
     phase = np.linspace(0, cycles * 2 * np.pi, n)
@@ -60,8 +63,7 @@ def _raw_columns(n=400, *, with_obd=True, with_gps=True):
     if with_gps:
         cols.update({
             "Time": t,
-            "UTC Time": pd.date_range("2026-01-01T20:00:00Z", periods=n, freq="50ms")
-                          .astype(str),
+            "UTC Time": utc0 + t,
             "Lap": lap_counter,
             "Sector": np.zeros(n, dtype=int),
             "Latitude": lat,

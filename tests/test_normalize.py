@@ -185,6 +185,9 @@ def _raw_frame(n=20, **overrides):
         "throttle_raw": np.full(n, 50.0),
         "coolant_f": np.full(n, 200.0),
         "iat_f": np.full(n, 90.0),
+        # manifold_psi is dropped from the output, but normalize_dataframe still
+        # forward-fills all 6 OBD channels, so it must be present in the input.
+        "manifold_psi": np.full(n, 14.0),
         "altitude_m": np.full(n, 100.0),
         "gps_accuracy_m": np.full(n, 3.0),
     }
@@ -617,7 +620,7 @@ def test_normalize_session_missing_obd_raises(make_trackaddict_csv, monkeypatch,
     monkeypatch.setenv("DATA_ROOT", str(tmp_path / "data"))
     csv = make_trackaddict_csv(_no_obd_csv_columns())
     with pytest.raises(MissingOBDError):
-        normalize_session(csv, "ridge")
+        normalize_session(csv, "ridge", tmp_path / "out")
 
 
 # SPEC: normalize.normalize_session — no output is written when OBD is missing
@@ -626,6 +629,6 @@ def test_normalize_session_missing_obd_writes_nothing(make_trackaddict_csv, monk
     monkeypatch.setenv("DATA_ROOT", str(data_root))
     csv = make_trackaddict_csv(_no_obd_csv_columns())
     with pytest.raises(MissingOBDError):
-        normalize_session(csv, "ridge")
+        normalize_session(csv, "ridge", data_root / "sessions" / "ridge")
     # no normalized session artifact should have been produced for this run
     assert not data_root.exists() or not any(data_root.rglob("*.parquet"))
