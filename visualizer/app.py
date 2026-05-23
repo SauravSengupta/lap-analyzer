@@ -6,7 +6,7 @@ Run from the repo root (PowerShell):
 Run from the repo root (bash):
     PYTHONPATH=. python -m streamlit run visualizer/app.py
 
-Design: docs/visualizer-design.md.
+Docs: docs/VISUALIZER.md.
 """
 from __future__ import annotations
 

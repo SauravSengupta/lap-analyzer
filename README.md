@@ -100,6 +100,7 @@ local.
 
 - [docs/PIPELINE.md](docs/PIPELINE.md) — CLI runbook, CSV column contract, output schema.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — design rationale and the approaches that were rejected.
+- [docs/VISUALIZER.md](docs/VISUALIZER.md) — what the Streamlit app shows and how to read it.
 - [docs/NEW-TRACK.md](docs/NEW-TRACK.md) — bootstrap a new track end-to-end.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — adding your track, hardware assumptions, conventions.
 
