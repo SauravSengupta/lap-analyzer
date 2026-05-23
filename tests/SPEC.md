@@ -540,10 +540,15 @@ track_dist_m`.
 
 ## centerline.build_centerline
 
-Import: `from lap_analyzer.centerline import build_centerline`. **Integration
-tier** — heavy; verify behavior against a `sample_data_root` track or a small
-copied tree. Asserting exact coordinates is out of scope; assert structure and
-the protected-range intent.
+Import: `from lap_analyzer.centerline import build_centerline`. Signature:
+`build_centerline(sessions_dir, notes_path, lap_length_m, track_lat_deg, out_path,
+protected_ranges=None) -> pd.DataFrame` (also writes the parquet to `out_path`).
+`protected_ranges` is a list of `(start_m, end_m)` corner spans. **Integration
+tier** — heavy; verify against a **copied** Ridge tree (it reads every session's
+`samples.parquet`/`corners.parquet`/`laps.csv` and writes `out_path`, so copy
+`sessions/ridge` + `notes` + `corpus` into a tmp `DATA_ROOT` first). Asserting
+exact coordinates is out of scope; assert structure and the protected-range
+intent.
 
 - **Output schema:** a DataFrame / parquet with columns `track_dist_m, lat, long,
   n, spread_m`, one row per 1 m grid point (`≈ lap_length_m` rows).

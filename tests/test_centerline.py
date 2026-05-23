@@ -61,36 +61,30 @@ def copied_ridge_root(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _call_build_centerline():
-    """build_centerline's exact signature isn't pinned by the SPEC beyond
-    'Integration tier; verify against a sample_data_root track'. Try the most
-    likely entry forms; skip cleanly if none match so this surfaces as a TODO
-    rather than a false failure."""
-    for args in (("ridge",), ()):
-        try:
-            return build_centerline(*args)
-        except TypeError:
-            continue
-    pytest.skip("build_centerline signature did not match (track,) or ()")
+def _build_ridge_centerline(root, out_name="ridge_centerline_test.parquet"):
+    """Call build_centerline with its documented signature against the copied
+    Ridge tree, returning the output DataFrame.
 
-
-def _as_centerline_frame(result):
-    """build_centerline may return a DataFrame or a path to a parquet."""
-    if isinstance(result, pd.DataFrame):
-        return result
-    if isinstance(result, (str, Path)) and Path(result).exists():
-        return pd.read_parquet(result)
-    if isinstance(result, dict):
-        for key in ("out_path", "path", "centerline_path"):
-            if key in result and Path(result[key]).exists():
-                return pd.read_parquet(result[key])
-    pytest.skip(f"could not resolve build_centerline output to a frame: {type(result)}")
+    Signature: build_centerline(sessions_dir, notes_path, lap_length_m,
+    track_lat_deg, out_path, protected_ranges=None). lap_length / center latitude
+    / corner protected-ranges come from tracks/ridge.json.
+    """
+    track_json = json.loads((REPO_ROOT / "tracks" / "ridge.json").read_text(encoding="utf-8"))
+    protected = [(float(c["start_m"]), float(c["end_m"])) for c in track_json["corners"]]
+    return build_centerline(
+        sessions_dir=root / "sessions" / "ridge",
+        notes_path=root / "notes" / "ridge.json",
+        lap_length_m=float(track_json["lap_length_internal_m"]),
+        track_lat_deg=float(track_json["start_finish"]["lat"]),
+        out_path=root / "corpus" / out_name,
+        protected_ranges=protected,
+    )
 
 
 def test_build_centerline_schema(copied_ridge_root):
     # SPEC: centerline.build_centerline — output columns track_dist_m, lat, long,
     #       n, spread_m (one row per 1 m grid point).
-    df = _as_centerline_frame(_call_build_centerline())
+    df = _build_ridge_centerline(copied_ridge_root)
     for col in CENTERLINE_COLUMNS:
         assert col in df.columns
 
@@ -98,7 +92,7 @@ def test_build_centerline_schema(copied_ridge_root):
 def test_build_centerline_track_dist_increasing_and_in_range(copied_ridge_root):
     # SPEC: centerline.build_centerline — track_dist_m is increasing and within
     #       [0, lap_length_m].
-    df = _as_centerline_frame(_call_build_centerline()).sort_index()
+    df = _build_ridge_centerline(copied_ridge_root).sort_index()
     td = df["track_dist_m"].to_numpy()
     assert np.all(np.diff(td) > 0)  # strictly increasing 1 m grid
     assert td.min() >= 0.0
@@ -109,16 +103,27 @@ def test_build_centerline_track_dist_increasing_and_in_range(copied_ridge_root):
 def test_build_centerline_roughly_one_row_per_meter(copied_ridge_root):
     # SPEC: centerline.build_centerline — ~lap_length_m rows on a 1 m grid; grid
     #       spacing is ~1 m so consecutive track_dist_m differ by ~1.
-    df = _as_centerline_frame(_call_build_centerline()).sort_values("track_dist_m")
+    df = _build_ridge_centerline(copied_ridge_root).sort_values("track_dist_m")
     steps = np.diff(df["track_dist_m"].to_numpy())
     assert np.median(steps) == pytest.approx(1.0, abs=0.5)
+
+
+def test_build_centerline_protected_corner_bins_present(copied_ridge_root):
+    # SPEC: ARCHITECTURE §3 — bins inside a corner box are never rejected; the
+    #       grid covers the full lap so every protected (corner) range has rows.
+    track_json = json.loads((REPO_ROOT / "tracks" / "ridge.json").read_text(encoding="utf-8"))
+    df = _build_ridge_centerline(copied_ridge_root)
+    td = df["track_dist_m"].to_numpy()
+    for c in track_json["corners"]:
+        in_corner = (td >= float(c["start_m"])) & (td <= float(c["end_m"]))
+        assert in_corner.sum() > 0, f"corner {c['id']} range has no centerline rows"
 
 
 def test_build_centerline_is_deterministic(copied_ridge_root):
     # SPEC: ARCHITECTURE design principle 1 — deterministic; same inputs ->
     #       identical centerline.
-    a = _as_centerline_frame(_call_build_centerline()).reset_index(drop=True)
-    b = _as_centerline_frame(_call_build_centerline()).reset_index(drop=True)
+    a = _build_ridge_centerline(copied_ridge_root, "a.parquet").reset_index(drop=True)
+    b = _build_ridge_centerline(copied_ridge_root, "b.parquet").reset_index(drop=True)
     pd.testing.assert_frame_equal(a, b)
 
 
