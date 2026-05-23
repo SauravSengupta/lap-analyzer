@@ -600,7 +600,6 @@ def test_classify_t8_single_downshift_past_apex_is_traffic(make_lap_samples):
 def test_classify_t8_multiple_downshifts_excluded(make_lap_samples):
     # SPEC: classify_t8_section — more than one downshift → excluded
     n = 240
-    td = np.linspace(1780.0, 2470.0, n)
     # Two distinct downshifts: 60 -> 120, back up to 60, then 120 again.
     # (Each held segment is long enough to clear dwell.)
     q = n // 4
@@ -661,7 +660,7 @@ def test_top_decile_laps_are_exactly_the_decile_zero_rows(ridge_corpus):
         pytest.skip("corpus has no lap_pace_decile column")
     out = top_decile_laps(corpus)
     d0 = corpus[corpus["lap_pace_decile"] == 0]
-    expected = {(s, int(l)) for s, l in zip(d0["session_id"], d0["lap"])}
+    expected = {(s, int(lap_n)) for s, lap_n in zip(d0["session_id"], d0["lap"])}
     assert out == expected
 
 

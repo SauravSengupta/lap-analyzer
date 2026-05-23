@@ -489,9 +489,9 @@ def test_lap_summary_is_clean_shape_only():
     lt = compute_lap_times(df)
     summ = lap_summary(df, lt).sort_values("lap").reset_index(drop=True)
     clean = dict(zip(summ["lap"], summ["is_clean"]))
-    assert clean[1] == False  # warmup
-    assert clean[2] == True   # interior
-    assert clean[3] == False  # cooldown
+    assert not clean[1]  # warmup
+    assert clean[2]      # interior
+    assert not clean[3]  # cooldown
 
 
 # SPEC: normalize.lap_summary — clean_reason warmup/cooldown/"" and is_clean==(reason=="")

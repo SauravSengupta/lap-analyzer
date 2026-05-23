@@ -27,7 +27,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from lap_analyzer.cli.normalize import main
 
@@ -264,10 +263,10 @@ def test_all_run_emits_summary_line(tmp_path, monkeypatch, capsys):
     assert rc == 0
     # A per-CSV ok and a per-CSV noobd line both appear.
     lines = out.splitlines()
-    assert any(l.startswith("ok ") for l in lines), out
-    assert any(l.startswith("noobd ") for l in lines), out
+    assert any(line.startswith("ok ") for line in lines), out
+    assert any(line.startswith("noobd ") for line in lines), out
     # Some trailing summary line carries count digits.
-    assert any(any(ch.isdigit() for ch in l) for l in lines[-3:]), out
+    assert any(any(ch.isdigit() for ch in line) for line in lines[-3:]), out
 
 
 def test_all_run_with_failure_returns_two(tmp_path, monkeypatch, capsys):
@@ -282,5 +281,5 @@ def test_all_run_with_failure_returns_two(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 2
     lines = out.splitlines()
-    assert any(l.startswith("ok ") for l in lines), out
-    assert any(l.startswith("FAIL ") for l in lines), out
+    assert any(line.startswith("ok ") for line in lines), out
+    assert any(line.startswith("FAIL ") for line in lines), out
