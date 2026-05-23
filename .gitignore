@@ -12,8 +12,11 @@ __pycache__/
 venv/
 env/
 
-# Project data — large & personal. data/samples/ is carved back in at Phase 4.
-data/
+# Project data — large & personal. Everything under data/ is ignored EXCEPT
+# data/samples/ (the committed demo bundle: 3 sessions/track + sample corpus +
+# centerlines). Full corpus ships as a GitHub Release asset, raw CSVs stay local.
+data/*
+!data/samples/
 
 # Scratch (legacy notebooks, backups — created in Phase 3)
 scratch/

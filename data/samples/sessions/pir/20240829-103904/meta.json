@@ -1,0 +1,41 @@
+{
+  "session_id": "20240829-103904",
+  "track": "pir",
+  "vehicle": "2014 Porsche Cayman",
+  "date_utc": "2024-08-29T17:39:05Z",
+  "n_laps": 13,
+  "n_clean_laps": 11,
+  "sample_rate_hz": 27.16,
+  "duration_s": 1824.42,
+  "best_lap": 10,
+  "best_lap_time_s": 93.173,
+  "throttle_max_observed": 90.98,
+  "speed_max_obd_mph": 122.41,
+  "rpm_max": 8160,
+  "coolant_min_f": 186.8,
+  "coolant_max_f": 208.4,
+  "iat_first_f": 125.6,
+  "iat_max_f": 125.6,
+  "trackaddict_start_finish": {
+    "lat": 45.595014,
+    "long": -122.694484
+  },
+  "trackaddict_split_points": [
+    {
+      "index": 1,
+      "lat": 45.598528,
+      "long": -122.702656
+    },
+    {
+      "index": 2,
+      "lat": 45.599771,
+      "long": -122.698422
+    },
+    {
+      "index": 3,
+      "lat": 45.596368,
+      "long": -122.690747
+    }
+  ],
+  "raw_csv_path": "D:\\Projects\\lap-analyzer\\data\\raw\\pir\\Log-20240829-103904 Portland Intl. Raceway - 1.33.067.csv"
+}

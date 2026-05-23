@@ -1,0 +1,9 @@
+{
+  "session_id": "_synthetic_centerline",
+  "track_id": "pir",
+  "synthetic": true,
+  "source": "data/corpus/pir_centerline.parquet",
+  "purpose": "Canonical track centerline. Reference for track_dist_m alignment. Not a real recording.",
+  "n_grid_points": 3198,
+  "grid_spacing_m": 1.0
+}

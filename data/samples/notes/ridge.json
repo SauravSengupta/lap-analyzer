@@ -1,0 +1,12 @@
+{
+  "20251017-092131": {"exclude": "wet"},
+  "20251017-101755": {"exclude": "wet"},
+  "20251017-132044": {"exclude": "wet"},
+  "20251018-092848": {"exclude": "wet"},
+  "20260501-091118": {"exclude": "off-pace"},
+  "20250926-153405": {"exclude": "single-lap"},
+  "20260410-111354": {"exclude": "misfire"},
+  "20250518-100457": {"flag": "gps_unreliable", "reason": "session-wide drift median ~15m, max 33m"},
+  "20251018-105948": {"flag": "gps_unreliable", "reason": "drift median ~10m, max 17m across all clean laps"},
+  "20260516-114331": {"reference": true, "reason": "instructor driving the user's car, novice group — fast through individual corners but lots of slowing to create space"}
+}

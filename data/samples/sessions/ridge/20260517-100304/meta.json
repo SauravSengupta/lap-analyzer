@@ -1,0 +1,41 @@
+{
+  "session_id": "20260517-100304",
+  "track": "ridge",
+  "vehicle": "2014 Porsche Cayman",
+  "date_utc": "2026-05-17T17:03:05Z",
+  "n_laps": 12,
+  "n_clean_laps": 10,
+  "sample_rate_hz": 26.77,
+  "duration_s": 1881.42,
+  "best_lap": 9,
+  "best_lap_time_s": 121.286,
+  "throttle_max_observed": 90.98,
+  "speed_max_obd_mph": 126.138,
+  "rpm_max": 7878,
+  "coolant_min_f": 188.6,
+  "coolant_max_f": 204.8,
+  "iat_first_f": 145.4,
+  "iat_max_f": 145.4,
+  "trackaddict_start_finish": {
+    "lat": 47.254699,
+    "long": -123.192475
+  },
+  "trackaddict_split_points": [
+    {
+      "index": 1,
+      "lat": 47.256635,
+      "long": -123.184728
+    },
+    {
+      "index": 2,
+      "lat": 47.257012,
+      "long": -123.188934
+    },
+    {
+      "index": 3,
+      "lat": 47.25588,
+      "long": -123.194524
+    }
+  ],
+  "raw_csv_path": "D:\\Projects\\lap-analyzer\\data\\raw\\ridge\\Log-20260517-100304 The Ridge - Full Track - 2.01.246.csv"
+}
