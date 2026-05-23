@@ -12,7 +12,9 @@
 
 ## 📍 RESUME HERE (last updated 2026-05-22)
 
-**Status:** Phases 0-3 done. **At CHECK-IN 3 passed — ready for Phase 4 (sample data + finalize .gitignore).** CHECK-IN 2 resolved: ORP deferred to post-publish, PIR locked.
+**Status:** Phases 0-4 done. **CHECK-IN 4 passed (user visually verified sample-mode render) — ready for Phase 5 (docs).** CHECK-IN 2 resolved: ORP deferred, PIR locked.
+
+**Phase 4 done — committed sample bundle (~11MB) under `data/samples/`:** 3 sessions/track (pir 20240829-103904/20250522-101214/20240829-132325; ridge 20260517-100304/20250307-110826/20251018-105948) + self-consistent sample corpus (rebuilt from just those: pir 32 laps, ridge 26 laps) + centerlines + notes + `_synthetic_centerline`. `.gitignore`: `data/*` + `!data/samples/`. Shipped 3 (not 1) because the top-decile band pool needs >1 lap or the comparison bands collapse to a line — at 3 it's 8 (pir)/11 (ridge) laps. Quickstart confirmed working: `DATA_ROOT=data/samples PYTHONPATH=. python -m streamlit run visualizer/app.py`; picker shows only the 3 shipped dates, bands have width. Git commits through `4479aaf`.
 
 **GIT IS NOW INITIALIZED (changed from the original plan).** User asked to set up git early to de-risk the Phase 3 restructure. Local-only, no remote yet (Phase 7 adds remote). Commits so far: `e3b51de` baseline (Phases 0-2), `5d9f6cc` Phase 3 restructure. `.gitignore` excludes data/ (samples carved back in Phase 4), .venv/, .claude/, scratch/, scripts/*.png. The old "comment out, don't delete" convention is relaxed (history preserved) — but don't retroactively delete pre-existing commented blocks without asking.
 
@@ -42,7 +44,7 @@
 
 **Side effects from Phase 1 still relevant:** T8-T11 page renamed to `1_Ridge_Downshift_T8-T11.py` with `track!="ridge"` guard (verified: shows explainer + `st.stop()`, no crash on PIR) — Phase 5 owes `docs/NEW-TRACK.md` "writing track-specific pages". Backup-file filter in `available_tracks()` → backups move to `scratch/` in Phase 3 Task 3.6.
 
-**Next action when resuming:** Phase 4 Task 4.1 — pick one Ridge + one PIR sample session (clean, top-third pace, all 4 outputs present), confirm with user, copy under `data/samples/`. Then Task 4.2 finalizes `.gitignore` (carve `!data/samples/` back in — note .gitignore already exists from the early git setup, so this is an EDIT not a create), Task 4.3 verifies sample-only mode (`DATA_ROOT=data/samples`). ORP deferred to post-publish.
+**Next action when resuming:** Phase 5 (docs). Write LICENSE (MIT — get user's name for copyright line), rewrite README.md (the current 18KB README has design rationale that moves to docs/ARCHITECTURE.md), create docs/PIPELINE.md (5 CLI scripts + TrackAddict CSV column contract + output schema — USE the corrected lap_dist_m understanding, not the original wrong plan text), docs/NEW-TRACK.md (bootstrap walkthrough w/ PIR lessons: pin curation, the seed_pir_corners method, T4/T9 special-case judgment, the lap-wrap centerline gotcha), CONTRIBUTING.md. telemetry-pipeline-spec.md at root is the OLD detailed spec — fold relevant bits into PIPELINE.md then decide whether to keep/move it. Phase 5 owes the "writing track-specific analysis pages" section promised when the T8-T11 page was renamed.
 
 **Execution conventions:**
 - Subagent-driven was the CHECK-IN 0 decision, but Phase 2 ran mostly inline because the work was exploratory/iterative (data analysis with the user in the loop) — that's the right call when tasks need a tight feedback loop rather than a fixed spec.
