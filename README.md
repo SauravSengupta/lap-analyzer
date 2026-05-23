@@ -85,6 +85,7 @@ and every other design choice is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 lap_analyzer/        # the library — one module per pipeline component
   cli/               # one CLI per component (python -m lap_analyzer.cli.<name>)
 visualizer/          # Streamlit app + track-specific analysis pages
+tests/               # pytest suite + tests/SPEC.md (intent-first behavioral spec)
 scripts/             # bootstrap & diagnostic tools (e.g. seed_pir_corners.py)
 tracks/              # per-track JSON definitions (ridge.json, pir.json)
 docs/                # ARCHITECTURE · PIPELINE · NEW-TRACK

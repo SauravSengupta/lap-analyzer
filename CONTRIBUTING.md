@@ -30,9 +30,22 @@ that and may need adjusting for your data — they're documented where they live
 
 ## Tests
 
-Test coverage is currently sparse — that's known and being worked on in a
-separate effort. Don't take the absence of a test as license to assume a path is
-unused.
+The suite lives in `tests/` and runs with pytest:
+
+```
+pip install -e ".[dev]"   # pytest + ruff
+python -m pytest
+```
+
+Tests assert **documented design intent** — the contracts and invariants in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+[docs/PIPELINE.md](docs/PIPELINE.md) — rather than snapshotting whatever the code
+currently returns. [`tests/SPEC.md`](tests/SPEC.md) is the behavioral spec the
+suite was derived from; if you change a contract, update the spec and the test
+together. Pure functions are unit-tested on synthetic inputs; IO-heavy stages
+(labeler, quality, corpus, centerline) are exercised against the committed
+`data/samples/` bundle. Known data limitations (e.g. GPS-compressed section
+times) are marked `xfail`, not asserted as correct.
 
 ## Conventions
 
