@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
 from ..config import sessions_dir
 from ..labeler import build_reference_index, label_session, load_track

@@ -333,5 +333,5 @@ def install_centerline(
     print(f"Wrote {synth_dir / 'meta.json'}")
     print(f"\nNow update tracks/{track}.json reference_lap to:")
     note = f"Synthetic centerline at {1.0:.0f}m resolution built from corpus median. See data/corpus/{track}_centerline.parquet."
-    print(f'  {{"session_id": "_synthetic_centerline", "lap": 1,')
+    print('  {"session_id": "_synthetic_centerline", "lap": 1,')
     print(f'   "notes": "{note}"}}')
