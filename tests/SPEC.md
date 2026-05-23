@@ -1,0 +1,604 @@
+# lap_analyzer behavioral spec (clean-room test source)
+
+This is the ONLY source of truth about behavior for the test suite. It is
+derived from `docs/ARCHITECTURE.md` (design intent) and `docs/PIPELINE.md`
+(schema and rounding). **Test authors: do not read `lap_analyzer/` source.**
+
+## Conventions
+
+- **Units / rounding:** distances and speeds are rounded to 2 dp; g-forces and
+  throttle to 3 dp. Use `pytest.approx(..., abs=0.01)` for 2-dp fields and
+  `abs=0.001` for 3-dp fields unless an entry says otherwise.
+- **Prefer property/contract/invariant tests** over golden exact-value asserts.
+  Golden asserts only where THIS spec states an exact value, and sparingly.
+- **Cite the spec** in a one-line comment on every test
+  (e.g. `# SPEC: normalize.normalize_dataframe — lat_g sign`).
+- **KNOWN-LIMITATION** items must be `@pytest.mark.xfail(reason=..., strict=False)`
+  or skipped — never asserted as fixed.
+- **Do not reverse-engineer expected numbers from sample data.** You may load
+  files under `data/samples/` to drive integration tests, but assert against the
+  documented schema/invariants here, not against values you happen to observe.
+- **Fixtures** (in `tests/conftest.py`): `sample_data_root` (sets `DATA_ROOT` to
+  the committed bundle), `make_trackaddict_csv(columns, *, session_id=...,
+  vehicle=..., end_point=..., filename=...)`, `make_lap_samples(n=200, **overrides)`.
+- The sample bundle has tracks `ridge` and `pir`, 3 real sessions each plus a
+  `_synthetic_centerline` session, a corpus, centerlines, and notes.
+
+---
+
+## config
+
+Import: `from lap_analyzer.config import data_root, raw_dir, sessions_dir, corpus_dir, tracks_dir`.
+
+- **Interface:** all are zero-arg except `raw_dir(track)` and `sessions_dir(track)`.
+  All return `pathlib.Path`.
+- **Contract:** `data_root()` resolves `DATA_ROOT` (env var, default `"data"`)
+  relative to the repo root. `raw_dir(t)` = `data_root()/raw/<t>`; `sessions_dir(t)`
+  = `data_root()/sessions/<t>`; `corpus_dir()` = `data_root()/corpus`.
+- **Invariants:**
+  - `data_root()` reads the env var **on every call** — changing `DATA_ROOT`
+    between calls changes the result (no caching).
+  - An **absolute** `DATA_ROOT` is honored as-is (wins over the repo-root join).
+  - `tracks_dir()` is **independent of `DATA_ROOT`** — always repo-root `/tracks`.
+  - All returned paths are absolute.
+
+---
+
+## schemas.SessionMeta
+
+Import: `from lap_analyzer.schemas import SessionMeta`. (pydantic v2 BaseModel.)
+
+- **Required fields:** `session_id` (str), `track` (str), `vehicle` (str),
+  `date_utc` (datetime), `n_laps` (int), `n_clean_laps` (int), `sample_rate_hz`
+  (float), `duration_s` (float), `throttle_max_observed` (float),
+  `speed_max_obd_mph` (float), `rpm_max` (int), `raw_csv_path` (str).
+- **Optional fields (default `None`):** `best_lap`, `best_lap_time_s`,
+  `coolant_min_f`, `coolant_max_f`, `iat_first_f`, `iat_max_f`,
+  `trackaddict_start_finish` (dict).
+- **`trackaddict_split_points`** defaults to `[]` (list of dict).
+- **Invariants:** constructing with only the required fields succeeds and leaves
+  optionals at their defaults; `model_dump_json()` → `model_validate_json()`
+  round-trips; omitting a required field raises a pydantic `ValidationError`.
+
+---
+
+## normalize.session_id_from_filename
+
+Import: `from lap_analyzer.normalize import session_id_from_filename`.
+Signature: `(path) -> str`.
+
+- **Contract:** extracts `YYYYMMDD-HHMMSS` from a filename matching `Log-<id>`
+  (regex search anywhere in the basename).
+- **Examples:** `"Log-20260517-100304 Ridge.csv"` → `"20260517-100304"`.
+- **Edge case:** a name with no `Log-<8digits>-<6digits>` pattern raises
+  `ValueError`.
+
+## normalize._parse_coords
+
+Import: `from lap_analyzer.normalize import _parse_coords`.
+Signature: `(s: str) -> dict | None`.
+
+- **Contract:** parses `"<lat>, <long>"`, ignoring anything after an `@` and a
+  trailing comma. Returns `{"lat": float, "long": float}`.
+- **Edge cases:** fewer than 2 comma-parts → `None`; a part that isn't a float
+  → `None`. `"45.5, -122.6 @ 2026..."` → `{"lat": 45.5, "long": -122.6}`.
+
+## normalize.parse_metadata_header
+
+Import: `from lap_analyzer.normalize import parse_metadata_header`.
+Signature: `(path) -> dict`.
+
+- **Contract:** reads only the leading `#`-prefixed comment block (stops at the
+  first non-`#` line). Recognizes `# Vehicle: X` → `meta["vehicle"]=X`,
+  `# End Point: <lat>, <long> @ ...` → `meta["start_finish"]={"lat","long"}`,
+  `# Split Point N: <lat>, <long> @ ...` → appends `{"index": N, "lat", "long"}`
+  to `meta["split_points"]`.
+- **Invariants:** the returned dict always carries `raw_csv_path` (str path) and
+  a `split_points` list (possibly empty); unrecognized comment lines are ignored.
+
+## normalize.normalize_dataframe
+
+Import: `from lap_analyzer.normalize import normalize_dataframe`.
+Signature: `(raw: pd.DataFrame, session_id: str, canonical_lap_length_m: float | None = None) -> tuple[pd.DataFrame, dict]`.
+The `raw` frame is assumed already column-renamed to canonical names (as
+`read_csv` does): `t, lap, lat, long, speed_mph, speed_mph_gps, lat_g, long_g,
+brake, rpm, throttle_raw, coolant_f, iat_f`, etc. **The input must contain all 6
+canonical OBD channels — `rpm, speed_mph, throttle_raw, coolant_f, iat_f,
+manifold_psi` — because they are forward/back-filled together. `manifold_psi` is
+required on input even though it is dropped from the output.**
+
+- **Contract (PIPELINE.md):** returns `(out_df, {"throttle_max_observed": <float>})`
+  where `out_df` has exactly the documented `samples.parquet` columns
+  (`session_id, t, lap, dist_m, dist_lap_m, speed_mph, speed_mph_gps,
+  throttle_norm, brake, rpm, lat_g, long_g, coolant_f, iat_f, lat, long,
+  altitude_m, gps_accuracy_m`).
+- **Invariants (ARCHITECTURE / axis note):**
+  - **`lat_g` is negated:** canonical `lat_g == -raw["lat_g"]`. A raw left-turn
+    (raw > 0) becomes negative; **positive `lat_g` = right turn.**
+  - **OBD fill:** the 6 OBD channels are forward- then back-filled — given ≥1
+    non-null value per channel, the output has no NaN in those columns.
+  - **`throttle_norm` = `throttle_raw / max(throttle_raw)`**, in `[0, 1]`, max
+    → 1.0. If `max(throttle_raw) == 0`, `throttle_norm` is `0.0` everywhere (no
+    division by zero).
+  - **`dist_m`** is trapezoidal integration of `speed_mph·0.44704` over `t`,
+    starting at 0; **monotonic non-decreasing** for non-negative speeds.
+  - **`dist_lap_m`** starts at 0 at each lap's first sample. With
+    `canonical_lap_length_m` set, each lap's `max(dist_lap_m)` is rescaled to
+    exactly that value (per-lap). With it `None`, no rescale.
+  - dtypes: `lap` int32, `brake` int8, `rpm` int32.
+- **Edge case:** a single-row frame yields `dist_m == 0` (no integration step).
+- **Tolerances:** speeds/dist 2 dp tolerance is fine; `lat_g` exact-negation can
+  be asserted exactly.
+
+## normalize.compute_lap_times
+
+Import: `from lap_analyzer.normalize import compute_lap_times`.
+Signature: `(df: pd.DataFrame) -> pd.DataFrame` with columns `lap, lap_time_s`.
+
+- **Contract:** for laps in ascending order, each lap's time is `next_lap_start_t
+  − this_lap_start_t`. The **final lap is treated as an incomplete in-lap**: its
+  time is `last_sample_t − this_lap_start_t`. Rounded to 3 dp.
+- **Invariant:** one row per distinct `lap`; a synthetic frame with known per-lap
+  start times yields the documented differences (e.g. laps starting at t=0,100,
+  205 with last sample at 305 → times 100.0, 105.0, 100.0).
+
+## normalize.lap_summary
+
+Import: `from lap_analyzer.normalize import lap_summary`.
+Signature: `(df: pd.DataFrame, lap_times: pd.DataFrame) -> pd.DataFrame`.
+
+- **Contract:** one row per lap with the documented `laps.csv` columns.
+- **Invariants (cleanness is shape-only):**
+  - **`is_clean` is `False` only for the first and last lap.** `clean_reason` is
+    `"warmup"` for the first lap, `"cooldown"` for the last, `""` otherwise.
+    `is_clean == (clean_reason == "")`. (It is NOT a quality filter.)
+  - `pct_wot` = fraction of samples with `throttle_norm ≥ 0.95`.
+  - `pct_braking` = fraction with `brake == 1`.
+  - `max_decel_g` = `max(−long_g)` (most-negative long_g surfaces as a positive
+    decel magnitude); `max_accel_g` = `max(long_g)`.
+  - `lap_dist_m` = `max(dist_lap_m)` for the lap.
+- See KNOWN-LIMITATION note under "cleanness" — do not treat `is_clean` as a
+  data-quality signal.
+
+## normalize.reference_session_ids
+
+Import: `from lap_analyzer.normalize import reference_session_ids`.
+Signature: `(track: str) -> set[str]`.
+
+- **Contract:** reads `data/notes/<track>.json` and returns the set of session
+  ids whose annotation has a truthy `"reference"` key. Missing notes file →
+  empty set. (Use `sample_data_root`; assert it returns a `set`, and that a
+  session NOT marked reference is absent.)
+
+## normalize.normalize_session (MissingOBDError path)
+
+Import: `from lap_analyzer.normalize import normalize_session, MissingOBDError`.
+Signature: `normalize_session(csv_path, track, out_dir) -> SessionMeta` — `out_dir`
+is a required positional (the directory the `<session_id>/` output folder is
+created under).
+
+- **Edge case (KNOWN behavior — OBD dropout):** if the raw CSV is missing any of
+  the 6 OBD columns, `normalize_session` raises `MissingOBDError` and writes no
+  output. Build a CSV with `make_trackaddict_csv(columns=...)` that OMITS the OBD
+  columns and assert the raise. (~3–4% of real sessions log without OBD; this is
+  expected and normalized away.)
+
+---
+
+## labeler.load_track
+
+Import: `from lap_analyzer.labeler import load_track`.
+Signature: `(track_id: str) -> Track` (dataclass).
+
+- **Contract:** parses `tracks/<id>.json`. `Track` has `track_id, name,
+  direction, lap_length_m` (from `lap_length_internal_m`), `corners` (list of
+  `Corner`), `calibration_anchors`, `reference_session_id`, `reference_lap`.
+- **Invariants:**
+  - `corners` are **sorted ascending by `start_m`**.
+  - Each `CalibrationAnchor` is populated with its corner's `start_m`/`end_m`;
+    anchors whose `corner_id` has no matching corner are dropped.
+  - `reference_session_id`/`reference_lap` come from the JSON `reference_lap`
+    block (`""`/`0` if absent).
+- Use the real `tracks/ridge.json` / `tracks/pir.json` (read via `tracks_dir()`,
+  not `data/samples`).
+
+## labeler.ReferenceIndex.project / .lookup
+
+Construct a `ReferenceIndex` via `build_reference_index(track)` (needs
+`sample_data_root` so the reference session is found), or test `.project`
+arithmetic directly on a hand-built instance if feasible.
+
+- **`.project(lat, lon)`:** returns an `(N, 2)` array of local meters about the
+  index center: `x = (lon − center_lon)·m_per_deg_lon`, `y = (lat − center_lat)·
+  m_per_deg_lat`. The center maps to `(0, 0)`.
+- **`.lookup(lat, lon)`:** returns `(track_dist_m, dist_to_ref_m)` for the nearest
+  reference sample. A point coincident with a reference sample has
+  `dist_to_ref_m ≈ 0` and returns that sample's `dist_lap_m`.
+
+## labeler.compute_lap_drift
+
+Import: `from lap_analyzer.labeler import compute_lap_drift`.
+Signature: `(lap_samples, anchors, m_per_deg_lat, m_per_deg_lon) -> (drift_lat_m | None, drift_lon_m | None, n_used: int, disagreement_m | None)`.
+
+- **Contract (ARCHITECTURE §2 — the key intent):** for each anchor, find the
+  closest sample within a **100 m** radius of the anchor's `(ref_lat, ref_long)`;
+  the per-anchor offset is `(sample − anchor)` in meters. The lap's drift is the
+  **median** of those offsets.
+- **Invariants:**
+  - **Median aggregation is robust to a single bad anchor:** with several good
+    anchors agreeing and one wildly-off anchor, the returned drift stays at the
+    good cluster's median (the outlier does not move it). This is the property to
+    test — construct anchors + a synthetic lap so most offsets agree and one is
+    far off, and assert the median (not the mean) is returned.
+  - `n_used == 1` → `disagreement == 0.0`.
+  - No anchor within radius → `(None, None, 0, None)`.
+  - With ≥2 anchors, `disagreement_m = sqrt(mean(per-anchor deviations² from the
+    median))` ≥ 0.
+- Pass `m_per_deg_lat = 111_132.0` and `m_per_deg_lon =
+  111_132.0·cos(radians(center_lat))` (the values `build_reference_index`
+  computes) so meters are consistent.
+
+## labeler.label_samples — corner segmentation
+
+Import: `from lap_analyzer.labeler import label_samples` (needs a `Track` and a
+`ReferenceIndex`; or test the segmentation contract via a small session under
+`sample_data_root`). Adds `track_dist_m, track_dist_offset_m`, drift columns, and
+`corner`.
+
+- **Contract (segmentation):** the lap is partitioned by `track_dist_m` into the
+  corner boxes `[start_m, end_m]` (labeled by corner id) and the gaps between
+  them (straights). A straight is labeled **`S_post_<id-of-preceding-corner>`**.
+- **Invariant (front-straight wrap):** the segment before the first corner is
+  labeled `S_post_<last-corner-id>` — the start/finish straight is attributed to
+  the final corner, wrapping around. Every sample gets exactly one `corner` label.
+
+## labeler.build_corner_transit
+
+Import: `from lap_analyzer.labeler import build_corner_transit`.
+Signature: `(lap_samples: pd.DataFrame, corner: Corner) -> dict | None`. Build a
+`Corner` via the dataclass (`from lap_analyzer.labeler import Corner`) and a lap
+via `make_lap_samples`, overriding `track_dist_m`, `speed_mph`, `lat_g`, etc.
+**`Corner` is a plain dataclass with all 8 fields required (no defaults):
+`id, name, start_m, end_m, apex_m, secondary_apex_m, type, notes`** — pass them
+all (`name`/`notes` may be `None`, `secondary_apex_m` `None` or a float).
+
+- **Edge case:** fewer than 3 samples inside `[start_m, end_m]` → returns `None`.
+- **Invariants (apex metrics — ARCHITECTURE §4):**
+  - `apex_dist_offset_m == round(min_speed_dist_m − corner.apex_m, 2)`.
+  - `latg_peak_offset_m == round(latg_peak_dist_m − corner.apex_m, 2)`.
+  - `latg_peak_dist_m` is the `track_dist_m` of the **max |lat_g|** sample inside
+    the corner; `min_speed_dist_m` is the `track_dist_m` of the min-speed sample.
+  - input-timing offsets (`brake_on_dist_m`, `throttle_lift_dist_m`,
+    `wot_dist_m`, …) are **offsets from `corner.start_m`** (value − start_m), or
+    `None` when the event never occurs in the window.
+  - `max_lat_g` is reported as the max of **|lat_g|** (sign-agnostic magnitude).
+  - `peak_brake` is an int (max of the 0/1 brake channel).
+- Construct a lap with a known V-shaped speed profile and a known lat_g peak to
+  assert the offsets resolve to the expected signed values.
+
+## labeler.build_session_corners
+
+Import: `from lap_analyzer.labeler import build_session_corners`. Signature:
+`build_session_corners(samples, laps, track, session_id, date) -> pd.DataFrame`.
+**It operates on already-labeled `samples` (a DataFrame carrying `track_dist_m`,
+`corner`, and `gps_drift_*` columns) plus the `laps` DataFrame — it does NOT read
+a session directory or take a `ReferenceIndex`.** Drive it from a
+`sample_data_root` session, whose `samples.parquet` is already labeled:
+`build_session_corners(pd.read_parquet(.../samples.parquet),
+pd.read_csv(.../laps.csv), track, "<sid>", "<YYYY-MM-DD>")`.
+
+- **Contract:** emits one row per (clean lap × corner). Only laps with
+  `is_clean == True` are processed; laps with < 50 samples are skipped; the
+  per-lap drift columns are pulled from the lap's first sample. Assert
+  clean-lap-only and the presence of `session_id, date, lap, corner_id` + drift
+  columns.
+
+---
+
+## quality.compute_quality
+
+Import: `from lap_analyzer.quality import compute_quality`. Signature:
+`(track: str) -> pd.DataFrame`. **Integration tier** — run with `sample_data_root`.
+
+- **Contract / invariants (ARCHITECTURE "Quality flags"):**
+  - `lap_pace_decile` ∈ `0..9`, computed by `qcut` on clean laps' `lap_time_s`;
+    **0 = fastest 10%.** (Assert the range and that 0 corresponds to the smallest
+    lap times, not exact bin membership.)
+  - per-corner robust z-scores `latg_peak_offset_z`, `entry_speed_z` use
+    `(x − median) / (MAD · 1.4826)`; a corner with MAD ≤ 0.1 yields NaN z (no
+    divide-by-near-zero).
+  - `gps_drift_mag_m == hypot(gps_drift_lat_m, gps_drift_lon_m)`.
+  - `neighborhood_offset_max_m` = max of this corner's `track_dist_offset_max_m`
+    and those of its two corner-sequence neighbors (wraps at start/finish).
+  - **`transit_reliable == (gps_drift_disagreement_m ≤ 20) AND
+    (track_dist_offset_max_m ≤ 40) AND (neighborhood_offset_max_m ≤ 40)`** — assert
+    this boolean relationship holds row-wise on the returned frame.
+  - **`lap_reliable`** is `True` iff **every** transit on that `(session_id, lap)`
+    is `transit_reliable` (group-min). Assert: no row has `lap_reliable=True`
+    while any sibling row on the same lap has `transit_reliable=False`.
+  - Reference sessions are excluded from the corpus-wide stats.
+- Thresholds live in `quality` as `DRIFT_DISAGREEMENT_LIMIT_M=20`,
+  `TRANSIT_OFFSET_LIMIT_M=40`, `NEIGHBORHOOD_OFFSET_LIMIT_M=40` (importable).
+
+---
+
+## corpus.build_corpus
+
+Import: `from lap_analyzer.corpus import build_corpus`. Signature:
+`(track: str) -> dict`. **Integration tier** — but note it WRITES to
+`corpus_dir()`; under `sample_data_root` that would overwrite the committed
+sample corpus, so point `DATA_ROOT` at a **copy** in `tmp_path` (copy the
+relevant `sessions/<track>` tree) before calling, OR assert only the
+no-input edge case.
+
+- **Edge case:** raises `FileNotFoundError` when no `corners.parquet` exists under
+  the track's sessions dir (e.g. a fresh `tmp_path` `DATA_ROOT`).
+- **Invariants:** returns a dict with keys `out_path, n_sessions, n_transits,
+  n_laps`; reference sessions are excluded (so `n_sessions` counts non-reference
+  session dirs that have a `corners.parquet`); `n_laps` = distinct
+  `(session_id, lap)` pairs.
+
+---
+
+## analysis.section_bounds
+
+Import: `from lap_analyzer.analysis import section_bounds`. Signature:
+`(track_def: dict, pre_m=50.0, post_cap_m=250.0) -> dict[str, tuple[float,float]]`.
+`track_def` is the parsed `tracks/<t>.json` dict (load via `tracks_dir()`), or a
+small hand-built dict `{"corners": [{"id","start_m","end_m"}...],
+"lap_length_internal_m": ...}`.
+
+- **Contract:** for each corner, `start = max(0, corner.start_m − pre_m)`,
+  `end = min(next_corner.start_m, corner.end_m + post_cap_m)`. For the last
+  corner, the "next start" is `lap_length_internal_m` (fallback
+  `last.end_m + 200`).
+- **Invariant:** the window always contains the corner box; `start ≥ 0`; `end`
+  never spills past the next corner's start.
+
+## analysis._first_crossing_t
+
+Import: `from lap_analyzer.analysis import _first_crossing_t`. Signature:
+`(xs: np.ndarray, ts: np.ndarray, target: float, after_t: float | None = None) -> float | None`.
+
+- **Contract:** time of the first **upward** crossing of `target`
+  (`xs[i] < target ≤ xs[i+1]`), linearly interpolated between samples.
+- **Invariants:**
+  - no upward crossing → `None`.
+  - `after_t` restricts to crossings at/after that time.
+  - exact crossing on a sample / zero-width step (`xs[i+1] == xs[i]`) → returns
+    `ts[i]` (no division by zero).
+  - For `xs=[0,10]`, `ts=[0,1]`, `target=5` → `0.5`.
+
+## analysis.find_gear_bands
+
+Import: `from lap_analyzer.analysis import find_gear_bands`. Signature:
+`(ratios, ratio_lo=30, ratio_hi=260, n_bins=230, min_peak_frac=0.005, min_separation=8.0) -> np.ndarray`.
+
+- **Contract:** clusters rpm/speed ratios into gear-band centers. Histograms the
+  in-range ratios, keeps strict local maxima at least `min_peak_frac × tallest
+  bin`, merges maxima closer than `min_separation` (keeping the first), refines
+  each to the mean of nearby ratios. Returns **sorted ascending** band centers.
+- **Invariants:**
+  - empty input (or none in `[lo, hi]`) → empty array.
+  - a synthetic ratio distribution with 3 well-separated tight clusters returns
+    ~3 ascending centers, each near its cluster mean (assert count and
+    approximate locations, not exact floats).
+- **Gear semantics (read with `derive_gear`):** smallest ratio = **tallest**
+  gear; largest ratio = **shortest** (lowest) gear.
+
+## analysis._confirm_runs
+
+Import: `from lap_analyzer.analysis import _confirm_runs`. Signature:
+`(raw: np.ndarray, n_dwell: int) -> np.ndarray`.
+
+- **Contract:** any maximal run of equal **non-NaN** values shorter than
+  `n_dwell` is set to NaN; NaN runs are never modified; non-NaN runs ≥ `n_dwell`
+  are preserved.
+- **Invariant:** e.g. `[1,1,1,2,1,1,1]` with `n_dwell=2` → the single `2`
+  becomes NaN, the `1`-runs survive.
+
+## analysis.derive_gear
+
+Import: `from lap_analyzer.analysis import derive_gear`. Signature:
+`(samples: pd.DataFrame, bands: np.ndarray, min_dwell_s=0.3) -> pd.Series`.
+Needs `t, rpm, speed_mph` columns (use `make_lap_samples`).
+
+- **Contract:** snaps each qualifying sample (`rpm > 1200` AND `speed_mph > 8`)
+  to the nearest band, suppresses sub-dwell runs (clutch-slip transients) and
+  forward-fills the held gear, then re-NaNs samples with `rpm == 0`.
+- **Invariants (the key intent — gear index orientation):**
+  - **Gear index 0 = the shortest / lowest gear (the highest rpm/speed ratio).
+    Higher index = taller gear.** (Implementation: `(bands.size − 1) − argmin|ratio
+    − bands|` over ratio-ascending bands. Real gear ≈ index + 1.) Construct a lap
+    whose ratio sits clearly in the highest-ratio band and assert gear index 0;
+    one clearly in the lowest-ratio band → index `len(bands) − 1`.
+  - samples with `rpm == 0` → NaN gear.
+  - samples that don't qualify (`rpm ≤ 1200` or `speed ≤ 8`) get no fresh
+    assignment (NaN unless filled from a held gear).
+  - the returned Series is aligned to `samples.index`.
+
+## analysis.span_time
+
+Import: `from lap_analyzer.analysis import span_time`. Signature:
+`(lap_samples, dist_a, dist_b, obd_tol_m=None) -> float | None`. Needs
+`t, track_dist_m, dist_lap_m`.
+
+- **Contract:** elapsed seconds between the first crossing of `dist_a` and the
+  first later crossing of `dist_b`.
+- **Invariants:**
+  - `None` if either bound isn't crossed.
+  - the OBD-distance sanity gate: returns `None` when `|obd_integrated_distance −
+    (dist_b − dist_a)| > tol`. With `obd_tol_m=None`, `tol = max(15.0, 0.04 ×
+    (dist_b − dist_a))` (scales with span so long multi-corner spans aren't
+    rejected for normal racing-line variation).
+  - a clean synthetic lap where `track_dist_m` and `dist_lap_m` advance together
+    returns the true elapsed time.
+
+## analysis.section_range_bounds
+
+Import: `from lap_analyzer.analysis import section_range_bounds`. Signature:
+`(track_def, from_id, to_id, pre_m=50.0, post_cap_m=250.0) -> tuple[float,float]`.
+
+- **Contract:** window spanning corners `from_id..to_id` inclusive: `a = max(0,
+  from.start_m − pre_m)`, `b = min(start of corner after to_id, to.end_m +
+  post_cap_m)`.
+- **Invariants:**
+  - `from_id == to_id` returns exactly `section_bounds(track_def)[from_id]`.
+  - raises `ValueError` when `to_id` precedes `from_id` in track order.
+
+## analysis.classify_t8_section
+
+Import: `from lap_analyzer.analysis import classify_t8_section`. Signature:
+`(samples, track_def, bands, min_dwell_s=0.3) -> dict`. Uses corners T8/T10 and
+T8.apex_m; build a `track_def` dict with those corners + a `make_lap_samples`
+window with `track_dist_m`, `rpm`, `speed_mph`.
+
+- **Contract:** returns `{label, excluded_reason, downshift_dist_m,
+  t8_apex_gear}`. Scans `[T8.start − 50, T10.end]`.
+- **Invariants:**
+  - `< 10` samples in the window → `label="excluded"`, `excluded_reason="ambiguous"`.
+  - all `rpm == 0` in the window → `excluded_reason="no-obd"`.
+  - zero downshifts → `label="no-downshift"`, `excluded_reason=None`.
+  - exactly one downshift at `loc ≤ T8.apex_m` → `label="downshift"`.
+  - exactly one downshift past `T8.apex_m` (still inside the window) →
+    `excluded_reason="traffic"`.
+  - more than one downshift → excluded.
+- **KNOWN-LIMITATION** (memory: T8–T11 traffic contamination): the cohort filter
+  doesn't catch traffic lifts in general; do not assert the classifier perfectly
+  separates traffic from clean downshifts on real data — test only the documented
+  rule above on synthetic windows.
+
+## analysis.top_decile_laps / lap_summary / lap_index
+
+Import from `lap_analyzer.analysis`. **Integration tier** with `sample_data_root`
+(`load_corpus(track)` first).
+
+- `top_decile_laps(corpus) -> set[(session_id, int lap)]`: exactly the
+  `(session, lap)` pairs whose rows have `lap_pace_decile == 0`.
+- `lap_summary(corpus, session_id, lap) -> dict`: empty `{}` when that lap isn't
+  in the corpus; otherwise includes `n_transits`, `n_reliable_transits`,
+  `lap_reliable`, `max_speed_mph`.
+- `lap_index(corpus, track=None) -> pd.DataFrame`: one row per `(session_id, lap)`;
+  when `track` is given, joins `lap_time_s`/`is_clean` from each session's laps.csv.
+
+---
+
+## corners.extract_lap_candidates
+
+Import: `from lap_analyzer.corners import extract_lap_candidates`. Signature:
+`(lap_df: pd.DataFrame, sample_rate_hz: float) -> list[dict]`. Needs
+`lat_g, speed_mph, dist_lap_m, t, long_g, throttle_norm, lat, long`.
+
+- **Contract:** smooths lat_g, finds |lat_g| peaks (`find_peaks`, height 0.4 g,
+  min spacing 3 s), and emits one candidate dict per peak with peak/entry/exit
+  distances and per-candidate offsets.
+- **Invariants:**
+  - `< 50` samples → `[]`.
+  - `direction` is `"right"` when the **smoothed** peak lat_g is `> 0`, else
+    `"left"` (consistent with the positive=right convention).
+  - offsets (`brake_on_offset_m`, etc.) are relative to the candidate's
+    `entry_dist_m`, or `None` when the event doesn't occur.
+  - **brake/throttle-lift onset is detected over a lookback window extending
+    `LOOKBACK_M` (150 m) before `entry_dist_m`** (mirrors
+    `labeler.build_corner_transit`), so braking that begins before turn-in is
+    captured — `brake_on_offset_m` is **negative** when braking starts before the
+    lat-G entry. (Throttle-return is still measured post-apex.)
+- Construct a lap with one clear right-hand lat_g hump (e.g. a Gaussian bump > 0.4
+  g) over ≥ 50 samples and assert a single `direction == "right"` candidate.
+
+## corners.extract_session_candidates
+
+Import: `from lap_analyzer.corners import extract_session_candidates`.
+Signature: `(session_dir: Path) -> pd.DataFrame`. **Integration tier** — point at
+a `sample_data_root` session dir.
+
+- **Invariants:** skips warmup/cooldown laps (uses `clean_reason`); when no
+  candidates are found returns an empty DataFrame whose columns equal
+  `CANDIDATE_COLUMNS` (importable from the module).
+
+---
+
+## fused_axis.compute_fused_dist
+
+Import: `from lap_analyzer.fused_axis import compute_fused_dist`. Signature:
+`(samples: pd.DataFrame, smooth_window=25) -> np.ndarray`. Needs `t, dist_lap_m,
+track_dist_m`.
+
+- **Contract:** `fused = dist_lap_m + lowpass(track_dist_m − dist_lap_m)` — OBD
+  distance supplies the smooth monotone base; the low-frequency part of the GPS−OBD
+  offset bends it onto the centerline.
+- **Invariants:**
+  - `< 2` rows → a copy of `dist_lap_m`.
+  - **output is monotonic non-decreasing** by construction (cumulative max),
+    even when `track_dist_m` jitters or steps backward.
+  - output is aligned to the input row order (rows may be unsorted by `t`).
+  - a sample whose `|track_dist_m − dist_lap_m| ≥ 50 m` (a teleport) does not drag
+    the low-pass — its offset is interpolated over from good neighbors.
+  - on clean data where `track_dist_m ≈ dist_lap_m`, fused ≈ `dist_lap_m`.
+
+---
+
+## centerline.build_centerline
+
+Import: `from lap_analyzer.centerline import build_centerline`. Signature:
+`build_centerline(sessions_dir, notes_path, lap_length_m, track_lat_deg, out_path,
+protected_ranges=None) -> pd.DataFrame` (also writes the parquet to `out_path`).
+`protected_ranges` is a list of `(start_m, end_m)` corner spans. **Integration
+tier** — heavy; verify against a **copied** Ridge tree (it reads every session's
+`samples.parquet`/`corners.parquet`/`laps.csv` and writes `out_path`, so copy
+`sessions/ridge` + `notes` + `corpus` into a tmp `DATA_ROOT` first). Asserting
+exact coordinates is out of scope; assert structure and the protected-range
+intent.
+
+- **Output schema:** a DataFrame / parquet with columns `track_dist_m, lat, long,
+  n, spread_m`, one row per 1 m grid point (`≈ lap_length_m` rows).
+- **Invariants (ARCHITECTURE §3 lap-wrap refinement):**
+  - bins **inside** a `protected_range` (corner box) are never rejected for
+    spread/fold — real corner line-variation is preserved.
+  - bins **outside** protected ranges with lateral spread > 6 m or sample pile-up
+    > 1.5× median bin count are rejected and filled by periodic interpolation.
+  - `track_dist_m` is increasing and within `[0, lap_length_m]`.
+- This is the canonical ruler; treat tests as schema/invariant checks plus a
+  determinism check (same inputs → identical output).
+
+
+
+## centerline.install_centerline
+
+Import: `from lap_analyzer.centerline import install_centerline`. Signature:
+`(track: str, centerline_path: Path, synth_dir: Path) -> None`. Use a `tmp_path`
+`synth_dir` and a real `data/samples/corpus/<track>_centerline.parquet` as input.
+
+- **Contract:** writes `samples.parquet`, `laps.csv`, `meta.json` into `synth_dir`
+  shaped like a normalized session.
+- **Invariants:**
+  - `samples.parquet` has the normalized-session columns; `lat`/`long` come from
+    the centerline; unused channels (`speed_mph`, `throttle_norm`, …) are NaN
+    sentinels; `gps_accuracy_m` is `0.0` (the "perfect accuracy" sentinel).
+  - `laps.csv` has a single lap `1` marked `is_clean == True`.
+  - `meta.json` records `synthetic: true` and the source path.
+
+---
+
+## normalize CLI — status lines & exit codes
+
+Import: `from lap_analyzer.cli.normalize import main`. Call `main(argv: list[str])`
+and capture stdout (`capsys`). Point `DATA_ROOT` at a `tmp_path` and create CSVs
+with `make_trackaddict_csv`; create raw CSVs under
+`<DATA_ROOT>/raw/<track>/` for the `--all` path, or pass a CSV path directly.
+
+- **Contract (PIPELINE.md):** per-CSV status line is one of `ok`, `skip`
+  (already normalized, no `--force`), `excl` (listed with `exclude` in notes),
+  `noobd` (missing OBD), `FAIL` (other error).
+- **CSV format note:** the raw `UTC Time` column is a **numeric Unix epoch
+  (seconds)**, not an ISO string — `normalize` does `float(raw["utc"])` and
+  `datetime.fromtimestamp(...)`. A synthetic "valid" CSV must supply epoch
+  floats, e.g. `pd.Timestamp("2026-01-01T20:00:00Z").timestamp() + t`.
+- **Invariants:**
+  - normalizing a valid CSV prints a line starting `ok ` and **returns 0**.
+  - a CSV missing OBD columns prints `noobd ` and the run still **returns 0** (no
+    OBD is not a failure).
+  - a malformed/failing CSV prints `FAIL ` and the run **returns 2**.
+  - re-running without `--force` on already-normalized output prints `skip `.
+  - the final summary line reports the processed/skipped/excluded/no-OBD/failed
+    counts.

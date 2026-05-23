@@ -14,6 +14,12 @@ BOUNDARY_THRESHOLD_G = 0.2
 THROTTLE_LIFT_THRESHOLD = 0.8
 THROTTLE_RETURN_THRESHOLD = 0.8
 BRAKE_LONG_G_THRESHOLD = -0.3
+# Braking / throttle-lift for a corner routinely begins before the lat-G boundary
+# (turn-in). Look back this far (in dist_lap_m) from the candidate's entry when
+# detecting those onsets, so the reported offsets capture pre-turn-in braking —
+# matching labeler.build_corner_transit's LOOKBACK_M. Offsets stay relative to
+# entry, so an onset before entry is a negative offset.
+LOOKBACK_M = 150.0
 
 
 def _first_dist_where(df: pd.DataFrame, mask: pd.Series) -> float | None:
@@ -52,8 +58,16 @@ def extract_lap_candidates(lap_df: pd.DataFrame, sample_rate_hz: float) -> list[
         entry_dist = float(lap_df.iloc[entry_idx]["dist_lap_m"])
         post_apex = window_df.loc[min_idx:]
 
-        brake_dist = _first_dist_where(window_df, window_df["long_g"] < BRAKE_LONG_G_THRESHOLD)
-        lift_dist = _first_dist_where(window_df, window_df["throttle_norm"] < THROTTLE_LIFT_THRESHOLD)
+        # Approach window: entry minus LOOKBACK_M through the corner exit, so the
+        # brake / lift onsets that precede turn-in are seen (see LOOKBACK_M).
+        exit_dist = float(window_df.iloc[-1]["dist_lap_m"])
+        approach = lap_df[
+            (lap_df["dist_lap_m"] >= entry_dist - LOOKBACK_M)
+            & (lap_df["dist_lap_m"] <= exit_dist)
+        ]
+
+        brake_dist = _first_dist_where(approach, approach["long_g"] < BRAKE_LONG_G_THRESHOLD)
+        lift_dist = _first_dist_where(approach, approach["throttle_norm"] < THROTTLE_LIFT_THRESHOLD)
         ret_dist = _first_dist_where(post_apex, post_apex["throttle_norm"] > THROTTLE_RETURN_THRESHOLD)
 
         rows.append({

@@ -85,6 +85,7 @@ and every other design choice is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 lap_analyzer/        # the library — one module per pipeline component
   cli/               # one CLI per component (python -m lap_analyzer.cli.<name>)
 visualizer/          # Streamlit app + track-specific analysis pages
+tests/               # pytest suite + tests/SPEC.md (intent-first behavioral spec)
 scripts/             # bootstrap & diagnostic tools (e.g. seed_pir_corners.py)
 tracks/              # per-track JSON definitions (ridge.json, pir.json)
 docs/                # ARCHITECTURE · PIPELINE · NEW-TRACK
@@ -102,6 +103,7 @@ local.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — design rationale and the approaches that were rejected.
 - [docs/VISUALIZER.md](docs/VISUALIZER.md) — what the Streamlit app shows and how to read it.
 - [docs/NEW-TRACK.md](docs/NEW-TRACK.md) — bootstrap a new track end-to-end.
+- [tests/SPEC.md](tests/SPEC.md) — the intent-first behavioral spec the test suite is derived from.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — adding your track, hardware assumptions, conventions.
 
 ## License

@@ -21,7 +21,6 @@ thresholds via the raw metric columns), not exclusions baked into the data.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -35,6 +34,15 @@ from .normalize import reference_session_ids
 DRIFT_DISAGREEMENT_LIMIT_M = 20.0
 TRANSIT_OFFSET_LIMIT_M = 40.0
 NEIGHBORHOOD_OFFSET_LIMIT_M = 40.0
+
+# Columns this module adds to each transit row. Dropped from the input before
+# recomputation so the step is idempotent: re-running flag_quality on an already
+# flagged corners.parquet otherwise makes the merge below suffix the existing
+# lap_pace_decile to lap_pace_decile_x/_y, dropping the documented column name.
+_COMPUTED_COLUMNS = [
+    "lap_pace_decile", "latg_peak_offset_z", "entry_speed_z", "gps_drift_mag_m",
+    "neighborhood_offset_max_m", "transit_reliable", "lap_reliable",
+]
 
 
 def compute_quality(track: str) -> pd.DataFrame:
@@ -54,6 +62,10 @@ def compute_quality(track: str) -> pd.DataFrame:
          if p.parent.name not in ref],
         ignore_index=True,
     )
+
+    # Idempotency: strip any columns we are about to recompute, so re-running on
+    # already-flagged corners.parquet doesn't collide on the merge below.
+    transits = transits.drop(columns=[c for c in _COMPUTED_COLUMNS if c in transits.columns])
 
     clean = laps[laps["is_clean"].astype(bool)][["session_id", "lap", "lap_time_s"]].copy()
     clean["lap_pace_decile"] = pd.qcut(
