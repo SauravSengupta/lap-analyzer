@@ -12,7 +12,22 @@
 
 ## 📍 RESUME HERE (last updated 2026-05-22)
 
-**Status:** Phases 0-4 done. **CHECK-IN 4 passed (user visually verified sample-mode render) — ready for Phase 5 (docs).** CHECK-IN 2 resolved: ORP deferred, PIR locked.
+**Status:** Phases 0-5 done. **At CHECK-IN 5 (docs written) — awaiting user review of the docs before Phase 6 (pre-publish polish).** CHECK-IN 4 passed (sample-mode render verified). CHECK-IN 2 resolved: ORP deferred, PIR locked.
+
+**Phase 5 done — six docs written + committed (commits `6a54eb9`..`8a096ac`):**
+- `LICENSE` (MIT, © 2026 Saurav Sengupta).
+- `docs/PIPELINE.md` — runbook for all 7 CLI modules, TrackAddict CSV column contract (incl. the phone's Accel X/Y axis swap + OBD-required→`noobd` behavior), full output schema (samples/laps/meta/corners/corpus). Documents the corrected `lap_dist_m` (= rescaled copy of `lap_length_internal_m`, NOT OBD-integrated; use raw `dist_m` deltas).
+- `docs/NEW-TRACK.md` — bootstrap walkthrough with PIR lessons: Maps-pin curation, the `seed_pir_corners.py` clustering method (+ that it's PIR-specific, copy/adapt per track), T4 double-apex & T9 full-throttle special cases, the first-pass bootstrap-reference chicken-and-egg (labeler needs a real reference lap before the centerline exists), the lap-wrap centerline protected-ranges gotcha, and how to guard track-specific visualizer pages.
+- `docs/ARCHITECTURE.md` — design rationale moved out of the old README (5 core decisions + rejected approaches), generalized off Ridge-only numbers, + the Phase-2 centerline lap-wrap refinement, + the spec's design principles. Dropped the stale "not yet built" section.
+- `CONTRIBUTING.md` — short; points new-track contributors at NEW-TRACK.md, flags single-driver/car assumptions.
+- `README.md` — full rewrite as the front door (pitch, 5-min sample quickstart, supported tracks, inputs, layout, doc links). Old design content now in ARCHITECTURE.md.
+- Also: moved the old `telemetry-pipeline-spec.md` → `docs/` as a historical record (relevant bits folded into PIPELINE/ARCHITECTURE); fixed stale `.env.example` (`DATA_ROOT=../data`→`data`, broke post-flatten).
+
+**Phase 5 known warts to address in Phase 6:**
+- `docs/screenshot.png` is referenced by the README but NOT yet captured — that's Phase 6 Task 6.2 (user-driven; suggested a Ridge T8-T11 range view). README image link is broken until then.
+- `docs/curation-ridge.md` (pre-existing historical doc) still has `app/tracks/ridge.json` paths from the old layout — minor, it's clearly marked superseded; fix in Phase 6 audit if desired.
+
+**Next action when resuming:** wait for the user's doc review (CHECK-IN 5). Then Phase 6 (pre-publish polish): capture `docs/screenshot.png`, hunt absolute Windows paths / `__pycache__` / secrets, dry-run a fresh-clone install of the README quickstart. Then CHECK-IN 6 → Phase 7 (git remote + push, user-driven).
 
 **Phase 4 done — committed sample bundle (~11MB) under `data/samples/`:** 3 sessions/track (pir 20240829-103904/20250522-101214/20240829-132325; ridge 20260517-100304/20250307-110826/20251018-105948) + self-consistent sample corpus (rebuilt from just those: pir 32 laps, ridge 26 laps) + centerlines + notes + `_synthetic_centerline`. `.gitignore`: `data/*` + `!data/samples/`. Shipped 3 (not 1) because the top-decile band pool needs >1 lap or the comparison bands collapse to a line — at 3 it's 8 (pir)/11 (ridge) laps. Quickstart confirmed working: `DATA_ROOT=data/samples PYTHONPATH=. python -m streamlit run visualizer/app.py`; picker shows only the 3 shipped dates, bands have width. Git commits through `4479aaf`.
 
