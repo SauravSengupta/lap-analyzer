@@ -32,7 +32,7 @@ that and may need adjusting for your data — they're documented where they live
 
 The suite lives in `tests/` and runs with pytest:
 
-```
+```bash
 pip install -e ".[dev]"   # pytest + ruff
 python -m pytest
 ```
@@ -49,7 +49,8 @@ times) are marked `xfail`, not asserted as correct.
 
 ## Conventions
 
-- Python 3.11+, formatted with `ruff` (see `pyproject.toml`).
+- Python 3.11+ (the suite is developed and run on 3.14), formatted with `ruff`
+  (see `pyproject.toml`).
 - Run the pipeline from the repo root with `PYTHONPATH=.` (see
   [docs/PIPELINE.md](docs/PIPELINE.md)).
 - No auto-generated coaching prose — the pipeline emits metrics and structured

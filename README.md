@@ -103,6 +103,7 @@ local.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — design rationale and the approaches that were rejected.
 - [docs/VISUALIZER.md](docs/VISUALIZER.md) — what the Streamlit app shows and how to read it.
 - [docs/NEW-TRACK.md](docs/NEW-TRACK.md) — bootstrap a new track end-to-end.
+- [tests/SPEC.md](tests/SPEC.md) — the intent-first behavioral spec the test suite is derived from.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — adding your track, hardware assumptions, conventions.
 
 ## License
