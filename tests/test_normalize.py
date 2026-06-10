@@ -230,7 +230,7 @@ def test_normalize_throttle_max_observed_is_raw_max():
 
 
 # ---------------------------------------------------------------------------
-# normalize_dataframe — lat_g negation (the key axis invariant)
+# normalize_dataframe — lat_g / long_g negation (the key axis invariants)
 # ---------------------------------------------------------------------------
 
 
@@ -247,6 +247,21 @@ def test_normalize_lat_g_right_turn_positive():
     raw = _raw_frame(lat_g=-0.7)  # raw right-turn convention -> canonical positive
     out, _ = normalize_dataframe(raw, "20260101-120000")
     assert (out["lat_g"] > 0).all()  # positive lat_g = right turn
+
+
+# SPEC: normalize.normalize_dataframe — canonical long_g == -raw["long_g"] (exact)
+def test_normalize_long_g_negated_exactly():
+    raw = _raw_frame(long_g=np.array([0.9, -0.4, 0.0, 0.2] + [0.0] * 16))
+    out, _ = normalize_dataframe(raw, "20260101-120000")
+    expected = -raw["long_g"].to_numpy()
+    assert np.array_equal(out["long_g"].to_numpy(), expected)
+
+
+# SPEC: normalize.normalize_dataframe — raw braking (raw>0) becomes negative; +long_g = accel
+def test_normalize_long_g_braking_negative():
+    raw = _raw_frame(long_g=0.9)  # raw braking convention -> canonical negative
+    out, _ = normalize_dataframe(raw, "20260101-120000")
+    assert (out["long_g"] < 0).all()  # negative long_g = braking
 
 
 # ---------------------------------------------------------------------------

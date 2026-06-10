@@ -195,7 +195,7 @@ CSV header.
 | `Speed (MPH)` | `speed_mph_gps` | GPS speed (secondary) |
 | `Heading` | `heading` | read but not kept |
 | `Accuracy (m)` | `gps_accuracy_m` | GPS quality |
-| `Accel X` | `long_g` | **longitudinal** on this phone's orientation |
+| `Accel X` | `long_g` | **longitudinal** on this phone's orientation; negated so + = accel |
 | `Accel Y` | `lat_g` | **lateral**; negated so + = right turn |
 | `Accel Z` | `vert_g` | read but not kept |
 | `Brake (calculated)` | `brake` | binary 0/1 (TrackAddict-derived) |
@@ -208,10 +208,11 @@ CSV header.
 
 > **Axis note.** On the phone/orientation used for this car, TrackAddict's
 > `Accel X` is the *longitudinal* channel and `Accel Y` is the *lateral* one —
-> the opposite of the column names' usual meaning. `normalize` maps them
-> accordingly and negates `lat_g` so the canonical convention is **positive =
-> right turn** (and `long_g` positive = acceleration, negative = braking). If you
-> add a track logged on different hardware, verify this mapping first.
+> the opposite of the column names' usual meaning. Both raw channels are also
+> sign-flipped relative to the canonical convention, so `normalize` maps and
+> negates them: canonical `lat_g` is **positive = right turn** and canonical
+> `long_g` is **positive = acceleration, negative = braking**. If you add a
+> track logged on different hardware, verify this mapping first.
 
 **Required vs optional:**
 

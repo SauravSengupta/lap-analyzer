@@ -115,6 +115,8 @@ required on input even though it is dropped from the output.**
 - **Invariants (ARCHITECTURE / axis note):**
   - **`lat_g` is negated:** canonical `lat_g == -raw["lat_g"]`. A raw left-turn
     (raw > 0) becomes negative; **positive `lat_g` = right turn.**
+  - **`long_g` is negated:** canonical `long_g == -raw["long_g"]`. Raw braking
+    (raw > 0) becomes negative; **positive `long_g` = acceleration.**
   - **OBD fill:** the 6 OBD channels are forward- then back-filled — given ≥1
     non-null value per channel, the output has no NaN in those columns.
   - **`throttle_norm` = `throttle_raw / max(throttle_raw)`**, in `[0, 1]`, max
@@ -127,8 +129,8 @@ required on input even though it is dropped from the output.**
     exactly that value (per-lap). With it `None`, no rescale.
   - dtypes: `lap` int32, `brake` int8, `rpm` int32.
 - **Edge case:** a single-row frame yields `dist_m == 0` (no integration step).
-- **Tolerances:** speeds/dist 2 dp tolerance is fine; `lat_g` exact-negation can
-  be asserted exactly.
+- **Tolerances:** speeds/dist 2 dp tolerance is fine; `lat_g`/`long_g`
+  exact-negation can be asserted exactly.
 
 ## normalize.compute_lap_times
 

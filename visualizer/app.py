@@ -34,7 +34,7 @@ CHANNELS = {
     "speed_mph": "Speed (OBD)",
     "speed_mph_gps": "Speed (GPS)",
     "throttle_norm": "Throttle",
-    "long_g": "Longitudinal G",  # negated in _samples() to automotive convention (+ = accel, − = brake)
+    "long_g": "Longitudinal G",  # canonical convention (+ = accel, − = brake)
     "lat_g": "Lateral G",
 }
 

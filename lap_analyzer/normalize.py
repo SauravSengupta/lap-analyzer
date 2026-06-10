@@ -124,7 +124,9 @@ def normalize_dataframe(
 
     # On this phone/orientation, Accel Y is the lateral channel (Accel X is longitudinal).
     # Raw Accel Y is positive on left turns; negate so canonical lat_g is positive = right.
+    # Raw Accel X is positive under braking; negate so canonical long_g is positive = accel.
     df["lat_g"] = -df["lat_g"]
+    df["long_g"] = -df["long_g"]
 
     # OBD channels only update on OBD ticks; forward-fill so every row has the most recent reading.
     df[OBD_CHANNELS] = df[OBD_CHANNELS].ffill().bfill()

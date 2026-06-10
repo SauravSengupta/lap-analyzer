@@ -49,7 +49,7 @@ def track_def(track: str) -> dict:
 
 @st.cache_data(show_spinner="loading samples")
 def samples(track: str, session_id: str, lap: int) -> pd.DataFrame:
-    """One lap's samples. long_g negated to automotive convention (+ = accel).
+    """One lap's samples (long_g is already canonical: + = accel, − = brake).
 
     `rpm` is included so the downshift page can derive gear; app.py ignores it.
     `track_dist_m`/`dist_lap_m` feed the fused distance axis (see fused_axis.py).
@@ -58,7 +58,6 @@ def samples(track: str, session_id: str, lap: int) -> pd.DataFrame:
         ["t", "lap", "track_dist_m", "dist_lap_m", "speed_mph", "speed_mph_gps",
          "throttle_norm", "long_g", "lat_g", "rpm"]
     ].copy()
-    s["long_g"] = -s["long_g"]
     return s
 
 
