@@ -280,6 +280,61 @@ def test_reference_sessions_excluded_from_corpus_stats(sample_data_root, ridge_q
 
 
 # ---------------------------------------------------------------------------
+# GPS-only sessions do not move the OBD entry_speed_z baseline
+# ---------------------------------------------------------------------------
+
+def _write_session(root, sid, *, entry_speeds, obd_present):
+    """Write a minimal corners.parquet + laps.csv for a synthetic session.
+
+    One corner (T1), one clean lap per entry speed. Only the columns
+    compute_quality consumes are populated.
+    """
+    sdir = root / sid
+    sdir.mkdir(parents=True, exist_ok=True)
+    rows, laps = [], []
+    for i, es in enumerate(entry_speeds):
+        rows.append({
+            "session_id": sid, "date": "2026-01-01", "lap": i, "corner_id": "T1",
+            "entry_speed_mph": float(es), "latg_peak_offset_m": 0.0,
+            "track_dist_offset_max_m": 1.0, "gps_drift_lat_m": 0.0,
+            "gps_drift_lon_m": 0.0, "gps_drift_disagreement_m": 0.0,
+            "obd_present": obd_present,
+        })
+        laps.append({"session_id": sid, "lap": i, "lap_time_s": 100.0 + i,
+                     "is_clean": True})
+    pd.DataFrame(rows).to_parquet(sdir / "corners.parquet", index=False)
+    pd.DataFrame(laps).to_csv(sdir / "laps.csv", index=False)
+
+
+# SPEC: quality.compute_quality — entry_speed_z baseline excludes GPS-only sessions.
+# Wildly-low GPS-only entry speeds must NOT shift the OBD sessions' per-corner
+# median/MAD, so OBD rows' entry_speed_z is identical with or without them.
+def test_entry_speed_z_baseline_excludes_gps_only(monkeypatch, tmp_path):
+    root = tmp_path / "sessions" / "ridge"
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+
+    obd_speeds = [50.0, 52.0, 54.0, 56.0, 58.0]
+    _write_session(root, "20260101-100000", entry_speeds=obd_speeds, obd_present=True)
+    # Baseline-only run (no GPS-only session present yet).
+    z_without = compute_quality("ridge").set_index(["session_id", "lap"])["entry_speed_z"]
+
+    # Add a GPS-only session with extreme entry speeds that WOULD move a naive median.
+    _write_session(root, "20260101-110000", entry_speeds=[10.0, 10.0, 10.0],
+                   obd_present=False)
+    out = compute_quality("ridge")
+    z_with = out.set_index(["session_id", "lap"])["entry_speed_z"]
+
+    # OBD rows' z-scores are unchanged by the presence of the GPS-only session.
+    obd_keys = [("20260101-100000", i) for i in range(len(obd_speeds))]
+    for k in obd_keys:
+        assert z_with[k] == pytest.approx(z_without[k], abs=1e-9), k
+
+    # And the expected value matches the OBD-only robust z (median 54, MAD 2).
+    med, mad = 54.0, 2.0 * 1.4826
+    assert z_with[("20260101-100000", 0)] == pytest.approx(round((50.0 - med) / mad, 2), abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
 # determinism
 # ---------------------------------------------------------------------------
 

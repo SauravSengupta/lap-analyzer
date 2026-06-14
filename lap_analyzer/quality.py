@@ -76,17 +76,25 @@ def compute_quality(track: str) -> pd.DataFrame:
                          on=["session_id", "lap"], how="left")
 
     # Per-corner z-scores using corpus median + MAD-derived scale (more robust to outliers
-    # than mean/std).
-    def add_corner_z(col, name):
-        med = out.groupby("corner_id")[col].transform("median")
-        # MAD * 1.4826 ≈ std under normal assumption
-        mad = (out[col] - med).abs().groupby(out["corner_id"]).transform("median") * 1.4826
-        # Avoid divide-by-zero on degenerate corners
-        mad_safe = mad.where(mad > 0.1, np.nan)
+    # than mean/std). `baseline` selects which rows DEFINE the per-corner median/MAD;
+    # all rows are still SCORED against it. Speed metrics use an OBD-only baseline so
+    # GPS-only sessions (GPS speed reads ~1-2 mph low) don't shift the references.
+    def add_corner_z(col, name, baseline=None):
+        base = out if baseline is None else out[baseline]
+        med_by_corner = base.groupby("corner_id")[col].median()
+        dev = (base[col] - base["corner_id"].map(med_by_corner)).abs()
+        mad_by_corner = dev.groupby(base["corner_id"]).median() * 1.4826  # ≈ std
+        med = out["corner_id"].map(med_by_corner)
+        mad = out["corner_id"].map(mad_by_corner)
+        mad_safe = mad.where(mad > 0.1, np.nan)  # avoid divide-by-zero on degenerate corners
         out[name] = ((out[col] - med) / mad_safe).round(2)
 
+    # lat-G is present regardless of OBD -> all sessions define its baseline.
     add_corner_z("latg_peak_offset_m", "latg_peak_offset_z")
-    add_corner_z("entry_speed_mph", "entry_speed_z")
+    # entry_speed baseline = OBD sessions only (default True if the column is absent,
+    # e.g. a corpus labeled before obd_present existed).
+    obd_mask = out["obd_present"] if "obd_present" in out.columns else pd.Series(True, index=out.index)
+    add_corner_z("entry_speed_mph", "entry_speed_z", baseline=obd_mask.astype(bool))
 
     out["gps_drift_mag_m"] = np.sqrt(
         out["gps_drift_lat_m"] ** 2 + out["gps_drift_lon_m"] ** 2

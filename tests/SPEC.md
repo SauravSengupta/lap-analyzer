@@ -50,11 +50,14 @@ Import: `from lap_analyzer.schemas import SessionMeta`. (pydantic v2 BaseModel.)
 
 - **Required fields:** `session_id` (str), `track` (str), `vehicle` (str),
   `date_utc` (datetime), `n_laps` (int), `n_clean_laps` (int), `sample_rate_hz`
-  (float), `duration_s` (float), `throttle_max_observed` (float),
-  `speed_max_obd_mph` (float), `rpm_max` (int), `raw_csv_path` (str).
+  (float), `duration_s` (float), `raw_csv_path` (str).
+- **`has_obd`** (bool) defaults to `True` — `False` for GPS-only sessions. The
+  default keeps pre-existing `meta.json` files (written before this field) valid.
 - **Optional fields (default `None`):** `best_lap`, `best_lap_time_s`,
-  `coolant_min_f`, `coolant_max_f`, `iat_first_f`, `iat_max_f`,
-  `trackaddict_start_finish` (dict).
+  `throttle_max_observed`, `speed_max_obd_mph`, `rpm_max`, `coolant_min_f`,
+  `coolant_max_f`, `iat_first_f`, `iat_max_f`, `trackaddict_start_finish` (dict).
+  The OBD-derived ones (`throttle_max_observed`, `speed_max_obd_mph`, `rpm_max`)
+  are `None` for GPS-only sessions.
 - **`trackaddict_split_points`** defaults to `[]` (list of dict).
 - **Invariants:** constructing with only the required fields succeeds and leaves
   optionals at their defaults; `model_dump_json()` → `model_validate_json()`
@@ -122,8 +125,12 @@ required on input even though it is dropped from the output.**
   - **`throttle_norm` = `throttle_raw / max(throttle_raw)`**, in `[0, 1]`, max
     → 1.0. If `max(throttle_raw) == 0`, `throttle_norm` is `0.0` everywhere (no
     division by zero).
-  - **`dist_m`** is trapezoidal integration of `speed_mph·0.44704` over `t`,
-    starting at 0; **monotonic non-decreasing** for non-negative speeds.
+  - **`dist_m`** is trapezoidal integration of `speed·0.44704` over `t`, starting
+    at 0; **monotonic non-decreasing** for non-negative speeds. The integrated
+    speed is `speed_mph` when it has any non-null value, else `speed_mph_gps`
+    (GPS-only / OBD-dropout sessions).
+  - **`throttle_norm`** is NaN everywhere when `throttle_raw` is all-NaN
+    (GPS-only sessions) — distinct from the all-zero-throttle case, which is 0.0.
   - **`dist_lap_m`** starts at 0 at each lap's first sample. With
     `canonical_lap_length_m` set, each lap's `max(dist_lap_m)` is rescaled to
     exactly that value (per-lap). With it `None`, no rescale.
@@ -172,18 +179,34 @@ Signature: `(track: str) -> set[str]`.
   empty set. (Use `sample_data_root`; assert it returns a `set`, and that a
   session NOT marked reference is absent.)
 
-## normalize.normalize_session (MissingOBDError path)
+## normalize.normalize_session (OBD-dropout: GPS-only ingest)
 
-Import: `from lap_analyzer.normalize import normalize_session, MissingOBDError`.
+Import: `from lap_analyzer.normalize import normalize_session`.
 Signature: `normalize_session(csv_path, track, out_dir) -> SessionMeta` — `out_dir`
 is a required positional (the directory the `<session_id>/` output folder is
 created under).
 
-- **Edge case (KNOWN behavior — OBD dropout):** if the raw CSV is missing any of
-  the 6 OBD columns, `normalize_session` raises `MissingOBDError` and writes no
-  output. Build a CSV with `make_trackaddict_csv(columns=...)` that OMITS the OBD
-  columns and assert the raise. (~3–4% of real sessions log without OBD; this is
-  expected and normalized away.)
+- **KNOWN behavior — OBD dropout (~12% of real sessions log without OBD):** if the
+  raw CSV is missing any of the 6 OBD columns, the session is ingested as
+  **GPS-only** rather than rejected. `normalize_session` writes its output
+  (`samples.parquet`, `laps.csv`, `meta.json`) and the returned `SessionMeta` has
+  `has_obd == False`. Build a CSV with `make_trackaddict_csv(columns=...)` that
+  OMITS the OBD columns and assert: the session dir is written, `meta.has_obd` is
+  `False`, and lap times are present in `laps.csv`.
+- **GPS-only sample columns:** the 6 OBD channels (`rpm, speed_mph, throttle_raw,
+  coolant_f, iat_f` — and the input-only `manifold_psi`) are all-NaN in the
+  output samples. `dist_m` is integrated from `speed_mph_gps` instead of the
+  absent OBD speed, so it is still monotonic non-decreasing. `brake` survives
+  (it is the accelerometer-derived `Brake (calculated)` column, present in
+  GPS-only CSVs).
+- **GPS-only meta:** OBD-derived `SessionMeta` fields are `None` when
+  `has_obd == False`: `speed_max_obd_mph`, `rpm_max`, `throttle_max_observed`,
+  `coolant_min_f`, `coolant_max_f`, `iat_first_f`, `iat_max_f`.
+- **Normal sessions:** a CSV containing all 6 OBD columns yields
+  `meta.has_obd == True` with those fields populated (regression — unchanged).
+
+Note: `MissingOBDError` is no longer raised by `normalize_session` and has been
+removed from the public API.
 
 ---
 
@@ -277,6 +300,18 @@ all (`name`/`notes` may be `None`, `secondary_apex_m` `None` or a float).
   - `peak_brake` is an int (max of the 0/1 brake channel).
 - Construct a lap with a known V-shaped speed profile and a known lat_g peak to
   assert the offsets resolve to the expected signed values.
+- **GPS-only (OBD-dropout) sessions:**
+  - The transit dict carries `obd_present` (bool) and `speed_source`
+    (`"obd"`/`"gps"`). `obd_present` is `True` when the lap has any non-null
+    `speed_mph` (OBD), else `False`.
+  - **Speed metrics fall back to GPS:** `entry/exit/min/max/apex/secondary` speeds
+    are computed from `speed_mph` when present, else from `speed_mph_gps`. So a
+    GPS-only lap still gets a real `min_speed_mph` (apex speed) from GPS.
+  - **Throttle/WOT metrics are NaN** when `throttle_norm` is all-NaN (no OBD):
+    `peak_throttle_norm`, `mean_throttle_norm`, `pct_wot`, `throttle_lift_dist_m`,
+    `throttle_return_dist_m`, `wot_dist_m`.
+  - **Brake metrics survive** (the brake channel is accelerometer-derived):
+    `peak_brake`, `pct_braking`, `brake_on_dist_m`, `brake_off_dist_m`.
 
 ## labeler.build_session_corners
 
@@ -309,6 +344,13 @@ Import: `from lap_analyzer.quality import compute_quality`. Signature:
   - per-corner robust z-scores `latg_peak_offset_z`, `entry_speed_z` use
     `(x − median) / (MAD · 1.4826)`; a corner with MAD ≤ 0.1 yields NaN z (no
     divide-by-near-zero).
+  - **`entry_speed_z` baseline excludes GPS-only sessions.** The per-corner median
+    and MAD for `entry_speed_z` are computed from OBD sessions only (`obd_present`
+    True). GPS-only rows are *scored against* that OBD baseline (they still get an
+    `entry_speed_z`) but do not *define* it — so a GPS-only session's GPS-sourced
+    entry speeds (which read ~1–2 mph low) cannot shift the OBD references. The
+    lat-G-based `latg_peak_offset_z` baseline uses all sessions (lat-G is present
+    regardless of OBD). `lap_pace_decile` includes GPS-only laps (lap times valid).
   - `gps_drift_mag_m == hypot(gps_drift_lat_m, gps_drift_lon_m)`.
   - `neighborhood_offset_max_m` = max of this corner's `track_dist_offset_max_m`
     and those of its two corner-sequence neighbors (wraps at start/finish).
@@ -591,16 +633,17 @@ with `make_trackaddict_csv`; create raw CSVs under
 
 - **Contract (PIPELINE.md):** per-CSV status line is one of `ok`, `skip`
   (already normalized, no `--force`), `excl` (listed with `exclude` in notes),
-  `noobd` (missing OBD), `FAIL` (other error).
+  `gpsonly` (missing OBD — ingested GPS-only, output IS written), `FAIL`
+  (other error).
 - **CSV format note:** the raw `UTC Time` column is a **numeric Unix epoch
   (seconds)**, not an ISO string — `normalize` does `float(raw["utc"])` and
   `datetime.fromtimestamp(...)`. A synthetic "valid" CSV must supply epoch
   floats, e.g. `pd.Timestamp("2026-01-01T20:00:00Z").timestamp() + t`.
 - **Invariants:**
   - normalizing a valid CSV prints a line starting `ok ` and **returns 0**.
-  - a CSV missing OBD columns prints `noobd ` and the run still **returns 0** (no
-    OBD is not a failure).
+  - a CSV missing OBD columns prints `gpsonly ` and the run still **returns 0**
+    (the session IS ingested GPS-only; not a failure, not a skip).
   - a malformed/failing CSV prints `FAIL ` and the run **returns 2**.
   - re-running without `--force` on already-normalized output prints `skip `.
-  - the final summary line reports the processed/skipped/excluded/no-OBD/failed
+  - the final summary line reports the processed/skipped/excluded/gps-only/failed
     counts.

@@ -466,6 +466,62 @@ def test_build_corner_transit_event_absent_is_none(make_lap_samples):
     assert out["brake_on_dist_m"] is None
 
 
+def test_build_corner_transit_obd_present_true_when_obd(make_lap_samples):
+    # SPEC: build_corner_transit — obd_present True / speed_source "obd" when the
+    #       lap has OBD speed.
+    n = 31
+    td = np.linspace(100.0, 300.0, n)
+    corner = _make_corner(start_m=100.0, end_m=300.0, apex_m=200.0)
+    lap = make_lap_samples(n=n, track_dist_m=td, speed_mph=80.0)
+    out = build_corner_transit(lap, corner)
+    assert out is not None
+    assert out["obd_present"] is True
+    assert out["speed_source"] == "obd"
+
+
+def test_build_corner_transit_gps_only_uses_gps_speed(make_lap_samples):
+    # SPEC: build_corner_transit — GPS-only lap (speed_mph all-NaN) falls back to
+    #       speed_mph_gps for speed metrics; obd_present False, speed_source "gps".
+    n = 41
+    td = np.linspace(100.0, 300.0, n)
+    min_idx = 16
+    gps = 100.0 - 40.0 * (1.0 - np.abs(np.arange(n) - min_idx) / n)
+    gps[min_idx] = 30.0  # unambiguous GPS-speed minimum (apex)
+    corner = _make_corner(start_m=100.0, end_m=300.0, apex_m=200.0)
+    lap = make_lap_samples(
+        n=n, track_dist_m=td, speed_mph=np.nan, speed_mph_gps=gps, throttle_norm=np.nan
+    )
+    out = build_corner_transit(lap, corner)
+    assert out is not None
+    assert out["obd_present"] is False
+    assert out["speed_source"] == "gps"
+    # min speed comes from the GPS profile (30 mph at the apex), not NaN.
+    assert out["min_speed_mph"] == pytest.approx(30.0, abs=0.5)
+    assert out["min_speed_dist_m"] == pytest.approx(td[min_idx], abs=0.5)
+
+
+def test_build_corner_transit_gps_only_throttle_metrics_nan(make_lap_samples):
+    # SPEC: build_corner_transit — throttle/WOT metrics are NaN for GPS-only laps;
+    #       brake metrics still computed.
+    n = 31
+    td = np.linspace(100.0, 300.0, n)
+    brake = np.zeros(n, dtype=int)
+    brake[12:18] = 1
+    corner = _make_corner(start_m=100.0, end_m=300.0, apex_m=200.0)
+    lap = make_lap_samples(
+        n=n, track_dist_m=td, speed_mph=np.nan, speed_mph_gps=70.0,
+        throttle_norm=np.nan, brake=brake,
+    )
+    out = build_corner_transit(lap, corner)
+    assert out is not None
+    assert np.isnan(out["pct_wot"])
+    assert np.isnan(out["mean_throttle_norm"])
+    assert np.isnan(out["peak_throttle_norm"])
+    # brake survives
+    assert out["peak_brake"] == 1
+    assert out["brake_on_dist_m"] is not None
+
+
 def test_build_corner_transit_peak_brake_is_int(make_lap_samples):
     # SPEC: build_corner_transit — peak_brake is an int (max of 0/1 brake channel)
     n = 31

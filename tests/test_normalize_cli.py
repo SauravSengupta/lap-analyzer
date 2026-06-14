@@ -9,13 +9,14 @@ a tmp_path; for --all, raw CSVs are placed under <DATA_ROOT>/raw/<track>/. Raw
 TrackAddict column names come from PIPELINE.md's column-contract table (mirrored
 in conftest.RAW_OBD_COLUMNS for the OBD subset).
 
-Documented status-line prefixes: ok / skip / excl / noobd / FAIL.
-Documented exit codes: valid -> 0, noobd -> 0 (not a failure), FAIL -> 2.
+Documented status-line prefixes: ok / skip / excl / gpsonly / FAIL.
+Documented exit codes: valid -> 0, gpsonly -> 0 (ingested, not a failure), FAIL -> 2.
 
 Coverage:
   - ok + exit 0 on a valid CSV
   - output files actually written for ok
-  - noobd + exit 0 on a CSV missing OBD columns
+  - gpsonly + exit 0 on a CSV missing OBD columns (ingested GPS-only)
+  - output files actually written for gpsonly (it is ingested, not skipped)
   - FAIL + exit 2 on a malformed CSV (missing required GPS/timing columns)
   - skip on re-run without --force; ok again with --force
   - excl on a session listed with exclude in notes
@@ -44,7 +45,7 @@ def _raw_columns(n=400, *, with_obd=True, with_gps=True):
     """A full raw TrackAddict column dict keyed by the RAW header names.
 
     The car loops past the End Point a few times so the session has several laps.
-    OBD and GPS/timing column groups can be omitted to exercise noobd / FAIL.
+    OBD and GPS/timing column groups can be omitted to exercise gpsonly / FAIL.
     """
     t = np.arange(n) * 0.05  # ~20 Hz
     # TrackAddict's "UTC Time" column is a numeric Unix epoch (seconds), not an
@@ -139,12 +140,12 @@ def test_valid_csv_writes_session_outputs(tmp_path, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# noobd + exit 0
+# gpsonly + exit 0 (ingested GPS-only)
 # ---------------------------------------------------------------------------
 
-def test_missing_obd_prints_noobd_and_returns_zero(tmp_path, monkeypatch, capsys):
-    # SPEC: normalize CLI — a CSV missing OBD columns prints "noobd " and the run
-    #       still returns 0 (no OBD is not a failure).
+def test_missing_obd_prints_gpsonly_and_returns_zero(tmp_path, monkeypatch, capsys):
+    # SPEC: normalize CLI — a CSV missing OBD columns prints "gpsonly " and the run
+    #       still returns 0 (it is ingested GPS-only, not a failure).
     monkeypatch.setenv("DATA_ROOT", str(tmp_path))
     raw = _raw_dir(tmp_path)
     csv = _write_raw_csv(raw / "Log-20260101-201000 NoOBD.csv",
@@ -153,12 +154,12 @@ def test_missing_obd_prints_noobd_and_returns_zero(tmp_path, monkeypatch, capsys
     rc = main([str(csv), "--track", "ridge"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert any(line.startswith("noobd ") for line in out.splitlines()), out
+    assert any(line.startswith("gpsonly ") for line in out.splitlines()), out
 
 
-def test_missing_obd_writes_no_output(tmp_path, monkeypatch, capsys):
-    # SPEC: PIPELINE / normalize.normalize_session — MissingOBDError path writes no
-    #       output; the session is reported noobd and skipped.
+def test_missing_obd_writes_output(tmp_path, monkeypatch, capsys):
+    # SPEC: normalize CLI — a GPS-only session IS ingested, so its output files are
+    #       written (unlike the old reject behavior).
     monkeypatch.setenv("DATA_ROOT", str(tmp_path))
     raw = _raw_dir(tmp_path)
     _write_raw_csv(raw / "Log-20260101-201000 NoOBD.csv", _raw_columns(with_obd=False))
@@ -166,7 +167,8 @@ def test_missing_obd_writes_no_output(tmp_path, monkeypatch, capsys):
     main(["--track", "ridge", "--all"])
     capsys.readouterr()
     sid_dir = tmp_path / "sessions" / "ridge" / "20260101-201000"
-    assert not (sid_dir / "samples.parquet").exists()
+    assert (sid_dir / "samples.parquet").exists()
+    assert (sid_dir / "meta.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -176,10 +178,10 @@ def test_missing_obd_writes_no_output(tmp_path, monkeypatch, capsys):
 def test_malformed_csv_prints_fail_and_returns_two(tmp_path, monkeypatch, capsys):
     # SPEC: normalize CLI — a malformed/failing CSV prints "FAIL " and the run
     #       returns 2. Omit the required GPS/timing columns (but keep OBD) so the
-    #       failure is NOT the noobd path.
+    #       failure is NOT the gpsonly path.
     monkeypatch.setenv("DATA_ROOT", str(tmp_path))
     raw = _raw_dir(tmp_path)
-    # Has OBD but no GPS/timing columns -> a non-noobd hard failure.
+    # Has OBD but no GPS/timing columns -> a non-gpsonly hard failure.
     bad_cols = _raw_columns(with_gps=False)  # only the 6 OBD columns present
     csv = _write_raw_csv(raw / "Log-20260101-202000 Bad.csv", bad_cols)
 
@@ -251,7 +253,7 @@ def test_excluded_session_prints_excl(tmp_path, monkeypatch, capsys):
 
 def test_all_run_emits_summary_line(tmp_path, monkeypatch, capsys):
     # SPEC: normalize CLI — the final summary line reports the
-    #       processed/skipped/excluded/no-OBD/failed counts.
+    #       processed/skipped/excluded/gps-only/failed counts.
     monkeypatch.setenv("DATA_ROOT", str(tmp_path))
     raw = _raw_dir(tmp_path)
     _write_raw_csv(raw / "Log-20260101-200000 Ok.csv", _raw_columns())
@@ -259,19 +261,19 @@ def test_all_run_emits_summary_line(tmp_path, monkeypatch, capsys):
 
     rc = main(["--track", "ridge", "--all"])
     out = capsys.readouterr().out
-    # noobd does not flip the run to failure.
+    # gpsonly does not flip the run to failure.
     assert rc == 0
-    # A per-CSV ok and a per-CSV noobd line both appear.
+    # A per-CSV ok and a per-CSV gpsonly line both appear.
     lines = out.splitlines()
     assert any(line.startswith("ok ") for line in lines), out
-    assert any(line.startswith("noobd ") for line in lines), out
+    assert any(line.startswith("gpsonly ") for line in lines), out
     # Some trailing summary line carries count digits.
     assert any(any(ch.isdigit() for ch in line) for line in lines[-3:]), out
 
 
 def test_all_run_with_failure_returns_two(tmp_path, monkeypatch, capsys):
     # SPEC: normalize CLI — when any CSV fails (FAIL), the --all run returns 2 even
-    #       if other CSVs were ok/noobd.
+    #       if other CSVs were ok/gpsonly.
     monkeypatch.setenv("DATA_ROOT", str(tmp_path))
     raw = _raw_dir(tmp_path)
     _write_raw_csv(raw / "Log-20260101-200000 Ok.csv", _raw_columns())

@@ -68,10 +68,6 @@ OUTPUT_COLUMNS = [
 SESSION_ID_RE = re.compile(r"Log-(\d{8}-\d{6})")
 
 
-class MissingOBDError(Exception):
-    pass
-
-
 def session_id_from_filename(path: Path) -> str:
     m = SESSION_ID_RE.search(Path(path).name)
     if not m:
@@ -129,14 +125,24 @@ def normalize_dataframe(
     df["long_g"] = -df["long_g"]
 
     # OBD channels only update on OBD ticks; forward-fill so every row has the most recent reading.
+    # For GPS-only (OBD-dropout) sessions these columns are all-NaN and stay NaN.
     df[OBD_CHANNELS] = df[OBD_CHANNELS].ffill().bfill()
 
     # Per-session throttle max is the "true 100%" for this car/sensor (Porsche pedals top out ~90% raw).
+    # GPS-only sessions have no throttle channel -> throttle_norm is NaN everywhere (distinct from
+    # the all-zero-throttle case, which is 0.0).
     throttle_max = float(df["throttle_raw"].max())
-    df["throttle_norm"] = df["throttle_raw"] / throttle_max if throttle_max > 0 else 0.0
+    if np.isnan(throttle_max):
+        df["throttle_norm"] = np.nan
+    elif throttle_max > 0:
+        df["throttle_norm"] = df["throttle_raw"] / throttle_max
+    else:
+        df["throttle_norm"] = 0.0
 
-    # Distance-from-start: trapezoidal integration of OBD speed (mph -> m/s).
-    speed_ms = df["speed_mph"].fillna(0).to_numpy() * 0.44704
+    # Distance-from-start: trapezoidal integration of speed (mph -> m/s). Use OBD speed when
+    # present, else GPS speed (GPS-only sessions) so dist_m is still a real monotonic ruler.
+    speed_col = "speed_mph" if df["speed_mph"].notna().any() else "speed_mph_gps"
+    speed_ms = df[speed_col].fillna(0).to_numpy() * 0.44704
     t = df["t"].to_numpy()
     dist = np.zeros(len(df))
     if len(df) > 1:
@@ -156,7 +162,9 @@ def normalize_dataframe(
     df["session_id"] = session_id
     df["lap"] = df["lap"].astype("int32")
     df["brake"] = df["brake"].fillna(0).astype("int8")
-    df["rpm"] = df["rpm"].fillna(0).astype("int32")
+    # rpm is int32 when present; GPS-only sessions keep it as float NaN (no OBD).
+    if df["rpm"].notna().any():
+        df["rpm"] = df["rpm"].fillna(0).astype("int32")
 
     return df[OUTPUT_COLUMNS], {"throttle_max_observed": throttle_max}
 
@@ -236,6 +244,7 @@ def build_session_meta(
     df: pd.DataFrame,
     summary: pd.DataFrame,
     first_utc: float,
+    has_obd: bool = True,
 ) -> SessionMeta:
     flying = summary[summary["is_clean"]]
     if len(flying):
@@ -249,6 +258,7 @@ def build_session_meta(
     sample_rate = (len(df) - 1) / duration if duration > 0 else 0.0
     has_coolant = df["coolant_f"].notna().any()
     has_iat = df["iat_f"].notna().any()
+    throttle_max = derived["throttle_max_observed"]
 
     return SessionMeta(
         session_id=session_id,
@@ -261,9 +271,10 @@ def build_session_meta(
         duration_s=round(duration, 2),
         best_lap=best_lap,
         best_lap_time_s=best_lap_time,
-        throttle_max_observed=round(derived["throttle_max_observed"], 3),
-        speed_max_obd_mph=float(df["speed_mph"].max()),
-        rpm_max=int(df["rpm"].max()),
+        has_obd=has_obd,
+        throttle_max_observed=round(throttle_max, 3) if not np.isnan(throttle_max) else None,
+        speed_max_obd_mph=float(df["speed_mph"].max()) if has_obd else None,
+        rpm_max=int(df["rpm"].max()) if has_obd else None,
         coolant_min_f=float(df["coolant_f"].min()) if has_coolant else None,
         coolant_max_f=float(df["coolant_f"].max()) if has_coolant else None,
         # First-sample IAT before the engine bay heats up — rough ambient proxy.
@@ -297,9 +308,13 @@ def normalize_session(csv_path: Path, track: str, out_dir: Path) -> SessionMeta:
     raw_meta = parse_metadata_header(csv_path)
     raw = read_csv(csv_path)
 
+    # OBD-dropout sessions (~12% of logs) are ingested GPS-only rather than rejected:
+    # create the missing OBD channels as all-NaN so the rest of the pipeline runs
+    # unchanged, and flag has_obd=False so downstream stats can filter them out.
     missing = [c for c in OBD_CHANNELS if c not in raw.columns]
-    if missing:
-        raise MissingOBDError(f"OBD channels missing from CSV: {missing}")
+    has_obd = not missing
+    for c in missing:
+        raw[c] = np.nan
 
     first_utc = float(raw["utc"].iloc[0])
 
@@ -307,7 +322,9 @@ def normalize_session(csv_path: Path, track: str, out_dir: Path) -> SessionMeta:
     df, derived = normalize_dataframe(raw, session_id, canonical_lap_length_m=canonical_length)
     lap_times = compute_lap_times(df)
     summary = lap_summary(df, lap_times)
-    meta = build_session_meta(session_id, track, raw_meta, derived, df, summary, first_utc)
+    meta = build_session_meta(
+        session_id, track, raw_meta, derived, df, summary, first_utc, has_obd=has_obd
+    )
 
     session_dir = out_dir / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
