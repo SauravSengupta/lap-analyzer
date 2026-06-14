@@ -17,9 +17,11 @@ class SessionMeta(BaseModel):
     duration_s: float
     best_lap: Optional[int] = None
     best_lap_time_s: Optional[float] = None
-    throttle_max_observed: float
-    speed_max_obd_mph: float
-    rpm_max: int
+    # OBD-derived fields are None for GPS-only (OBD-dropout) sessions.
+    has_obd: bool = True
+    throttle_max_observed: Optional[float] = None
+    speed_max_obd_mph: Optional[float] = None
+    rpm_max: Optional[int] = None
     coolant_min_f: Optional[float] = None
     coolant_max_f: Optional[float] = None
     iat_first_f: Optional[float] = None

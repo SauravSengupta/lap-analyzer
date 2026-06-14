@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from lap_analyzer.schemas import SessionMeta
 
 
-# The 12 required fields per SPEC, with spec-typed sample values.
+# The 9 required fields per SPEC, with spec-typed sample values.
 REQUIRED = dict(
     session_id="20260101-120000",
     track="ridge",
@@ -23,16 +23,17 @@ REQUIRED = dict(
     n_clean_laps=3,
     sample_rate_hz=21.0,
     duration_s=600.0,
-    throttle_max_observed=98.5,
-    speed_max_obd_mph=120.0,
-    rpm_max=7200,
     raw_csv_path="data/raw/ridge/Log-20260101-120000.csv",
 )
 
-# The optional fields that SPEC says default to None.
+# The optional fields that SPEC says default to None. The OBD-derived ones are
+# None for GPS-only sessions.
 OPTIONAL_NONE_FIELDS = [
     "best_lap",
     "best_lap_time_s",
+    "throttle_max_observed",
+    "speed_max_obd_mph",
+    "rpm_max",
     "coolant_min_f",
     "coolant_max_f",
     "iat_first_f",
@@ -54,6 +55,19 @@ def test_required_only_construction_succeeds():
 def test_optional_fields_default_none(field):
     meta = SessionMeta(**REQUIRED)
     assert getattr(meta, field) is None
+
+
+# SPEC: schemas.SessionMeta — has_obd defaults to True (omitted by old meta.json)
+def test_has_obd_defaults_true():
+    meta = SessionMeta(**REQUIRED)
+    assert meta.has_obd is True
+
+
+# SPEC: schemas.SessionMeta — has_obd=False round-trips (GPS-only session)
+def test_has_obd_false_round_trips():
+    meta = SessionMeta(**REQUIRED, has_obd=False)
+    restored = SessionMeta.model_validate_json(meta.model_dump_json())
+    assert restored.has_obd is False
 
 
 # SPEC: schemas.SessionMeta — trackaddict_split_points defaults to []

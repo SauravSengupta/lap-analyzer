@@ -45,7 +45,7 @@ def make_trackaddict_csv(tmp_path):
     """Factory: write a minimal TrackAddict CSV from a dict of raw columns.
 
     `columns` maps RAW TrackAddict column names -> array-likes (equal length).
-    Omit the OBD columns to exercise the MissingOBDError path. The filename
+    Omit the OBD columns to exercise the GPS-only ingest path. The filename
     matches the Log-YYYYMMDD-HHMMSS pattern normalize expects.
     """
     def _make(columns: dict, *, session_id="20260101-120000",

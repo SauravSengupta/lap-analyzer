@@ -68,8 +68,9 @@ python -m lap_analyzer.cli.normalize [csv] --track TRACK [--all] [--out DIR] [--
 | `--force` | Re-normalize even if outputs already exist. |
 
 Per-CSV status line is one of: `ok` (normalized), `skip` (already present, no
-`--force`), `excl` (listed in session notes with `exclude`), `noobd` (CSV has no
-OBD channels — see below), or `FAIL` (any other error; the run exits non-zero).
+`--force`), `excl` (listed in session notes with `exclude`), `gpsonly` (CSV has no
+OBD channels — ingested GPS-only, see below), or `FAIL` (any other error; the run
+exits non-zero). GPS-only sessions count as processed, not skipped.
 
 ```powershell
 # Normalize one session
@@ -216,11 +217,16 @@ CSV header.
 
 **Required vs optional:**
 
-- **OBD channels are required.** The six `*OBD` columns above
-  (`rpm, speed_mph, throttle_raw, coolant_f, iat_f, manifold_psi`) must all be
-  present. If any is missing, `normalize` raises `MissingOBDError` and the
-  session is reported as `noobd` and skipped — no output is written. (Roughly
-  3–4% of sessions log without OBD; this is expected and normalized away.)
+- **OBD channels are optional (GPS-only ingest).** The six `*OBD` columns above
+  (`rpm, speed_mph, throttle_raw, coolant_f, iat_f, manifold_psi`) are used when
+  present. If any is missing, the session is ingested **GPS-only** rather than
+  rejected: the OBD channels are written as NaN, `meta.has_obd` is `False`,
+  `dist_m` is integrated from GPS speed, and the CLI reports `gpsonly`. Roughly
+  12% of sessions log without OBD. Downstream, corner speed metrics fall back to
+  GPS speed (flagged `obd_present=False` / `speed_source="gps"` in
+  `corners.parquet`), throttle/WOT metrics are NaN, and the corpus-wide
+  `entry_speed_z` baseline is computed from OBD sessions only so GPS-only speeds
+  (which read ~1–2 mph low) don't shift the references.
 - **GPS + accel + timing columns are required** for output (`Time`, `Lap`,
   `Latitude`, `Longitude`, `Speed (MPH)`, `Accel X`, `Accel Y`,
   `Brake (calculated)`, `Altitude (m)`, `Accuracy (m)`, `UTC Time`). A CSV

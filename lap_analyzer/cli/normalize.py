@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from ..config import raw_dir, sessions_dir
-from ..normalize import MissingOBDError, load_session_notes, normalize_session, session_id_from_filename
+from ..normalize import load_session_notes, normalize_session, session_id_from_filename
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     notes = load_session_notes(args.track)
-    skipped = noobd = excluded = failed = 0
+    skipped = gpsonly = excluded = failed = 0
     for csv in targets:
         try:
             sid = session_id_from_filename(csv)
@@ -56,20 +56,22 @@ def main(argv: list[str] | None = None) -> int:
             continue
         try:
             meta = normalize_session(csv, args.track, out)
-        except MissingOBDError as e:
-            print(f"noobd {sid}: {e}")
-            noobd += 1
-            continue
         except Exception as e:
             print(f"FAIL  {sid}: {type(e).__name__}: {e}")
             failed += 1
             continue
         best = f"{meta.best_lap_time_s:.3f}" if meta.best_lap_time_s else "—"
-        iat = f"{meta.iat_first_f:.0f}F" if meta.iat_first_f else "—"
-        print(f"ok    {sid}  laps={meta.n_laps} clean={meta.n_clean_laps} best={best} iat={iat}")
+        if meta.has_obd:
+            iat = f"{meta.iat_first_f:.0f}F" if meta.iat_first_f else "—"
+            print(f"ok      {sid}  laps={meta.n_laps} clean={meta.n_clean_laps} best={best} iat={iat}")
+        else:
+            # GPS-only (OBD dropout): ingested, but no engine channels.
+            gpsonly += 1
+            print(f"gpsonly {sid}  laps={meta.n_laps} clean={meta.n_clean_laps} best={best} (no OBD)")
 
-    processed = len(targets) - skipped - noobd - excluded - failed
-    print(f"\n{processed} processed, {skipped} skipped, {excluded} excluded, {noobd} no-OBD, {failed} failed.")
+    processed = len(targets) - skipped - excluded - failed
+    print(f"\n{processed} processed ({gpsonly} gps-only), {skipped} skipped, "
+          f"{excluded} excluded, {failed} failed.")
     return 0 if failed == 0 else 2
 
 

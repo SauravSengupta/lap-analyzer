@@ -294,6 +294,13 @@ def build_corner_transit(lap_samples: pd.DataFrame, corner: Corner) -> dict | No
     if len(in_corner) < 3:
         return None
 
+    # GPS-only (OBD-dropout) sessions have no OBD speed/throttle: fall back to GPS
+    # speed for all speed metrics, and emit NaN for throttle/WOT metrics. Brake is
+    # accelerometer-derived and survives.
+    obd_present = bool(lap_samples["speed_mph"].notna().any())
+    speed_col = "speed_mph" if obd_present else "speed_mph_gps"
+    has_throttle = bool(in_corner["throttle_norm"].notna().any())
+
     lookback = lap_samples[
         (lap_samples["track_dist_m"] >= corner.start_m - LOOKBACK_M)
         & (lap_samples["track_dist_m"] < corner.start_m)
@@ -301,25 +308,25 @@ def build_corner_transit(lap_samples: pd.DataFrame, corner: Corner) -> dict | No
     after = lap_samples[lap_samples["track_dist_m"] > corner.end_m].head(1)
     window = pd.concat([lookback, in_corner, after])
 
-    entry_speed = _interp_at_dist(window, corner.start_m, "speed_mph")
-    exit_speed = _interp_at_dist(window, corner.end_m, "speed_mph")
+    entry_speed = _interp_at_dist(window, corner.start_m, speed_col)
+    exit_speed = _interp_at_dist(window, corner.end_m, speed_col)
     entry_dist = float(in_corner["track_dist_m"].iloc[0])
     exit_dist = float(in_corner["track_dist_m"].iloc[-1])
     time_in = float(in_corner["t"].iloc[-1] - in_corner["t"].iloc[0])
 
-    min_idx = in_corner["speed_mph"].idxmin()
-    max_idx = in_corner["speed_mph"].idxmax()
-    min_speed = float(in_corner.loc[min_idx, "speed_mph"])
+    min_idx = in_corner[speed_col].idxmin()
+    max_idx = in_corner[speed_col].idxmax()
+    min_speed = float(in_corner.loc[min_idx, speed_col])
     min_speed_dist = float(in_corner.loc[min_idx, "track_dist_m"])
-    max_speed = float(in_corner.loc[max_idx, "speed_mph"])
+    max_speed = float(in_corner.loc[max_idx, speed_col])
 
     latg_peak_idx = in_corner["lat_g"].abs().idxmax()
     latg_peak_dist = float(in_corner.loc[latg_peak_idx, "track_dist_m"])
     latg_peak_value = float(in_corner.loc[latg_peak_idx, "lat_g"])
 
-    apex_speed = _interp_at_dist(in_corner, corner.apex_m, "speed_mph")
+    apex_speed = _interp_at_dist(in_corner, corner.apex_m, speed_col)
     secondary_apex_speed = (
-        _interp_at_dist(in_corner, corner.secondary_apex_m, "speed_mph")
+        _interp_at_dist(in_corner, corner.secondary_apex_m, speed_col)
         if corner.secondary_apex_m is not None else None
     )
 
@@ -368,15 +375,17 @@ def build_corner_transit(lap_samples: pd.DataFrame, corner: Corner) -> dict | No
         "latg_peak_offset_m": round(latg_peak_dist - corner.apex_m, 2),
         "latg_peak_g": round(latg_peak_value, 3),
         "secondary_apex_speed_mph": round(secondary_apex_speed, 2) if secondary_apex_speed is not None else None,
-        "throttle_lift_dist_m": offset(lift),
+        "throttle_lift_dist_m": offset(lift) if has_throttle else np.nan,
         "brake_on_dist_m": offset(brake_on),
         "brake_off_dist_m": offset(brake_off),
-        "throttle_return_dist_m": offset(throttle_return),
-        "wot_dist_m": offset(wot),
-        "mean_throttle_norm": round(float(in_corner["throttle_norm"].mean()), 3),
-        "pct_wot": round(float((in_corner["throttle_norm"] >= WOT_THRESHOLD).mean()), 3),
+        "throttle_return_dist_m": offset(throttle_return) if has_throttle else np.nan,
+        "wot_dist_m": offset(wot) if has_throttle else np.nan,
+        "mean_throttle_norm": round(float(in_corner["throttle_norm"].mean()), 3) if has_throttle else np.nan,
+        "pct_wot": round(float((in_corner["throttle_norm"] >= WOT_THRESHOLD).mean()), 3) if has_throttle else np.nan,
         "mean_lat_g": round(float(in_corner["lat_g"].abs().mean()), 3),
         "pct_braking": round(float((in_corner["brake"] == 1).mean()), 3),
+        "obd_present": obd_present,
+        "speed_source": "obd" if obd_present else "gps",
         "track_dist_offset_med_m": round(tdo_med, 2),
         "track_dist_offset_max_m": round(tdo_max, 2),
         "sample_idx_start": int(in_corner.index[0]),

@@ -62,9 +62,9 @@ from the data.
 python -m lap_analyzer.cli.normalize --track <slug> --all
 ```
 
-Expect some sessions to report `noobd` (no OBD channels logged — ~3–4% of
-sessions; they're skipped, which is fine). Confirm the rest produce
-`data/sessions/<slug>/<sid>/{samples.parquet, laps.csv, meta.json}`.
+Expect some sessions to report `gpsonly` (no OBD channels logged — ~12% of
+sessions; they're ingested GPS-only, which is fine). Confirm every session
+produces `data/sessions/<slug>/<sid>/{samples.parquet, laps.csv, meta.json}`.
 
 ## Step 3 — Set `lap_length_internal_m` from real data
 

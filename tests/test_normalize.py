@@ -7,7 +7,7 @@ lap_analyzer source.
 
 Covered: session_id_from_filename, _parse_coords, parse_metadata_header,
 normalize_dataframe, compute_lap_times, lap_summary, reference_session_ids,
-and the MissingOBDError path of normalize_session.
+and the GPS-only (OBD-dropout) ingest path of normalize_session.
 """
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ import pandas as pd
 import pytest
 
 from lap_analyzer.normalize import (
-    MissingOBDError,
     _parse_coords,
     compute_lap_times,
     lap_summary,
@@ -606,20 +605,25 @@ def test_reference_session_ids_missing_notes(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# normalize_session — MissingOBDError path
+# normalize_session — GPS-only (OBD-dropout) ingest path
 # ---------------------------------------------------------------------------
 
+_UTC0 = pd.Timestamp("2026-01-01T20:00:00Z").timestamp()
 
-def _no_obd_csv_columns(n=30):
-    """The required GPS/accel/timing columns, but NO *OBD columns (per PIPELINE)."""
+
+def _multi_lap_base(n_per_lap=40, n_laps=3):
+    """GPS/accel/timing columns for n_laps laps (numeric epoch UTC), NO *OBD columns."""
+    n = n_per_lap * n_laps
+    t = np.arange(n) * 0.05
+    lap = np.repeat(np.arange(1, n_laps + 1), n_per_lap)
     return {
-        "Time": np.arange(n) * 0.05,
-        "UTC Time": ["2026-01-01 12:00:00"] * n,
-        "Lap": np.ones(n, dtype=int),
+        "Time": t,
+        "UTC Time": _UTC0 + t,
+        "Lap": lap,
         "Latitude": np.full(n, 45.0),
         "Longitude": np.full(n, -122.0),
         "Altitude (m)": np.full(n, 100.0),
-        "Speed (MPH)": np.full(n, 60.0),
+        "Speed (MPH)": np.full(n, 60.0),  # GPS speed
         "Accuracy (m)": np.full(n, 3.0),
         "Accel X": np.zeros(n),
         "Accel Y": np.zeros(n),
@@ -628,22 +632,68 @@ def _no_obd_csv_columns(n=30):
     }
 
 
-# SPEC: normalize.normalize_session — CSV missing OBD columns raises MissingOBDError.
-# DATA_ROOT is pointed at an empty tmp_path so the documented "writes no output"
-# behavior cannot touch the real bundle; the CSV itself comes from the fixture.
-def test_normalize_session_missing_obd_raises(make_trackaddict_csv, monkeypatch, tmp_path):
+def _with_obd(columns):
+    """Add the 6 raw *OBD columns to a base column dict."""
+    n = len(columns["Time"])
+    return {
+        **columns,
+        "Engine Speed (RPM) *OBD": np.full(n, 4000.0),
+        "Vehicle Speed (mph) *OBD": np.full(n, 58.0),
+        "Throttle Position (%) *OBD": np.full(n, 50.0),
+        "Engine Coolant Temp (F) *OBD": np.full(n, 200.0),
+        "Intake Air Temp (F) *OBD": np.full(n, 90.0),
+        "Intake Manifold Pressure (PSI) *OBD": np.full(n, 14.0),
+    }
+
+
+# SPEC: normalize.normalize_session — CSV missing OBD columns is ingested GPS-only
+# (output written, meta.has_obd False, lap times present), not rejected.
+def test_normalize_session_missing_obd_ingests_gps_only(make_trackaddict_csv, monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_ROOT", str(tmp_path / "data"))
-    csv = make_trackaddict_csv(_no_obd_csv_columns())
-    with pytest.raises(MissingOBDError):
-        normalize_session(csv, "ridge", tmp_path / "out")
+    csv = make_trackaddict_csv(_multi_lap_base())
+    out = tmp_path / "out"
+    meta = normalize_session(csv, "ridge", out)
+
+    assert meta.has_obd is False
+    sess = out / meta.session_id
+    assert (sess / "samples.parquet").exists()
+    laps = pd.read_csv(sess / "laps.csv")
+    assert "lap_time_s" in laps.columns
+    assert laps["lap_time_s"].notna().all()
 
 
-# SPEC: normalize.normalize_session — no output is written when OBD is missing
-def test_normalize_session_missing_obd_writes_nothing(make_trackaddict_csv, monkeypatch, tmp_path):
-    data_root = tmp_path / "data"
-    monkeypatch.setenv("DATA_ROOT", str(data_root))
-    csv = make_trackaddict_csv(_no_obd_csv_columns())
-    with pytest.raises(MissingOBDError):
-        normalize_session(csv, "ridge", data_root / "sessions" / "ridge")
-    # no normalized session artifact should have been produced for this run
-    assert not data_root.exists() or not any(data_root.rglob("*.parquet"))
+# SPEC: normalize.normalize_session — GPS-only samples have all-NaN OBD channels and
+# a monotonic dist_m integrated from GPS speed.
+def test_normalize_session_gps_only_samples(make_trackaddict_csv, monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path / "data"))
+    csv = make_trackaddict_csv(_multi_lap_base())
+    out = tmp_path / "out"
+    meta = normalize_session(csv, "ridge", out)
+    s = pd.read_parquet(out / meta.session_id / "samples.parquet")
+    for col in ("rpm", "speed_mph", "coolant_f", "iat_f"):
+        assert s[col].isna().all(), col
+    assert (s["dist_m"].diff().dropna() >= -1e-9).all()  # monotonic non-decreasing
+    assert s["dist_m"].iloc[-1] > 0  # GPS speed produced real distance
+
+
+# SPEC: normalize.normalize_session — OBD-derived meta fields are None when GPS-only
+def test_normalize_session_gps_only_meta_obd_fields_none(make_trackaddict_csv, monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path / "data"))
+    csv = make_trackaddict_csv(_multi_lap_base())
+    meta = normalize_session(csv, "ridge", tmp_path / "out")
+    assert meta.speed_max_obd_mph is None
+    assert meta.rpm_max is None
+    assert meta.throttle_max_observed is None
+    assert meta.coolant_max_f is None
+    assert meta.iat_max_f is None
+
+
+# SPEC: normalize.normalize_session — a CSV WITH all OBD columns yields has_obd True
+# and populated OBD meta (regression: existing behavior unchanged).
+def test_normalize_session_with_obd_has_obd_true(make_trackaddict_csv, monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path / "data"))
+    csv = make_trackaddict_csv(_with_obd(_multi_lap_base()))
+    meta = normalize_session(csv, "ridge", tmp_path / "out")
+    assert meta.has_obd is True
+    assert meta.rpm_max is not None
+    assert meta.speed_max_obd_mph is not None
