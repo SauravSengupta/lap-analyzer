@@ -163,7 +163,7 @@ def _insert_gap_breaks(df: pd.DataFrame, x_col: str, gap_threshold: float = 30.0
 # Bump _SECTION_TIMES_VERSION when section_times() / span_time() / range
 # section-time logic changes — baked into the cached functions' source via the
 # default arg below, so @st.cache_data invalidates on reload.
-_SECTION_TIMES_VERSION = 5
+_SECTION_TIMES_VERSION = 6
 
 
 @st.cache_data(show_spinner="computing per-corner section times (one-time)")
@@ -364,7 +364,7 @@ with st.sidebar:
     is_single = (not is_full_lap) and len(range_corners) == 1
     is_range = (not is_full_lap) and len(range_corners) > 1
     range_sec_t = (
-        pd.DataFrame(columns=["session_id", "lap", "section_time_s", "obd_discrepancy_m"])
+        pd.DataFrame(columns=["session_id", "lap", "section_time_s"])
         if is_full_lap else _range_section_times(track, from_choice, to_choice))
 
     if not is_full_lap:

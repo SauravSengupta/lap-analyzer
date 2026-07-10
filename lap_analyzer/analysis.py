@@ -126,20 +126,20 @@ def section_times(
     track_def: dict,
     pre_m: float = 50.0,
     post_cap_m: float = 250.0,
-    obd_distance_tolerance_m: float = 15.0,
 ) -> pd.DataFrame:
-    """For every (session_id, lap, corner_id), compute time across the corner's section
-    as the (interpolated) interval between the first track_dist_m crossings of the
-    section bounds. Returns long-form: session_id, lap, corner_id, section_time_s.
+    """For every (session_id, lap, corner_id), the gate-to-gate section time.
 
-    Rows are emitted only when:
-    - the lap crosses both bounds (no extrapolation), AND
-    - the OBD-integrated distance traversed during the section is within
-      `obd_distance_tolerance_m` of the nominal section width. This rejects
-      GPS-glitched laps that "win" by recording a shorter physical path than
-      the section nominally spans.
+    Boundaries are physical gates (perpendicular to the centerline) at the
+    section's start/end distances; the time is between the lap's crossings.
+    A transit is emitted whenever both gates are crossed in order. Line-length
+    variation is preserved (a longer line takes longer); it is never rejected.
+    Long-form: session_id, lap, corner_id, section_time_s.
     """
     bounds = section_bounds(track_def, pre_m=pre_m, post_cap_m=post_cap_m)
+    centerline = load_centerline(track)
+    frame = TrackFrame.from_centerline(centerline)
+    gates = {cid: (build_gate(centerline, a, frame), build_gate(centerline, b, frame), a, b)
+             for cid, (a, b) in bounds.items()}
     rows: list[tuple] = []
     root = sessions_dir(track)
     for sid_dir in sorted(p for p in root.iterdir() if p.is_dir()):
@@ -148,29 +148,21 @@ def section_times(
             continue
         sid = sid_dir.name
         try:
-            s = pd.read_parquet(sp, columns=["lap", "t", "track_dist_m", "dist_lap_m"])
+            s = pd.read_parquet(sp, columns=["lap", "t", "track_dist_m", "lat", "long"])
         except Exception:
             continue
         s = s.sort_values(["lap", "t"])
         for lap_n, g in s.groupby("lap"):
-            xs = g["track_dist_m"].to_numpy()
-            ts = g["t"].to_numpy()
-            ds = g["dist_lap_m"].to_numpy()
-            if len(xs) < 2:
-                continue
-            for cid, (a, b) in bounds.items():
-                ta = _first_crossing_t(xs, ts, a)
-                if ta is None:
+            lat = g["lat"].to_numpy(); lon = g["long"].to_numpy()
+            tt = g["t"].to_numpy(); td = g["track_dist_m"].to_numpy()
+            for cid, (ga, gb, a, b) in gates.items():
+                t_a = gate_crossing_time(lat, lon, tt, td, ga, frame, a)
+                if t_a is None:
                     continue
-                tb = _first_crossing_t(xs, ts, b, after_t=ta)
-                if tb is None:
+                t_b = gate_crossing_time(lat, lon, tt, td, gb, frame, b)
+                if t_b is None or t_b <= t_a:
                     continue
-                # OBD-distance sanity check: reject if the car's physically traveled
-                # distance differs from the nominal section width by more than tolerance.
-                obd_dist = float(np.interp(tb, ts, ds) - np.interp(ta, ts, ds))
-                if abs(obd_dist - (b - a)) > obd_distance_tolerance_m:
-                    continue
-                rows.append((sid, int(lap_n), cid, tb - ta))
+                rows.append((sid, int(lap_n), cid, t_b - t_a))
     return pd.DataFrame(rows, columns=["session_id", "lap", "corner_id", "section_time_s"])
 
 
@@ -287,33 +279,6 @@ def derive_gear(
     return gear.reindex(samples.index)
 
 
-def _span_crossing(
-    lap_samples: pd.DataFrame, dist_a: float, dist_b: float
-) -> tuple[float, float] | tuple[None, None]:
-    """Raw span measurement for one lap between two track_dist_m positions.
-
-    Returns (elapsed_s, obd_discrepancy_m), or (None, None) if either bound
-    isn't crossed. obd_discrepancy_m = OBD-integrated distance travelled minus
-    (dist_b - dist_a): a GPS glitch that mis-scales track_dist_m, or a tighter/
-    wider racing line, shows up as a non-zero value. No tolerance is applied —
-    callers decide.
-    """
-    s = lap_samples.sort_values("t")
-    xs = s["track_dist_m"].to_numpy()
-    ts = s["t"].to_numpy()
-    ds = s["dist_lap_m"].to_numpy()
-    if len(xs) < 2:
-        return None, None
-    ta = _first_crossing_t(xs, ts, dist_a)
-    if ta is None:
-        return None, None
-    tb = _first_crossing_t(xs, ts, dist_b, after_t=ta)
-    if tb is None:
-        return None, None
-    obd_dist = float(np.interp(tb, ts, ds) - np.interp(ta, ts, ds))
-    return float(tb - ta), obd_dist - (dist_b - dist_a)
-
-
 def span_time(
     lap_samples: pd.DataFrame,
     dist_a: float,
@@ -379,26 +344,19 @@ def range_section_times(
     to_id: str,
     pre_m: float = 50.0,
     post_cap_m: float = 250.0,
-    obd_distance_tolerance_m: float | None = None,
 ) -> pd.DataFrame:
-    """For every (session_id, lap), elapsed time across the from_id..to_id
-    section window. Returns long-form columns: session_id, lap, section_time_s,
-    obd_discrepancy_m.
+    """For every (session_id, lap), gate-to-gate time across from_id..to_id.
 
-    A lap is emitted only when it cleanly crosses both bounds and its OBD-
-    integrated distance matches the nominal span within the tolerance (rejects
-    GPS-glitched laps). obd_distance_tolerance_m defaults to None → the
-    tolerance scales with span length (max(15.0, 0.04 * span)), so a long range
-    isn't rejected for normal racing-line path-length variation. For
-    from_id == to_id this matches section_times().
-
-    obd_discrepancy_m is the signed OBD-vs-track_dist divergence per lap — a
-    consumer that needs a glitch-free reference (e.g. find_best_lap) can gate on
-    it with a tighter bound than the loose emission tolerance.
+    Uses one entry gate (range start) and one exit gate (range end). Emitted
+    whenever both gates are crossed in order; no distance tolerance. For
+    from_id == to_id this matches section_times() for that corner.
+    Long-form: session_id, lap, section_time_s.
     """
     a, b = section_range_bounds(track_def, from_id, to_id, pre_m, post_cap_m)
-    tol = (obd_distance_tolerance_m if obd_distance_tolerance_m is not None
-           else max(15.0, 0.04 * (b - a)))
+    centerline = load_centerline(track)
+    frame = TrackFrame.from_centerline(centerline)
+    ga = build_gate(centerline, a, frame)
+    gb = build_gate(centerline, b, frame)
     rows: list[tuple] = []
     root = sessions_dir(track)
     for sid_dir in sorted(p for p in root.iterdir() if p.is_dir()):
@@ -407,17 +365,21 @@ def range_section_times(
             continue
         sid = sid_dir.name
         try:
-            s = pd.read_parquet(sp, columns=["lap", "t", "track_dist_m", "dist_lap_m"])
+            s = pd.read_parquet(sp, columns=["lap", "t", "track_dist_m", "lat", "long"])
         except Exception:
             continue
         s = s.sort_values(["lap", "t"])
         for lap_n, g in s.groupby("lap"):
-            elapsed, discrepancy = _span_crossing(g, a, b)
-            if elapsed is None or abs(discrepancy) > tol:
+            lat = g["lat"].to_numpy(); lon = g["long"].to_numpy()
+            tt = g["t"].to_numpy(); td = g["track_dist_m"].to_numpy()
+            t_a = gate_crossing_time(lat, lon, tt, td, ga, frame, a)
+            if t_a is None:
                 continue
-            rows.append((sid, int(lap_n), elapsed, discrepancy))
-    return pd.DataFrame(
-        rows, columns=["session_id", "lap", "section_time_s", "obd_discrepancy_m"])
+            t_b = gate_crossing_time(lat, lon, tt, td, gb, frame, b)
+            if t_b is None or t_b <= t_a:
+                continue
+            rows.append((sid, int(lap_n), t_b - t_a))
+    return pd.DataFrame(rows, columns=["session_id", "lap", "section_time_s"])
 
 
 def classify_t8_section(

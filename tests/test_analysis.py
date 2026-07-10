@@ -414,6 +414,20 @@ def test_span_time_immune_to_lateral_line_offset(make_lap_samples):
     assert off == pytest.approx(on, abs=0.05)
 
 
+def test_range_section_times_emits_t6_for_fast_laps():
+    # SPEC: gate-crossing section times no longer drop genuine racing-line laps.
+    # On 20260702-101432, T6 previously kept only the two slowest clean laps;
+    # the fast laps (L2/L3/L4) must now be emitted with positive times.
+    from lap_analyzer.analysis import range_section_times
+    td = _ridge_track_def()
+    df = range_section_times("ridge", td, "T6", "T6")
+    sess = df[df["session_id"] == "20260702-101432"]
+    got = set(sess["lap"].astype(int))
+    assert {2, 3, 4}.issubset(got)
+    assert (sess["section_time_s"] > 0).all()
+    assert "obd_discrepancy_m" not in df.columns
+
+
 # ---------------------------------------------------------------------------
 # section_range_bounds
 # ---------------------------------------------------------------------------
