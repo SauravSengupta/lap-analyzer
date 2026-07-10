@@ -17,8 +17,8 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from lap_analyzer.analysis import (
-    _first_crossing_t,
     lap_summary,
+    load_centerline,
     range_section_times,
     section_bounds,
     section_range_bounds,
@@ -26,6 +26,7 @@ from lap_analyzer.analysis import (
     top_decile_laps,
 )
 from lap_analyzer.fused_axis import compute_fused_dist
+from lap_analyzer.gates import TrackFrame, build_gate, gate_crossing_time
 from shared import available_tracks, current_track, drop_gps_glitches as _drop_gps_glitches
 from shared import corpus as _corpus, laps as _laps, track_def as _track_def
 from shared import samples as _samples, session_hhmm, format_lap_time
@@ -209,11 +210,12 @@ def reset_cascade_to(date_str, sid: str, lap: int):
     st.session_state["pick_lap_sel"] = lap
 
 
-OBD_DISTANCE_TOLERANCE_M = 15.0  # mirror of section_times() default; for tooltip text
-
-
 def _section_time_help(track: str, sid_: str, lap_: int, corner: str) -> str | None:
-    """Diagnostic text explaining why section_time is missing for this (sid, lap, corner)."""
+    """Diagnostic text explaining why a gate-to-gate section_time is missing.
+
+    Section times are emitted only when the lap's GPS path crosses both the
+    entry and exit gate (line segments laid across the track at the section
+    bounds). A missing time means one gate was never crossed."""
     if corner == "full lap":
         return None
     a, b = sec_bounds_all[corner]
@@ -221,25 +223,21 @@ def _section_time_help(track: str, sid_: str, lap_: int, corner: str) -> str | N
         s = _samples(track, sid_, lap_).sort_values("t").reset_index(drop=True)
     except Exception:
         return "Samples not available for this lap."
-    xs = s["track_dist_m"].to_numpy()
+    lat = s["lat"].to_numpy()
+    lon = s["long"].to_numpy()
     ts = s["t"].to_numpy()
-    ds = s["dist_lap_m"].to_numpy()
-    ta = _first_crossing_t(xs, ts, a)
-    if ta is None:
-        return f"Lap didn't cross the section start ({a:.0f}m) — section_time can't be computed."
-    tb = _first_crossing_t(xs, ts, b, after_t=ta)
-    if tb is None:
-        return f"Lap didn't cross the section end ({b:.0f}m) — section_time can't be computed."
-    obd_dist = float(np.interp(tb, ts, ds) - np.interp(ta, ts, ds))
-    disc = obd_dist - (b - a)
-    direction = "shorter" if disc < 0 else "longer"
-    return (
-        f"section_time rejected by OBD-distance validation. "
-        f"OBD says the car physically traveled {obd_dist:.0f}m, "
-        f"but the section nominally spans {b - a:.0f}m "
-        f"({disc:+.0f}m, {abs(disc):.0f}m {direction}; threshold ±{OBD_DISTANCE_TOLERANCE_M:.0f}m). "
-        f"Likely a GPS glitch in this section."
-    )
+    td = s["track_dist_m"].to_numpy()
+    centerline = load_centerline(track)
+    frame = TrackFrame.from_centerline(centerline)
+    if gate_crossing_time(lat, lon, ts, td, build_gate(centerline, a, frame), frame, a) is None:
+        return (f"Lap didn't cross the entry gate at {a:.0f}m — its GPS path stayed "
+                f"outside the ±40m gate there (a very wide line, or a GPS data gap). "
+                f"section_time can't be computed.")
+    if gate_crossing_time(lat, lon, ts, td, build_gate(centerline, b, frame), frame, b) is None:
+        return (f"Lap didn't cross the exit gate at {b:.0f}m — its GPS path stayed "
+                f"outside the ±40m gate there (a very wide line, or a GPS data gap). "
+                f"section_time can't be computed.")
+    return None
 
 
 # --- sidebar: Track picker --------------------------------------------------
