@@ -293,6 +293,7 @@ def span_time(
     centerline) and returns the time between the lap's crossings, or None if
     either gate isn't crossed. Immune to lateral GPS/line offset; no distance
     tolerance (a longer line legitimately takes longer)."""
+    lap_samples = lap_samples.sort_values("t")
     if frame is None:
         frame = TrackFrame.from_centerline(centerline)
     ga = build_gate(centerline, dist_a, frame, half_width_m)

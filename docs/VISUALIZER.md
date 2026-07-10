@@ -83,10 +83,12 @@ Selecting `From`/`To` focuses the whole page on that stretch:
 - **full lap** compares whole laps.
 
 Section times come from `lap_analyzer.analysis.section_times` /
-`range_section_times`, which time the interval between the first `track_dist_m`
-crossings of the section bounds and reject laps whose OBD-integrated distance over
-the interval disagrees with the nominal span (a GPS glitch). The channel chart
-adds ±200 m of context on each side so the adjacent brake zones are visible.
+`range_section_times`, which time each lap between two **gates** — line segments
+laid across the track (perpendicular to the centerline, ±40 m wide) at the section
+bounds — measured where the lap's GPS path crosses them. A time is emitted whenever
+both gates are crossed; a genuinely wider line legitimately takes longer and is not
+rejected. The channel chart adds ±200 m of context on each side so the adjacent
+brake zones are visible.
 
 ## The Δt panel
 

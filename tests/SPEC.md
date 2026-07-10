@@ -464,19 +464,21 @@ Needs `t, rpm, speed_mph` columns (use `make_lap_samples`).
 ## analysis.span_time
 
 Import: `from lap_analyzer.analysis import span_time`. Signature:
-`(lap_samples, dist_a, dist_b, obd_tol_m=None) -> float | None`. Needs
-`t, track_dist_m, dist_lap_m`.
+`(lap_samples, dist_a, dist_b, centerline, frame=None, half_width_m=40.0,
+seed_window_m=120.0) -> float | None`. Needs `lat, long, t, track_dist_m`.
 
-- **Contract:** elapsed seconds between the first crossing of `dist_a` and the
-  first later crossing of `dist_b`.
+- **Contract:** gate-to-gate elapsed seconds. A gate is a line segment laid
+  across the track (perpendicular to the centerline) at each of `dist_a`/`dist_b`;
+  the time is between where the lap's `(lat, long)` path crosses the entry gate
+  and the exit gate.
 - **Invariants:**
-  - `None` if either bound isn't crossed.
-  - the OBD-distance sanity gate: returns `None` when `|obd_integrated_distance −
-    (dist_b − dist_a)| > tol`. With `obd_tol_m=None`, `tol = max(15.0, 0.04 ×
-    (dist_b − dist_a))` (scales with span so long multi-corner spans aren't
-    rejected for normal racing-line variation).
-  - a clean synthetic lap where `track_dist_m` and `dist_lap_m` advance together
-    returns the true elapsed time.
+  - `None` if either gate isn't crossed (the path stayed beyond the gate's
+    `±half_width_m`, or `t_b <= t_a`).
+  - Immune to lateral GPS/line offset: a wider line crossing the same gates
+    returns the same time — line-length variation is preserved, never rejected
+    (no OBD-distance tolerance).
+  - a clean synthetic lap driving down the centerline returns the true elapsed
+    time between the two gate positions.
 
 ## analysis.section_range_bounds
 
