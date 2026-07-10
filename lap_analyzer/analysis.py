@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from .config import corpus_dir, sessions_dir
+from .gates import TrackFrame, build_gate, gate_crossing_time
 
 
 def load_corpus(track: str) -> pd.DataFrame:
@@ -317,28 +318,31 @@ def span_time(
     lap_samples: pd.DataFrame,
     dist_a: float,
     dist_b: float,
-    obd_tol_m: float | None = None,
+    centerline: pd.DataFrame,
+    frame: "TrackFrame | None" = None,
+    half_width_m: float = 40.0,
+    seed_window_m: float = 120.0,
 ) -> float | None:
-    """Elapsed seconds for one lap between two track_dist_m positions.
-
-    Interpolates t at the first crossing of dist_a and the first later crossing
-    of dist_b. Returns None if either bound isn't crossed, or if the OBD-
-    integrated distance over the interval differs from (dist_b - dist_a) by more
-    than the tolerance (rejects GPS-glitched laps).
-
-    When obd_tol_m is None the tolerance scales with span length —
-    max(15.0, 0.04 * (dist_b - dist_a)). A long multi-corner span legitimately
-    accumulates a few percent of path-length variation from a tighter or wider
-    racing line; a fixed 15m would reject those clean laps. GPS glitches (tens
-    to hundreds of metres off) are still caught.
-    """
-    elapsed, discrepancy = _span_crossing(lap_samples, dist_a, dist_b)
-    if elapsed is None:
+    """Gate-to-gate elapsed seconds for one lap between centerline distances
+    dist_a and dist_b. Builds a gate at each distance (perpendicular to the
+    centerline) and returns the time between the lap's crossings, or None if
+    either gate isn't crossed. Immune to lateral GPS/line offset; no distance
+    tolerance (a longer line legitimately takes longer)."""
+    if frame is None:
+        frame = TrackFrame.from_centerline(centerline)
+    ga = build_gate(centerline, dist_a, frame, half_width_m)
+    gb = build_gate(centerline, dist_b, frame, half_width_m)
+    lat = lap_samples["lat"].to_numpy()
+    lon = lap_samples["long"].to_numpy()
+    t = lap_samples["t"].to_numpy()
+    td = lap_samples["track_dist_m"].to_numpy()
+    t_a = gate_crossing_time(lat, lon, t, td, ga, frame, dist_a, seed_window_m)
+    if t_a is None:
         return None
-    tol = obd_tol_m if obd_tol_m is not None else max(15.0, 0.04 * (dist_b - dist_a))
-    if abs(discrepancy) > tol:
+    t_b = gate_crossing_time(lat, lon, t, td, gb, frame, dist_b, seed_window_m)
+    if t_b is None or t_b <= t_a:
         return None
-    return elapsed
+    return float(t_b - t_a)
 
 
 def section_range_bounds(

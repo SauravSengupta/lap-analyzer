@@ -15,7 +15,7 @@ import streamlit as st
 from shared import (current_track, drop_gps_glitches, format_lap_time, laps,
                     samples, session_hhmm, track_def)
 from lap_analyzer.analysis import (classify_t8_section, derive_gear, gear_bands,
-                                   section_times, span_time)
+                                   load_centerline, section_times, span_time)
 
 st.set_page_config(page_title="Ridge — T8-T11 Downshift", layout="wide")
 st.title("Ridge — T8-T11 Downshift Comparison")
@@ -76,6 +76,7 @@ endpoint_m = T11["start_m"] if endpoint_choice == "T11 entry" else T10["end_m"]
 def _classify_all(track: str, endpoint: float, bands_key: tuple) -> pd.DataFrame:
     b = np.array(bands_key)
     td = track_def(track)
+    _centerline = load_centerline(track)
     rows = []
     for r in laps(track).itertuples(index=False):
         try:
@@ -94,7 +95,7 @@ def _classify_all(track: str, endpoint: float, bands_key: tuple) -> pd.DataFrame
             "excluded_reason": res["excluded_reason"],
             "downshift_dist_m": res["downshift_dist_m"],
             "t8_apex_gear": res["t8_apex_gear"],
-            "section_time_s": span_time(s, SPAN_A, endpoint),
+            "section_time_s": span_time(s, SPAN_A, endpoint, _centerline),
         })
     return pd.DataFrame(rows)
 
