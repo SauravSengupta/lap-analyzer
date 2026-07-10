@@ -16,6 +16,11 @@ def load_corpus(track: str) -> pd.DataFrame:
     return pd.read_parquet(corpus_dir() / f"{track}_corners.parquet")
 
 
+def load_centerline(track: str) -> pd.DataFrame:
+    """Read the synthetic centerline (track_dist_m -> lat/long ruler) for a track."""
+    return pd.read_parquet(corpus_dir() / f"{track}_centerline.parquet")
+
+
 def reliable_transits(corpus: pd.DataFrame) -> pd.DataFrame:
     """Rows passing the STANDARD spatial-reliability filter. Use for line / apex / map views."""
     return corpus[corpus["transit_reliable"]].copy()

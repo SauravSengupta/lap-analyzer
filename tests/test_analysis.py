@@ -626,6 +626,15 @@ def test_classify_t8_returns_documented_keys(make_lap_samples):
 # top_decile_laps / lap_summary / lap_index — integration tier (corpus-backed)
 # ---------------------------------------------------------------------------
 
+def test_load_centerline_has_position_columns():
+    # SPEC: analysis.load_centerline — reads data/corpus/<track>_centerline.parquet
+    from lap_analyzer.analysis import load_centerline
+    cl = load_centerline("ridge")
+    assert {"track_dist_m", "lat", "long"}.issubset(cl.columns)
+    assert len(cl) > 100
+    assert cl["track_dist_m"].is_monotonic_increasing
+
+
 @pytest.fixture
 def ridge_corpus(sample_data_root):
     """Load the committed Ridge corpus via the analysis library's loader.
