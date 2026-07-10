@@ -41,6 +41,58 @@ CHANNELS = {
 st.set_page_config(page_title="Lap Analyzer", layout="wide")
 
 
+def _fix_dropdown_overflow() -> None:
+    """Keep selectbox dropdowns inside the viewport.
+
+    Streamlit's selectbox popover (react-aria, since ~1.59) opens *below* the
+    input and does not flip up when the input sits near the bottom of the page —
+    so the list renders past the fold and, being ``position: fixed``, the page
+    can't scroll to reach it (most visible on the Lap picker at the sidebar's
+    bottom). This injects a MutationObserver into the parent document that, when
+    a dropdown would overflow, flips it above its input (and caps a very long
+    list to the viewport with internal scroll). No-op when the native placement
+    already fits. Remove once the upstream placement bug is fixed.
+    """
+    st.components.v1.html(
+        """
+<script>
+(function () {
+  const win = window.parent, doc = win.document;
+  const SEL = '[data-testid="stSelectboxVirtualDropdown"]';
+  const MARGIN = 8, INPUT_H = 40;
+  function fit(pop) {
+    const cs = getComputedStyle(pop);
+    const m = cs.transform.match(/matrix\\(1, 0, 0, 1, ([-\\d.]+), ([-\\d.]+)\\)/);
+    if (!m) return;                                   // not transform-positioned yet
+    const tx = parseFloat(m[1]), ty = parseFloat(m[2]);
+    const vh = win.innerHeight, avail = vh - 2 * MARGIN;
+    const listbox = pop.querySelector('[role="listbox"]');
+    let h = pop.getBoundingClientRect().height;
+    if (h > avail && listbox) {                       // taller than the viewport: cap + scroll
+      listbox.style.setProperty('max-height', avail + 'px', 'important');
+      h = pop.getBoundingClientRect().height;
+    }
+    if (ty + h <= vh - MARGIN && ty >= MARGIN) return; // native placement already fits
+    const above = ty - INPUT_H - h - MARGIN;           // flip above the input if it fits
+    const newTy = above >= MARGIN ? above : Math.max(MARGIN, vh - MARGIN - h);
+    if (Math.abs(newTy - ty) > 1)
+      pop.style.setProperty('transform', 'translate(' + tx + 'px, ' + newTy + 'px)', 'important');
+  }
+  function scan() { doc.querySelectorAll(SEL).forEach(fit); }
+  new MutationObserver(scan).observe(doc.body,
+    { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
+  win.addEventListener('resize', scan);
+  scan();
+})();
+</script>
+""",
+        height=0,
+    )
+
+
+_fix_dropdown_overflow()
+
+
 # Bump _GLITCH_FILTER_VERSION whenever _drop_gps_glitches logic changes — its
 # value is baked into the cached function's source via the keyword default below,
 # which forces @st.cache_data to invalidate. Otherwise the helper's source is
