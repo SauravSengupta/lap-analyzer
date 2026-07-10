@@ -63,12 +63,7 @@ def build_gate(
     i = int(np.argmin(np.abs(cd - dist_m)))
     i0 = max(0, i - 1)
     i1 = min(len(cd) - 1, i + 1)
-    lon_arr = centerline["long"].to_numpy()
-    lat_arr = centerline["lat"].to_numpy()
-    # Compute x relative to the first point on the track to align with track_dist_m
-    lon0_track = lon_arr[0]
-    x = (lon_arr - lon0_track) * frame.m_per_deg_lon
-    y = (lat_arr - frame.lat0) * frame.m_per_deg_lat
+    x, y = frame.to_xy(centerline["lat"].to_numpy(), centerline["long"].to_numpy())
     cx, cy = x[i], y[i]
     tx, ty = x[i1] - x[i0], y[i1] - y[i0]      # tangent
     tnorm = math.hypot(tx, ty)

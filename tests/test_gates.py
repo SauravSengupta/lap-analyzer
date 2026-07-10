@@ -29,11 +29,15 @@ def test_trackframe_to_xy_maps_degrees_to_meters():
 def test_build_gate_is_perpendicular_and_centered():
     cl = _straight_centerline()          # east-west line, tangent points +x
     frame = TrackFrame.from_centerline(cl)
-    mid = float(cl["track_dist_m"].iloc[len(cl) // 2])
+    i = len(cl) // 2
+    mid = float(cl["track_dist_m"].iloc[i])
     gate = build_gate(cl, mid, frame, half_width_m=40.0)
     # Gate is perpendicular to an east-west track => a north-south segment:
     # its two endpoints share x and differ in y by 2*half_width.
     assert gate.p1[0] == pytest.approx(gate.p2[0], abs=1e-6)
     assert abs(gate.p1[1] - gate.p2[1]) == pytest.approx(80.0, abs=1e-3)
-    # Centre of the gate sits on the centerline point at `mid` (x == mid meters here).
-    assert (gate.p1[0] + gate.p2[0]) / 2 == pytest.approx(mid, abs=0.5)
+    # Centre of the gate is the centerline point at `mid`, expressed in the SAME
+    # frame the crossing code uses (frame.to_xy) — NOT the raw track_dist_m value.
+    cx_exp, cy_exp = frame.to_xy(np.array([cl["lat"].iloc[i]]), np.array([cl["long"].iloc[i]]))
+    assert (gate.p1[0] + gate.p2[0]) / 2 == pytest.approx(cx_exp[0], abs=0.5)
+    assert (gate.p1[1] + gate.p2[1]) / 2 == pytest.approx(cy_exp[0], abs=0.5)
