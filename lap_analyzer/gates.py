@@ -42,3 +42,40 @@ class TrackFrame:
         x = (np.asarray(lon, dtype=float) - self.lon0) * self.m_per_deg_lon
         y = (np.asarray(lat, dtype=float) - self.lat0) * self.m_per_deg_lat
         return x, y
+
+
+@dataclass
+class Gate:
+    """A finite line segment across the track, in local meters."""
+
+    p1: np.ndarray  # [x, y]
+    p2: np.ndarray  # [x, y]
+
+
+def build_gate(
+    centerline: pd.DataFrame,
+    dist_m: float,
+    frame: TrackFrame,
+    half_width_m: float = 40.0,
+) -> Gate:
+    """Gate perpendicular to the centerline tangent at `dist_m`, +/- half_width_m wide."""
+    cd = centerline["track_dist_m"].to_numpy()
+    i = int(np.argmin(np.abs(cd - dist_m)))
+    i0 = max(0, i - 1)
+    i1 = min(len(cd) - 1, i + 1)
+    lon_arr = centerline["long"].to_numpy()
+    lat_arr = centerline["lat"].to_numpy()
+    # Compute x relative to the first point on the track to align with track_dist_m
+    lon0_track = lon_arr[0]
+    x = (lon_arr - lon0_track) * frame.m_per_deg_lon
+    y = (lat_arr - frame.lat0) * frame.m_per_deg_lat
+    cx, cy = x[i], y[i]
+    tx, ty = x[i1] - x[i0], y[i1] - y[i0]      # tangent
+    tnorm = math.hypot(tx, ty)
+    if tnorm == 0.0:
+        tx, ty, tnorm = 1.0, 0.0, 1.0
+    px, py = -ty / tnorm, tx / tnorm            # unit perpendicular
+    return Gate(
+        p1=np.array([cx + px * half_width_m, cy + py * half_width_m]),
+        p2=np.array([cx - px * half_width_m, cy - py * half_width_m]),
+    )
