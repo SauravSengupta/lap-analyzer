@@ -164,7 +164,7 @@ def _insert_gap_breaks(df: pd.DataFrame, x_col: str, gap_threshold: float = 30.0
 # Bump _SECTION_TIMES_VERSION when section_times() / span_time() / range
 # section-time logic changes — baked into the cached functions' source via the
 # default arg below, so @st.cache_data invalidates on reload.
-_SECTION_TIMES_VERSION = 6
+_SECTION_TIMES_VERSION = 7
 
 
 @st.cache_data(show_spinner="computing per-corner section times (one-time)")

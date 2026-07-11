@@ -85,9 +85,12 @@ Selecting `From`/`To` focuses the whole page on that stretch:
 Section times come from `lap_analyzer.analysis.section_times` /
 `range_section_times`, which time each lap between two **gates** — line segments
 laid across the track (perpendicular to the centerline, ±40 m wide) at the section
-bounds — measured where the lap's GPS path crosses them. A time is emitted whenever
-both gates are crossed; a genuinely wider line legitimately takes longer and is not
-rejected. The channel chart adds ±200 m of context on each side so the adjacent
+bounds — measured where the lap's GPS path crosses them. A time is emitted when
+both gates are crossed and the OBD distance driven between them is within a
+generous band of the nominal section length (`OBD_RATIO_BAND`, default 0.85–1.25×):
+a genuinely wider line legitimately takes longer and is kept, but a transit whose
+enclosed distance is implausible — a severe GPS glitch that mistimed a gate — is
+dropped. The channel chart adds ±200 m of context on each side so the adjacent
 brake zones are visible.
 
 ## The Δt panel

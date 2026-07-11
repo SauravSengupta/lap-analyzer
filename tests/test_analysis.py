@@ -375,9 +375,12 @@ def _straight_centerline_df(n=1001, lat=47.0, lon0=-123.0, length_m=2000.0):
                          "lat": np.full(n, lat), "long": lon})
 
 
-def _lap_along(cl, make_lap_samples, lat_offset_m=0.0, n=400, total_s=20.0):
+def _lap_along(cl, make_lap_samples, lat_offset_m=0.0, n=400, total_s=20.0, obd_scale=1.0):
     """A lap driving east down `cl`, sampled uniformly; track_dist_m is the
-    centerline projection (independent of the lateral offset)."""
+    centerline projection (independent of the lateral offset). `obd_scale`
+    scales dist_lap_m relative to track_dist_m, so the OBD distance between two
+    gate crossings is `obd_scale` × the nominal section length (obd_scale=1.0 is
+    a clean lap; <1 mimics a glitch that shortened the enclosed OBD distance)."""
     lon = np.linspace(cl["long"].iloc[0], cl["long"].iloc[-1], n)
     m_per_deg_lat = 111_132.0
     lat = np.full(n, cl["lat"].iloc[0] + lat_offset_m / m_per_deg_lat)
@@ -385,7 +388,34 @@ def _lap_along(cl, make_lap_samples, lat_offset_m=0.0, n=400, total_s=20.0):
     track = (lon - cl["long"].iloc[0]) * m_per_deg_lon
     t = np.linspace(0.0, total_s, n)
     return make_lap_samples(n=n, t=t, lat=lat, long=lon,
-                            track_dist_m=track, dist_lap_m=track)
+                            track_dist_m=track, dist_lap_m=track * obd_scale)
+
+
+def test_span_time_rejects_implausibly_short_obd(make_lap_samples):
+    # SPEC: analysis.span_time — a lap whose OBD distance between the gate
+    # crossings is far below nominal (a glitch mistimed a gate) is rejected;
+    # you cannot drive meaningfully shorter than the centerline.
+    cl = _straight_centerline_df(length_m=2000.0)
+    lap = _lap_along(cl, make_lap_samples, obd_scale=0.70)
+    assert span_time(lap, 500.0, 1500.0, cl) is None
+
+
+def test_span_time_rejects_implausibly_long_obd(make_lap_samples):
+    # SPEC: analysis.span_time — a lap whose OBD distance between the crossings
+    # is far above nominal (a glitch stretched the window) is rejected.
+    cl = _straight_centerline_df(length_m=2000.0)
+    lap = _lap_along(cl, make_lap_samples, obd_scale=1.40)
+    assert span_time(lap, 500.0, 1500.0, cl) is None
+
+
+def test_span_time_keeps_mild_line_variation(make_lap_samples):
+    # SPEC: analysis.span_time — a mildly longer line (OBD ~110% of nominal) is
+    # legitimate and kept; the band is generous on purpose.
+    cl = _straight_centerline_df(length_m=2000.0)
+    lap = _lap_along(cl, make_lap_samples, obd_scale=1.10)
+    out = span_time(lap, 500.0, 1500.0, cl)
+    assert out is not None
+    assert out == pytest.approx(10.0, abs=0.2)
 
 
 def test_span_time_uncrossed_bound_returns_none(make_lap_samples):
