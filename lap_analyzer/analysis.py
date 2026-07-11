@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from .config import corpus_dir, sessions_dir
+from .fused_axis import GLITCH_OFFSET_M
 from .gates import TrackFrame, build_gate, gate_crossing_time
 
 
@@ -121,38 +122,44 @@ def _first_crossing_t(xs: np.ndarray, ts: np.ndarray, target: float, after_t: fl
     return float(ts[i] + (target - xs[i]) / dx * (ts[i + 1] - ts[i]))
 
 
-# Glitch-at-gate detector for gate-to-gate section times. A gate crossing is only
-# trustworthy where the GPS is clean; a TrackAddict inner-loop glitch freezes /
-# walks track_dist_m and fires the gate at the wrong (lat,long) sample, mistiming
-# the crossing by seconds. The tell is a large track_dist_m-vs-dist_lap_m offset
-# (OBD is clean) local to a gate: on clean data these agree within ~10-25 m, a
-# glitch spikes to 50-70 m+. So a transit is dropped when |track_dist_m −
-# dist_lap_m| reaches GATE_GLITCH_OFFSET_M anywhere within GATE_GLITCH_WINDOW_M
-# (track-distance) of EITHER gate. This rejects the CAUSE (a mistimed gate), not
-# the SYMPTOM (a short OBD distance) — a genuinely tighter/shorter racing line has
-# a small, smooth offset and is kept. Replaces the old OBD-ratio band, which both
-# missed in-band glitches (e.g. ridge 20250810-110836 L4: ratio 0.88, 71 m spike,
-# entry gate ~1.6 s late) and dropped clean fast lines on the low side.
-GATE_GLITCH_OFFSET_M: float = 50.0
-GATE_GLITCH_WINDOW_M: float = 60.0
+# A section time is only trustworthy where GPS sampled finely enough to time the
+# gate crossings. crossing_gap_s measures that: the elapsed time between the good
+# GPS fixes bracketing a gate — the window in which the car physically crossed but
+# we have no trustworthy fix. Wide gap = coarse GPS (Mode 3) or a teleport-punctured
+# bracket (Mode 2). A transit is reliable when its max gate gap is below
+# CONFIDENCE_GAP_S. See docs/GPS_TRUST.md.
+CONFIDENCE_GAP_S: float = 0.4
 
 
-def _gates_glitch_free(
-    track_dist_m: np.ndarray, dist_lap_m: np.ndarray,
-    dist_a: float, dist_b: float,
-    window_m: float = GATE_GLITCH_WINDOW_M, offset_m: float = GATE_GLITCH_OFFSET_M,
-) -> bool:
-    """False when a GPS glitch makes a gate crossing untrustworthy: the
-    track_dist_m-vs-dist_lap_m offset reaches `offset_m` within `window_m`
-    (track-distance) of either gate. Only the gate neighbourhoods matter — a
-    mid-section glitch does not move a gate crossing, so it is not checked."""
+def crossing_gap_s(
+    t, track_dist_m, dist_lap_m, dist: float, glitch_m: float = GLITCH_OFFSET_M,
+) -> float:
+    """Elapsed seconds between the good GPS fixes bracketing centerline `dist`.
+
+    A good fix is a *fresh* sample (track_dist_m changed from the previous one,
+    not a frozen repeat) that is not a *teleport* (|track_dist_m - dist_lap_m| <
+    glitch_m). Returns inf if `dist` is not bracketed by good fixes below and
+    above. Large gap = the gate crossing time cannot be trusted.
+    """
+    t = np.asarray(t, dtype=float)
     td = np.asarray(track_dist_m, dtype=float)
-    off = np.abs(td - np.asarray(dist_lap_m, dtype=float))
-    for seed in (dist_a, dist_b):
-        near = np.abs(td - seed) <= window_m
-        if near.any() and off[near].max() >= offset_m:
-            return False
-    return True
+    dl = np.asarray(dist_lap_m, dtype=float)
+    if len(td) < 2:
+        return float("inf")
+    fresh = np.ones(len(td), dtype=bool)
+    fresh[1:] = np.abs(np.diff(td)) > 0.01
+    good = fresh & (np.abs(td - dl) < glitch_m)
+    gi = np.where(good)[0]
+    if len(gi) < 2:
+        return float("inf")
+    gtd = td[gi]
+    below = np.where(gtd <= dist)[0]
+    above = np.where(gtd > dist)[0]
+    if len(below) == 0 or len(above) == 0:
+        return float("inf")
+    i_lo = gi[below[-1]]
+    i_hi = gi[above[0]]
+    return abs(float(t[i_hi]) - float(t[i_lo]))
 
 
 def section_times(

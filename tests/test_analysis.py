@@ -31,9 +31,11 @@ import pandas as pd
 import pytest
 
 from lap_analyzer.analysis import (
+    CONFIDENCE_GAP_S,
     _confirm_runs,
     _first_crossing_t,
     classify_t8_section,
+    crossing_gap_s,
     derive_gear,
     find_gear_bands,
     section_bounds,
@@ -362,6 +364,47 @@ def test_derive_gear_nonqualifying_samples_not_freshly_assigned(make_lap_samples
     lap = make_lap_samples(n=n, speed_mph=5.0, rpm=4000)
     gear = derive_gear(lap, bands)
     assert gear.isna().all()
+
+
+# ---------------------------------------------------------------------------
+# crossing_gap_s — GPS-timing-confidence primitive
+# ---------------------------------------------------------------------------
+
+def test_crossing_gap_small_when_gps_dense():
+    # SPEC: crossing_gap_s — dense fresh fixes → tiny bracket gap at the gate.
+    n = 200
+    t = np.arange(n) * 0.05
+    track = np.linspace(0.0, 2000.0, n)      # fresh every sample
+    dl = track.copy()                         # clean: GPS == OBD
+    gap = crossing_gap_s(t, track, dl, 1000.0)
+    assert gap < 0.1
+
+
+def test_crossing_gap_large_when_gps_coarse():
+    # SPEC: crossing_gap_s — GPS frozen for long runs (≈1 Hz) → ~1 s gap.
+    n = 400
+    t = np.arange(n) * 0.05                    # 20 Hz sampling
+    true = np.linspace(0.0, 2000.0, n)
+    hold = 20                                  # GPS updates every 20 samples = 1 s
+    track = true[(np.arange(n) // hold) * hold]   # frozen then jumps
+    dl = true.copy()                           # OBD stays smooth/true
+    gap = crossing_gap_s(t, track, dl, 1000.0)
+    assert gap == pytest.approx(1.0, abs=0.1)
+
+
+def test_crossing_gap_excludes_teleport_fix():
+    # SPEC: crossing_gap_s — a teleport fix at the gate is excluded, widening the
+    # bracket to the neighboring good fixes.
+    n = 200
+    t = np.arange(n) * 0.05
+    track = np.linspace(0.0, 2000.0, n)
+    dl = track.copy()
+    i = int(np.argmin(np.abs(track - 1000.0)))    # sample nearest the gate
+    track[i] += 120.0                              # teleport: |track-dl| = 120 ≥ 50
+    dl_teleport = track.copy(); dl_teleport[i] -= 120.0   # OBD unaffected at i
+    gap = crossing_gap_s(t, track, dl_teleport, 1000.0)
+    # bracket spans 2 sample-intervals (the excluded teleport), not 1 (0.05 s)
+    assert gap == pytest.approx(0.10, abs=1e-6)
 
 
 # ---------------------------------------------------------------------------
