@@ -21,7 +21,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from lap_analyzer.fused_axis import compute_fused_dist
+from lap_analyzer.fused_axis import GLITCH_OFFSET_M, compute_fused_dist, glitch_runs
 
 
 def _is_monotonic_nondecreasing(arr) -> bool:
@@ -183,9 +183,6 @@ def test_returns_ndarray_of_correct_length(make_lap_samples):
 # ---------------------------------------------------------------------------
 # glitch_runs tests
 # ---------------------------------------------------------------------------
-
-from lap_analyzer.fused_axis import GLITCH_OFFSET_M, glitch_runs
-
 
 def test_glitch_runs_none_when_clean():
     # SPEC: fused_axis.glitch_runs — no run when GPS ~= OBD everywhere.

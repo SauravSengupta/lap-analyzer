@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from lap_analyzer.gates import Gate, TrackFrame, build_gate, gate_crossing_time
+from lap_analyzer.gates import TrackFrame, build_gate, gate_crossing_time
 
 
 def _straight_centerline(n=1001, lat=47.0, lon0=-123.0, length_deg=0.02):

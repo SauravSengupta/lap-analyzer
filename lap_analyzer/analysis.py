@@ -153,8 +153,10 @@ def section_times(
             continue
         s = s.sort_values(["lap", "t"])
         for lap_n, g in s.groupby("lap"):
-            lat = g["lat"].to_numpy(); lon = g["long"].to_numpy()
-            tt = g["t"].to_numpy(); td = g["track_dist_m"].to_numpy()
+            lat = g["lat"].to_numpy()
+            lon = g["long"].to_numpy()
+            tt = g["t"].to_numpy()
+            td = g["track_dist_m"].to_numpy()
             for cid, (ga, gb, a, b) in gates.items():
                 t_a = gate_crossing_time(lat, lon, tt, td, ga, frame, a)
                 if t_a is None:
@@ -371,8 +373,10 @@ def range_section_times(
             continue
         s = s.sort_values(["lap", "t"])
         for lap_n, g in s.groupby("lap"):
-            lat = g["lat"].to_numpy(); lon = g["long"].to_numpy()
-            tt = g["t"].to_numpy(); td = g["track_dist_m"].to_numpy()
+            lat = g["lat"].to_numpy()
+            lon = g["long"].to_numpy()
+            tt = g["t"].to_numpy()
+            td = g["track_dist_m"].to_numpy()
             t_a = gate_crossing_time(lat, lon, tt, td, ga, frame, a)
             if t_a is None:
                 continue
