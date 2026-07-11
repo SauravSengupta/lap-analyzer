@@ -85,16 +85,16 @@ Selecting `From`/`To` focuses the whole page on that stretch:
 Section times come from `lap_analyzer.analysis.section_times` /
 `range_section_times`, which time each lap between two **gates** — line segments
 laid across the track (perpendicular to the centerline, ±40 m wide) at the section
-bounds — measured where the lap's GPS path crosses them. A time is emitted when
-both gates are crossed and neither gate is glitched: a transit is dropped when a
-GPS glitch near a gate mistimed the crossing — `|track_dist_m − dist_lap_m|`
-reaches `GATE_GLITCH_OFFSET_M` (default 50 m) within `GATE_GLITCH_WINDOW_M`
-(default 60 m) of a gate. This rejects the *cause* (a mistimed gate) rather than
-the *symptom* (a short/long enclosed distance): a genuinely tighter or wider line
-has a small, smooth offset and is kept, while a glitch spikes 50–70 m+ at a gate
-and is dropped. (Replaced the earlier `OBD_RATIO_BAND`, which let in-band glitches
-through and dropped clean fast lines.) The channel chart adds ±200 m of context on
-each side so the adjacent brake zones are visible.
+bounds — measured where the lap's GPS path crosses them. Each transit carries a
+**GPS-timing-confidence** flag (`timing_reliable`): a gate crossing can only be
+timed as finely as the GPS sampled, so `crossing_gap_s` measures the elapsed time
+between the good GPS fixes bracketing a gate. When that gap is below
+`CONFIDENCE_GAP_S` (0.4 s) the gate-crossing time is used (line-length preserved);
+when GPS was too coarse (≈1 Hz) or a teleport punctured the bracket, the time falls
+back to an OBD-anchored estimate, is flagged, and is **excluded from the "fastest
+through" ranking** — surfaced with a warning rather than dropped. See
+[GPS_TRUST.md](GPS_TRUST.md). The channel chart adds ±200 m of context on each side
+so the adjacent brake zones are visible.
 
 ## The Δt panel
 
