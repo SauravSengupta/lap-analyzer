@@ -17,15 +17,16 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from lap_analyzer.analysis import (
-    _first_crossing_t,
     lap_summary,
+    load_centerline,
     range_section_times,
     section_bounds,
     section_range_bounds,
     section_times,
     top_decile_laps,
 )
-from lap_analyzer.fused_axis import compute_fused_dist
+from lap_analyzer.fused_axis import GLITCH_OFFSET_M, compute_fused_dist, glitch_runs
+from lap_analyzer.gates import TrackFrame, build_gate, gate_crossing_time
 from shared import available_tracks, current_track, drop_gps_glitches as _drop_gps_glitches
 from shared import corpus as _corpus, laps as _laps, track_def as _track_def
 from shared import samples as _samples, session_hhmm, format_lap_time
@@ -39,6 +40,58 @@ CHANNELS = {
 }
 
 st.set_page_config(page_title="Lap Analyzer", layout="wide")
+
+
+def _fix_dropdown_overflow() -> None:
+    """Keep selectbox dropdowns inside the viewport.
+
+    Streamlit's selectbox popover (react-aria, since ~1.59) opens *below* the
+    input and does not flip up when the input sits near the bottom of the page —
+    so the list renders past the fold and, being ``position: fixed``, the page
+    can't scroll to reach it (most visible on the Lap picker at the sidebar's
+    bottom). This injects a MutationObserver into the parent document that, when
+    a dropdown would overflow, flips it above its input (and caps a very long
+    list to the viewport with internal scroll). No-op when the native placement
+    already fits. Remove once the upstream placement bug is fixed.
+    """
+    st.components.v1.html(
+        """
+<script>
+(function () {
+  const win = window.parent, doc = win.document;
+  const SEL = '[data-testid="stSelectboxVirtualDropdown"]';
+  const MARGIN = 8, INPUT_H = 40;
+  function fit(pop) {
+    const cs = getComputedStyle(pop);
+    const m = cs.transform.match(/matrix\\(1, 0, 0, 1, ([-\\d.]+), ([-\\d.]+)\\)/);
+    if (!m) return;                                   // not transform-positioned yet
+    const tx = parseFloat(m[1]), ty = parseFloat(m[2]);
+    const vh = win.innerHeight, avail = vh - 2 * MARGIN;
+    const listbox = pop.querySelector('[role="listbox"]');
+    let h = pop.getBoundingClientRect().height;
+    if (h > avail && listbox) {                       // taller than the viewport: cap + scroll
+      listbox.style.setProperty('max-height', avail + 'px', 'important');
+      h = pop.getBoundingClientRect().height;
+    }
+    if (ty + h <= vh - MARGIN && ty >= MARGIN) return; // native placement already fits
+    const above = ty - INPUT_H - h - MARGIN;           // flip above the input if it fits
+    const newTy = above >= MARGIN ? above : Math.max(MARGIN, vh - MARGIN - h);
+    if (Math.abs(newTy - ty) > 1)
+      pop.style.setProperty('transform', 'translate(' + tx + 'px, ' + newTy + 'px)', 'important');
+  }
+  function scan() { doc.querySelectorAll(SEL).forEach(fit); }
+  new MutationObserver(scan).observe(doc.body,
+    { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
+  win.addEventListener('resize', scan);
+  scan();
+})();
+</script>
+""",
+        height=0,
+    )
+
+
+_fix_dropdown_overflow()
 
 
 # Bump _GLITCH_FILTER_VERSION whenever _drop_gps_glitches logic changes — its
@@ -111,7 +164,7 @@ def _insert_gap_breaks(df: pd.DataFrame, x_col: str, gap_threshold: float = 30.0
 # Bump _SECTION_TIMES_VERSION when section_times() / span_time() / range
 # section-time logic changes — baked into the cached functions' source via the
 # default arg below, so @st.cache_data invalidates on reload.
-_SECTION_TIMES_VERSION = 5
+_SECTION_TIMES_VERSION = 9
 
 
 @st.cache_data(show_spinner="computing per-corner section times (one-time)")
@@ -157,11 +210,12 @@ def reset_cascade_to(date_str, sid: str, lap: int):
     st.session_state["pick_lap_sel"] = lap
 
 
-OBD_DISTANCE_TOLERANCE_M = 15.0  # mirror of section_times() default; for tooltip text
-
-
 def _section_time_help(track: str, sid_: str, lap_: int, corner: str) -> str | None:
-    """Diagnostic text explaining why section_time is missing for this (sid, lap, corner)."""
+    """Diagnostic text explaining why a gate-to-gate section_time is missing.
+
+    Section times are emitted only when the lap's GPS path crosses both the
+    entry and exit gate (line segments laid across the track at the section
+    bounds). A missing time means one gate was never crossed."""
     if corner == "full lap":
         return None
     a, b = sec_bounds_all[corner]
@@ -169,25 +223,21 @@ def _section_time_help(track: str, sid_: str, lap_: int, corner: str) -> str | N
         s = _samples(track, sid_, lap_).sort_values("t").reset_index(drop=True)
     except Exception:
         return "Samples not available for this lap."
-    xs = s["track_dist_m"].to_numpy()
+    lat = s["lat"].to_numpy()
+    lon = s["long"].to_numpy()
     ts = s["t"].to_numpy()
-    ds = s["dist_lap_m"].to_numpy()
-    ta = _first_crossing_t(xs, ts, a)
-    if ta is None:
-        return f"Lap didn't cross the section start ({a:.0f}m) — section_time can't be computed."
-    tb = _first_crossing_t(xs, ts, b, after_t=ta)
-    if tb is None:
-        return f"Lap didn't cross the section end ({b:.0f}m) — section_time can't be computed."
-    obd_dist = float(np.interp(tb, ts, ds) - np.interp(ta, ts, ds))
-    disc = obd_dist - (b - a)
-    direction = "shorter" if disc < 0 else "longer"
-    return (
-        f"section_time rejected by OBD-distance validation. "
-        f"OBD says the car physically traveled {obd_dist:.0f}m, "
-        f"but the section nominally spans {b - a:.0f}m "
-        f"({disc:+.0f}m, {abs(disc):.0f}m {direction}; threshold ±{OBD_DISTANCE_TOLERANCE_M:.0f}m). "
-        f"Likely a GPS glitch in this section."
-    )
+    td = s["track_dist_m"].to_numpy()
+    centerline = load_centerline(track)
+    frame = TrackFrame.from_centerline(centerline)
+    if gate_crossing_time(lat, lon, ts, td, build_gate(centerline, a, frame), frame, a) is None:
+        return (f"Lap didn't cross the entry gate at {a:.0f}m — its GPS path stayed "
+                f"outside the ±40m gate there (a very wide line, or a GPS data gap). "
+                f"section_time can't be computed.")
+    if gate_crossing_time(lat, lon, ts, td, build_gate(centerline, b, frame), frame, b) is None:
+        return (f"Lap didn't cross the exit gate at {b:.0f}m — its GPS path stayed "
+                f"outside the ±40m gate there (a very wide line, or a GPS data gap). "
+                f"section_time can't be computed.")
+    return None
 
 
 # --- sidebar: Track picker --------------------------------------------------
@@ -258,6 +308,10 @@ def find_best_lap(range_corners: list[str], is_full_lap: bool,
     eligible = range_sec_t[
         range_sec_t.set_index(["session_id", "lap"]).index.isin(eligible_keys)
     ]
+    # Exclude transits whose GPS was too coarse to time the crossings precisely —
+    # a fake-fast coarse-GPS lap must not win the "fastest through" benchmark.
+    if "timing_reliable" in eligible.columns:
+        eligible = eligible[eligible["timing_reliable"].fillna(False).astype(bool)]
     # NOTE: an `obd_discrepancy_m` gate used to live here to reject "GPS-glitched"
     # laps. It was removed 2026-05-19 — it gated on the *magnitude* of the
     # OBD-vs-centerline distance divergence, which cannot distinguish a GPS glitch
@@ -312,7 +366,7 @@ with st.sidebar:
     is_single = (not is_full_lap) and len(range_corners) == 1
     is_range = (not is_full_lap) and len(range_corners) > 1
     range_sec_t = (
-        pd.DataFrame(columns=["session_id", "lap", "section_time_s", "obd_discrepancy_m"])
+        pd.DataFrame(columns=["session_id", "lap", "section_time_s"])
         if is_full_lap else _range_section_times(track, from_choice, to_choice))
 
     if not is_full_lap:
@@ -431,6 +485,15 @@ def _range_section_time(sid_: str, lap_: int) -> float | None:
     return float(r.iloc[0]["section_time_s"]) if not r.empty else None
 
 
+def _range_timing_reliable(sid_: str, lap_: int) -> bool:
+    """Whether this (sid, lap) section time was timed on trustworthy GPS. False
+    when GPS was too coarse to time the gate crossings (value is an OBD estimate)."""
+    r = range_sec_t[(range_sec_t["session_id"] == sid_) & (range_sec_t["lap"] == lap_)]
+    if r.empty or "timing_reliable" not in r.columns:
+        return True
+    return bool(r.iloc[0]["timing_reliable"])
+
+
 # Header metric row. Full-lap view shows no metric row. Single corner keeps the
 # 4-metric row; a range shows section time + entry/exit speed of the complex.
 if not is_full_lap:
@@ -504,10 +567,18 @@ if not is_full_lap:
         else:
             c3.metric(f"Exit speed ({to_choice})", "—")
 
+    if section_t_val is not None and not _range_timing_reliable(sid, lap):
+        st.caption(
+            "⚠️ GPS was too coarse to time this section precisely — the value is an "
+            "OBD-distance estimate and is excluded from the ‘fastest’ benchmark."
+        )
+
 
 # --- channel envelope plot --------------------------------------------------
 
-# Three stacked panels with shared x-axis (track_dist_m).
+# Three stacked panels sharing one numeric x-axis. Focus/best-lap traces are on
+# the fused distance axis; bands and corner shading are on track_dist_m. The two
+# coincide on clean data and diverge only where GPS glitched (shaded).
 PANELS: list[tuple[str, str]] = [
     ("speed_mph", "Speed (mph)"),
     ("throttle_norm", "Throttle"),
@@ -515,22 +586,25 @@ PANELS: list[tuple[str, str]] = [
 ]
 
 
-def _prepare_lap_trace(sid_: str, lap_: int) -> tuple[pd.DataFrame, int]:
-    raw = _samples(track, sid_, lap_)
-    clean = _drop_gps_glitches(raw)
-    dropped = len(raw) - len(clean)
-    out = clean.sort_values("track_dist_m")
-    out = _insert_gap_breaks(out, "track_dist_m", gap_threshold=30.0)
-    return out, dropped
+def _prepare_lap_trace(sid_: str, lap_: int) -> tuple[pd.DataFrame, int, list[tuple[float, float]]]:
+    raw = _samples(track, sid_, lap_).sort_values("t").reset_index(drop=True)
+    fused = compute_fused_dist(raw)
+    td = raw["track_dist_m"].to_numpy()
+    dl = raw["dist_lap_m"].to_numpy()
+    n_glitched = int((np.abs(td - dl) >= GLITCH_OFFSET_M).sum())
+    spans = glitch_runs(td, dl, fused, merge_gap_m=100.0)
+    out = raw.assign(fused_dist_m=fused).sort_values("fused_dist_m")
+    out = _insert_gap_breaks(out, "fused_dist_m", gap_threshold=30.0)
+    return out, n_glitched, spans
 
-lap_s, n_dropped = _prepare_lap_trace(sid, lap)
+lap_s, n_glitched, glitch_spans = _prepare_lap_trace(sid, lap)
 
 # Best-lap reference trace. Skip if the selected lap IS the best (would just overlay).
 best_lap_s = None
 best_label = None
 if best_ref is not None and (best_ref[0] != sid or best_ref[1] != lap):
     b_sid, b_lap, _ = best_ref
-    best_lap_s, _ = _prepare_lap_trace(b_sid, b_lap)
+    best_lap_s, _, _ = _prepare_lap_trace(b_sid, b_lap)
     b_lap_time = float(
         laps[(laps["session_id"] == b_sid) & (laps["lap"] == b_lap)].iloc[0]["lap_time_s"]
     )
@@ -543,16 +617,25 @@ DISPLAY_BUFFER_M = 200.0
 if not is_full_lap:
     display_a = max(0.0, section_lo - DISPLAY_BUFFER_M)
     display_b = section_hi + DISPLAY_BUFFER_M
-    lap_s = lap_s[(lap_s["track_dist_m"] >= display_a)
-                  & (lap_s["track_dist_m"] <= display_b)]
+    lap_s = lap_s[(lap_s["fused_dist_m"] >= display_a)
+                  & (lap_s["fused_dist_m"] <= display_b)]
     if best_lap_s is not None:
-        best_lap_s = best_lap_s[(best_lap_s["track_dist_m"] >= display_a)
-                                & (best_lap_s["track_dist_m"] <= display_b)]
+        best_lap_s = best_lap_s[(best_lap_s["fused_dist_m"] >= display_a)
+                                & (best_lap_s["fused_dist_m"] <= display_b)]
 
-if n_dropped > 0:
-    st.caption(f"⚠ Dropped {n_dropped} GPS-glitched samples on this lap "
-               f"(track_dist_m walked backwards). OBD channels were clean; this only "
-               f"affects how the lap-line plots against track_dist_m.")
+visible_glitch_spans: list[tuple[float, float]] = []
+for glo, ghi in glitch_spans:
+    if not is_full_lap:
+        glo = max(glo, display_a)
+        ghi = min(ghi, display_b)
+    if ghi > glo:
+        visible_glitch_spans.append((glo, ghi))
+
+if visible_glitch_spans:
+    st.caption(f"⚠ {n_glitched} samples on this lap had unreliable GPS "
+               f"(track_dist_m walked backwards). Their OBD channels are clean, so they're "
+               f"positioned from OBD distance — along-track placement is approximate in the "
+               f"shaded stretch(es); the channel values themselves are unaffected.")
 
 # Selected-lap label: match the reference's units — section time in a section
 # view, full lap time in a full-lap view — so the legend compares like with like.
@@ -648,12 +731,12 @@ for i, (ch, label) in enumerate(PANELS, start=1):
                              name="top-decile median", showlegend=show_leg),
                   row=i, col=1)
     if best_lap_s is not None and not best_lap_s.empty and ch in best_lap_s.columns:
-        fig.add_trace(go.Scatter(x=best_lap_s["track_dist_m"], y=best_lap_s[ch],
+        fig.add_trace(go.Scatter(x=best_lap_s["fused_dist_m"], y=best_lap_s[ch],
                                  mode="lines",
                                  line=dict(color="#2e8b57", width=2),
                                  name=best_label, showlegend=show_leg),
                       row=i, col=1)
-    fig.add_trace(go.Scatter(x=lap_s["track_dist_m"], y=lap_s[ch], mode="lines",
+    fig.add_trace(go.Scatter(x=lap_s["fused_dist_m"], y=lap_s[ch], mode="lines",
                              line=dict(color="crimson", width=2.5),
                              name=selected_label, showlegend=show_leg),
                   row=i, col=1)
@@ -680,6 +763,18 @@ for c in visible_corners:
         x=cx, y=1.0, yref="y domain", row=1, col=1, text=c["id"],
         font=dict(color="black" if in_range else "gray",
                   size=12 if in_range else 10),
+        showarrow=False, yanchor="bottom", yshift=2,
+    )
+
+# Shade GPS-unreliable stretches: their along-track x is reconstructed from OBD
+# distance (see the banner). Focus lap only.
+for glo, ghi in visible_glitch_spans:
+    for i in range(1, n_rows + 1):
+        fig.add_vrect(x0=glo, x1=ghi, fillcolor="orange", opacity=0.10,
+                      line_width=0, layer="below", row=i, col=1)
+    fig.add_annotation(
+        x=(glo + ghi) / 2, y=1.0, yref="y domain", row=1, col=1,
+        text="GPS≈OBD", font=dict(color="darkorange", size=9),
         showarrow=False, yanchor="bottom", yshift=2,
     )
 
@@ -726,7 +821,7 @@ if show_delta_panel:
     fig.update_yaxes(title_text="Δ time vs best (s)  + = slower",
                      row=delta_row, col=1)
 
-fig.update_xaxes(title_text="track_dist_m", row=n_rows, col=1)
+fig.update_xaxes(title_text="distance along track (m)", row=n_rows, col=1)
 fig.update_layout(
     height=720 + (180 if show_delta_panel else 0),
     margin=dict(l=20, r=20, t=30, b=30),

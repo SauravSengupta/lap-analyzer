@@ -83,10 +83,18 @@ Selecting `From`/`To` focuses the whole page on that stretch:
 - **full lap** compares whole laps.
 
 Section times come from `lap_analyzer.analysis.section_times` /
-`range_section_times`, which time the interval between the first `track_dist_m`
-crossings of the section bounds and reject laps whose OBD-integrated distance over
-the interval disagrees with the nominal span (a GPS glitch). The channel chart
-adds ±200 m of context on each side so the adjacent brake zones are visible.
+`range_section_times`, which time each lap between two **gates** — line segments
+laid across the track (perpendicular to the centerline, ±40 m wide) at the section
+bounds — measured where the lap's GPS path crosses them. Each transit carries a
+**GPS-timing-confidence** flag (`timing_reliable`): a gate crossing can only be
+timed as finely as the GPS sampled, so `crossing_gap_s` measures the elapsed time
+between the good GPS fixes bracketing a gate. When that gap is below
+`CONFIDENCE_GAP_S` (0.4 s) the gate-crossing time is used (line-length preserved);
+when GPS was too coarse (≈1 Hz) or a teleport punctured the bracket, the time falls
+back to an OBD-anchored estimate, is flagged, and is **excluded from the "fastest
+through" ranking** — surfaced with a warning rather than dropped. See
+[GPS_TRUST.md](GPS_TRUST.md). The channel chart adds ±200 m of context on each side
+so the adjacent brake zones are visible.
 
 ## The Δt panel
 

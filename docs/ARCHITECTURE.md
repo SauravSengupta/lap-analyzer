@@ -80,6 +80,9 @@ component under `lap_analyzer/cli/`:
 | 5. Analysis library | `lap_analyzer.analysis` | pure functions over the corpus |
 | 6. Visualizer | `visualizer/` | Streamlit app + track-specific pages |
 
+- GPS trust model & failure taxonomy (what OBD vs GPS can be trusted for, and how
+  section timing handles coarse/glitched GPS): see [GPS_TRUST.md](GPS_TRUST.md).
+
 ---
 
 ## Core design decisions

@@ -464,19 +464,32 @@ Needs `t, rpm, speed_mph` columns (use `make_lap_samples`).
 ## analysis.span_time
 
 Import: `from lap_analyzer.analysis import span_time`. Signature:
-`(lap_samples, dist_a, dist_b, obd_tol_m=None) -> float | None`. Needs
-`t, track_dist_m, dist_lap_m`.
+`(lap_samples, dist_a, dist_b, centerline, frame=None, half_width_m=40.0,
+seed_window_m=120.0) -> tuple[float, float] | None`. Needs
+`lat, long, t, track_dist_m, dist_lap_m`. See `docs/GPS_TRUST.md`.
 
-- **Contract:** elapsed seconds between the first crossing of `dist_a` and the
-  first later crossing of `dist_b`.
+- **Contract:** returns `(section_time_s, timing_gap_s)`. A gate is a line segment
+  laid across the track (perpendicular to the centerline) at each of
+  `dist_a`/`dist_b`. `timing_gap_s` is the GPS-timing-confidence gap (max over the
+  two gates) from `crossing_gap_s` — the elapsed time between the good GPS fixes
+  bracketing a gate.
 - **Invariants:**
-  - `None` if either bound isn't crossed.
-  - the OBD-distance sanity gate: returns `None` when `|obd_integrated_distance −
-    (dist_b − dist_a)| > tol`. With `obd_tol_m=None`, `tol = max(15.0, 0.04 ×
-    (dist_b − dist_a))` (scales with span so long multi-corner spans aren't
-    rejected for normal racing-line variation).
-  - a clean synthetic lap where `track_dist_m` and `dist_lap_m` advance together
-    returns the true elapsed time.
+  - `None` if either gate isn't crossed (the path stayed beyond the gate's
+    `±half_width_m`, or `t_b <= t_a`), or the OBD range can't supply the fallback.
+  - Immune to lateral GPS/line offset: a wider line crossing the same gates
+    returns the same time — genuine line-length variation is preserved.
+  - **Reliable** (`timing_gap_s < CONFIDENCE_GAP_S`, default 0.4 s):
+    `section_time_s` is the gate-crossing time (`t_b − t_a`).
+  - **Not reliable** (coarse GPS / a teleport-punctured bracket): `section_time_s`
+    is the OBD-anchored fallback — time between the `dist_lap_m` crossings of
+    `dist_a` and `dist_b` (`_obd_anchored_time`). Surfaced/flagged, never silently
+    dropped. (Replaced the earlier spatial `_gates_glitch_free` offset guard, which
+    missed coarse-GPS mistiming and over-dropped clean fast lines.)
+  - a clean synthetic lap driving down the centerline returns the true elapsed
+    time between the two gate positions with a sub-threshold gap.
+
+`section_times` / `range_section_times` share `crossing_gap_s` and emit
+`timing_gap_s` + `timing_reliable` columns alongside `section_time_s`.
 
 ## analysis.section_range_bounds
 
@@ -579,6 +592,22 @@ track_dist_m`.
   - a sample whose `|track_dist_m − dist_lap_m| ≥ 50 m` (a teleport) does not drag
     the low-pass — its offset is interpolated over from good neighbors.
   - on clean data where `track_dist_m ≈ dist_lap_m`, fused ≈ `dist_lap_m`.
+
+## fused_axis.glitch_runs
+
+Import: `from lap_analyzer.fused_axis import glitch_runs, GLITCH_OFFSET_M`.
+Signature: `(track_dist_m, dist_lap_m, fused, threshold_m=GLITCH_OFFSET_M,
+merge_gap_m=0.0) -> list[tuple[float, float]]`. Parallel arrays in one
+time-sorted order; `fused` is `compute_fused_dist` for those samples.
+
+- **Contract:** one `(fused_lo, fused_hi)` span per contiguous run of samples with
+  `|track_dist_m - dist_lap_m| >= threshold_m`, in fused coordinates.
+- **Invariants:**
+  - `[]` when no sample exceeds the threshold.
+  - separate glitched runs -> separate spans; a single contiguous run -> one span.
+  - `GLITCH_OFFSET_M == 50.0` (shared with compute_fused_dist's teleport mask).
+  - runs whose fused gap is <= `merge_gap_m` coalesce into one span;
+    `merge_gap_m=0` (default) never merges.
 
 ---
 
