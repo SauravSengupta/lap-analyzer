@@ -507,7 +507,9 @@ if not is_full_lap:
 
 # --- channel envelope plot --------------------------------------------------
 
-# Three stacked panels with shared x-axis (track_dist_m).
+# Three stacked panels sharing one numeric x-axis. Focus/best-lap traces are on
+# the fused distance axis; bands and corner shading are on track_dist_m. The two
+# coincide on clean data and diverge only where GPS glitched (shaded).
 PANELS: list[tuple[str, str]] = [
     ("speed_mph", "Speed (mph)"),
     ("throttle_norm", "Throttle"),
@@ -552,7 +554,15 @@ if not is_full_lap:
         best_lap_s = best_lap_s[(best_lap_s["fused_dist_m"] >= display_a)
                                 & (best_lap_s["fused_dist_m"] <= display_b)]
 
-if n_glitched > 0:
+visible_glitch_spans: list[tuple[float, float]] = []
+for glo, ghi in glitch_spans:
+    if not is_full_lap:
+        glo = max(glo, display_a)
+        ghi = min(ghi, display_b)
+    if ghi > glo:
+        visible_glitch_spans.append((glo, ghi))
+
+if visible_glitch_spans:
     st.caption(f"⚠ {n_glitched} samples on this lap had unreliable GPS "
                f"(track_dist_m walked backwards). Their OBD channels are clean, so they're "
                f"positioned from OBD distance — along-track placement is approximate in the "
@@ -689,12 +699,7 @@ for c in visible_corners:
 
 # Shade GPS-unreliable stretches: their along-track x is reconstructed from OBD
 # distance (see the banner). Focus lap only.
-for glo, ghi in glitch_spans:
-    if not is_full_lap:
-        glo = max(glo, display_a)
-        ghi = min(ghi, display_b)
-    if ghi <= glo:
-        continue
+for glo, ghi in visible_glitch_spans:
     for i in range(1, n_rows + 1):
         fig.add_vrect(x0=glo, x1=ghi, fillcolor="orange", opacity=0.10,
                       line_width=0, layer="below", row=i, col=1)
@@ -747,7 +752,7 @@ if show_delta_panel:
     fig.update_yaxes(title_text="Δ time vs best (s)  + = slower",
                      row=delta_row, col=1)
 
-fig.update_xaxes(title_text="track_dist_m", row=n_rows, col=1)
+fig.update_xaxes(title_text="distance along track (m)", row=n_rows, col=1)
 fig.update_layout(
     height=720 + (180 if show_delta_panel else 0),
     margin=dict(l=20, r=20, t=30, b=30),
