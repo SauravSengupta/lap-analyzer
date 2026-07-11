@@ -172,10 +172,12 @@ def section_times(
 
     Boundaries are physical gates (perpendicular to the centerline) at the
     section's start/end distances; the time is between the lap's crossings.
-    A transit is emitted when both gates are crossed in order AND neither gate is
-    glitched (see `_gates_glitch_free` / GATE_GLITCH_OFFSET_M). Genuine
-    line-length variation is preserved. Long-form: session_id, lap, corner_id,
-    section_time_s.
+    A transit is emitted when both gates are crossed in order. Each carries a
+    GPS-timing-confidence flag: `timing_reliable` (max gate gap < CONFIDENCE_GAP_S)
+    uses the gate-crossing time (line-length preserved); otherwise GPS was too
+    coarse to time the crossings and `section_time_s` is the OBD-anchored fallback
+    (see crossing_gap_s / _obd_anchored_time / docs/GPS_TRUST.md). Long-form:
+    session_id, lap, corner_id, section_time_s, timing_gap_s, timing_reliable.
     """
     bounds = section_bounds(track_def, pre_m=pre_m, post_cap_m=post_cap_m)
     centerline = load_centerline(track)
@@ -207,10 +209,17 @@ def section_times(
                 t_b = gate_crossing_time(lat, lon, tt, td, gb, frame, b)
                 if t_b is None or t_b <= t_a:
                     continue
-                if not _gates_glitch_free(td, dl, a, b):
-                    continue
-                rows.append((sid, int(lap_n), cid, t_b - t_a))
-    return pd.DataFrame(rows, columns=["session_id", "lap", "corner_id", "section_time_s"])
+                gap = max(crossing_gap_s(tt, td, dl, a), crossing_gap_s(tt, td, dl, b))
+                reliable = gap < CONFIDENCE_GAP_S
+                if reliable:
+                    value = float(t_b - t_a)
+                else:
+                    value = _obd_anchored_time(tt, dl, a, b)
+                    if value is None:
+                        continue
+                rows.append((sid, int(lap_n), cid, value, gap, reliable))
+    return pd.DataFrame(rows, columns=["session_id", "lap", "corner_id",
+                                       "section_time_s", "timing_gap_s", "timing_reliable"])
 
 
 # --- gear derivation --------------------------------------------------------
@@ -326,6 +335,18 @@ def derive_gear(
     return gear.reindex(samples.index)
 
 
+def _obd_anchored_time(t, dist_lap_m, dist_a: float, dist_b: float) -> float | None:
+    """Elapsed time between the OBD-distance crossings of dist_a and dist_b — the
+    robust fallback when GPS is too coarse to time the gate crossings. Immune to
+    GPS rate; assumes the (small) GPS-vs-OBD offset is ~0, which is the right prior
+    when the true offset is unrecoverable. None if a distance is outside OBD range."""
+    dl = np.asarray(dist_lap_m, dtype=float)
+    tt = np.asarray(t, dtype=float)
+    if dist_a < dl.min() or dist_b > dl.max():
+        return None
+    return float(np.interp(dist_b, dl, tt) - np.interp(dist_a, dl, tt))
+
+
 def span_time(
     lap_samples: pd.DataFrame,
     dist_a: float,
@@ -334,14 +355,15 @@ def span_time(
     frame: "TrackFrame | None" = None,
     half_width_m: float = 40.0,
     seed_window_m: float = 120.0,
-) -> float | None:
-    """Gate-to-gate elapsed seconds for one lap between centerline distances
-    dist_a and dist_b. Builds a gate at each distance (perpendicular to the
-    centerline) and returns the time between the lap's crossings, or None if
-    either gate isn't crossed. Immune to lateral GPS/line offset. Genuine
-    racing-line variation is kept, but a transit is dropped when a GPS glitch
-    near either gate (a large track_dist_m-vs-dist_lap_m offset) mistimed the
-    crossing; see `_gates_glitch_free` / GATE_GLITCH_OFFSET_M."""
+) -> "tuple[float, float] | None":
+    """Gate-to-gate section time for one lap, with a GPS-timing-confidence gap.
+
+    Returns (section_time_s, timing_gap_s). When the max gate gap is below
+    CONFIDENCE_GAP_S the crossing time is trustworthy and captures line-length;
+    otherwise GPS was too coarse to time the crossings and section_time_s is the
+    OBD-anchored fallback (see crossing_gap_s / _obd_anchored_time). None if either
+    gate isn't crossed, t_b <= t_a, or OBD range is insufficient for the fallback.
+    """
     lap_samples = lap_samples.sort_values("t")
     if frame is None:
         frame = TrackFrame.from_centerline(centerline)
@@ -351,15 +373,20 @@ def span_time(
     lon = lap_samples["long"].to_numpy()
     t = lap_samples["t"].to_numpy()
     td = lap_samples["track_dist_m"].to_numpy()
+    dl = lap_samples["dist_lap_m"].to_numpy()
     t_a = gate_crossing_time(lat, lon, t, td, ga, frame, dist_a, seed_window_m)
     if t_a is None:
         return None
     t_b = gate_crossing_time(lat, lon, t, td, gb, frame, dist_b, seed_window_m)
     if t_b is None or t_b <= t_a:
         return None
-    if not _gates_glitch_free(td, lap_samples["dist_lap_m"].to_numpy(), dist_a, dist_b):
+    gap = max(crossing_gap_s(t, td, dl, dist_a), crossing_gap_s(t, td, dl, dist_b))
+    if gap < CONFIDENCE_GAP_S:
+        return (float(t_b - t_a), gap)
+    fallback = _obd_anchored_time(t, dl, dist_a, dist_b)
+    if fallback is None:
         return None
-    return float(t_b - t_a)
+    return (fallback, gap)
 
 
 def section_range_bounds(
@@ -400,10 +427,11 @@ def range_section_times(
     """For every (session_id, lap), gate-to-gate time across from_id..to_id.
 
     Uses one entry gate (range start) and one exit gate (range end). Emitted
-    when both gates are crossed in order AND neither gate is glitched (see
-    `_gates_glitch_free` / GATE_GLITCH_OFFSET_M). For from_id == to_id this
-    matches section_times() for that corner. Long-form: session_id, lap,
-    section_time_s.
+    when both gates are crossed in order; each carries a GPS-timing-confidence
+    flag (`timing_reliable`) and uses the OBD-anchored fallback value when GPS is
+    too coarse to time the crossings (see crossing_gap_s / _obd_anchored_time).
+    For from_id == to_id this matches section_times() for that corner. Long-form:
+    session_id, lap, section_time_s, timing_gap_s, timing_reliable.
     """
     a, b = section_range_bounds(track_def, from_id, to_id, pre_m, post_cap_m)
     centerline = load_centerline(track)
@@ -434,10 +462,17 @@ def range_section_times(
             t_b = gate_crossing_time(lat, lon, tt, td, gb, frame, b)
             if t_b is None or t_b <= t_a:
                 continue
-            if not _gates_glitch_free(td, dl, a, b):
-                continue
-            rows.append((sid, int(lap_n), t_b - t_a))
-    return pd.DataFrame(rows, columns=["session_id", "lap", "section_time_s"])
+            gap = max(crossing_gap_s(tt, td, dl, a), crossing_gap_s(tt, td, dl, b))
+            reliable = gap < CONFIDENCE_GAP_S
+            if reliable:
+                value = float(t_b - t_a)
+            else:
+                value = _obd_anchored_time(tt, dl, a, b)
+                if value is None:
+                    continue
+            rows.append((sid, int(lap_n), value, gap, reliable))
+    return pd.DataFrame(rows, columns=["session_id", "lap", "section_time_s",
+                                       "timing_gap_s", "timing_reliable"])
 
 
 def classify_t8_section(

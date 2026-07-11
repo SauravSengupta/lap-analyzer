@@ -34,6 +34,7 @@ from lap_analyzer.analysis import (
     CONFIDENCE_GAP_S,
     _confirm_runs,
     _first_crossing_t,
+    _obd_anchored_time,
     classify_t8_section,
     crossing_gap_s,
     derive_gear,
@@ -398,10 +399,10 @@ def test_crossing_gap_excludes_teleport_fix():
     n = 200
     t = np.arange(n) * 0.05
     track = np.linspace(0.0, 2000.0, n)
-    dl = track.copy()
     i = int(np.argmin(np.abs(track - 1000.0)))    # sample nearest the gate
     track[i] += 120.0                              # teleport: |track-dl| = 120 ≥ 50
-    dl_teleport = track.copy(); dl_teleport[i] -= 120.0   # OBD unaffected at i
+    dl_teleport = track.copy()
+    dl_teleport[i] -= 120.0                         # OBD unaffected at i
     gap = crossing_gap_s(t, track, dl_teleport, 1000.0)
     # bracket spans 2 sample-intervals (the excluded teleport), not 1 (0.05 s)
     assert gap == pytest.approx(0.10, abs=1e-6)
@@ -419,70 +420,53 @@ def _straight_centerline_df(n=1001, lat=47.0, lon0=-123.0, length_m=2000.0):
 
 
 def _lap_along(cl, make_lap_samples, lat_offset_m=0.0, n=400, total_s=20.0,
-               line_offset_m=0.0, gate_glitch_at=None, gate_glitch_m=0.0):
-    """A lap driving east down `cl`, sampled uniformly; track_dist_m is the
-    centerline projection (independent of the lateral offset). dist_lap_m (the
-    OBD channel) is track_dist_m plus two optional distortions:
-      * `line_offset_m` — a constant, smoothly-held offset. Models a genuine
-        tighter/wider racing line: track_dist_m and dist_lap_m disagree by a
-        small bounded amount but neither jumps. A clean lap uses 0.
-      * a localized Gaussian spike of height `gate_glitch_m` centred at
-        `gate_glitch_at` — models a TrackAddict GPS glitch that mistimes a gate
-        crossing (a sharp track_dist_m-vs-OBD offset near one gate).
-    """
+               line_offset_m=0.0, gps_hold=1):
+    """A lap driving east down `cl`, sampled uniformly. track_dist_m is the
+    centerline projection; dist_lap_m (OBD) is track_dist_m + line_offset_m.
+    `gps_hold`>1 freezes the GPS reading (lat, long, track_dist_m) for runs of
+    `gps_hold` samples then jumps — models a GPS updating gps_hold× slower than
+    the sample rate (Mode 3). OBD (t, dist_lap_m) stays smooth."""
     lon = np.linspace(cl["long"].iloc[0], cl["long"].iloc[-1], n)
     m_per_deg_lat = 111_132.0
     lat = np.full(n, cl["lat"].iloc[0] + lat_offset_m / m_per_deg_lat)
     m_per_deg_lon = 111_132.0 * np.cos(np.radians(cl["lat"].iloc[0]))
     track = (lon - cl["long"].iloc[0]) * m_per_deg_lon
     dist_lap = track + line_offset_m
-    if gate_glitch_at is not None:
-        dist_lap = dist_lap + gate_glitch_m * np.exp(-0.5 * ((track - gate_glitch_at) / 12.0) ** 2)
+    if gps_hold > 1:
+        held = (np.arange(n) // gps_hold) * gps_hold
+        lat = lat[held]
+        lon = lon[held]
+        track = track[held]
     t = np.linspace(0.0, total_s, n)
     return make_lap_samples(n=n, t=t, lat=lat, long=lon,
                             track_dist_m=track, dist_lap_m=dist_lap)
 
 
-def test_span_time_rejects_gate_glitch_at_entry(make_lap_samples):
-    # SPEC: analysis.span_time — a GPS glitch near a gate (track_dist_m vs
-    # dist_lap_m offset >= 50 m within ~60 m of the gate) mistimes that crossing,
-    # so the transit is dropped. Reject the CAUSE (a localized glitch), not the
-    # symptom (a short OBD distance). This is the real 20250810-110836 L4 case:
-    # the old OBD-ratio guard kept it (in-band ratio 0.88) though its entry gate
-    # fired ~1.6 s late on a 71 m track_dist_m spike.
+def test_span_time_clean_lap_reliable_gate_value(make_lap_samples):
+    # SPEC: analysis.span_time — clean lap → (gate-crossing time, tiny gap), reliable.
     cl = _straight_centerline_df(length_m=2000.0)
-    lap = _lap_along(cl, make_lap_samples, gate_glitch_at=500.0, gate_glitch_m=70.0)
-    assert span_time(lap, 500.0, 1500.0, cl) is None
+    lap = _lap_along(cl, make_lap_samples, total_s=20.0)   # 100 m/s
+    out = span_time(lap, 500.0, 1500.0, cl)                 # 1000 m => 10 s
+    assert out is not None
+    value, gap = out
+    assert value == pytest.approx(10.0, abs=0.2)
+    assert gap < CONFIDENCE_GAP_S
 
 
-def test_span_time_rejects_gate_glitch_at_exit(make_lap_samples):
-    # SPEC: analysis.span_time — the glitch check covers BOTH gates; a spike near
-    # the exit gate is caught too.
+def test_span_time_coarse_gps_unreliable_uses_obd_value(make_lap_samples):
+    # SPEC: analysis.span_time — coarse GPS (Mode 3) → gap >= threshold; value is
+    # the OBD-anchored fallback (still ~true elapsed), NOT dropped.
     cl = _straight_centerline_df(length_m=2000.0)
-    lap = _lap_along(cl, make_lap_samples, gate_glitch_at=1500.0, gate_glitch_m=70.0)
-    assert span_time(lap, 500.0, 1500.0, cl) is None
-
-
-def test_span_time_keeps_genuine_tight_line(make_lap_samples):
-    # SPEC: analysis.span_time — a genuinely tighter/shorter line shows up as a
-    # small, bounded track_dist-vs-OBD offset with no spike, and is KEPT. The
-    # removed OBD-ratio guard used to drop these fast laps; the glitch detector
-    # must not (a 30 m offset is well under the 50 m glitch threshold).
-    cl = _straight_centerline_df(length_m=2000.0)
-    lap = _lap_along(cl, make_lap_samples, line_offset_m=-30.0)
+    lap = _lap_along(cl, make_lap_samples, total_s=20.0, gps_hold=20)  # ~1 s fixes
     out = span_time(lap, 500.0, 1500.0, cl)
     assert out is not None
-    assert out == pytest.approx(10.0, abs=0.2)
-
-
-def test_span_time_keeps_subthreshold_offset_near_gate(make_lap_samples):
-    # SPEC: a modest offset near a gate (below the 50 m glitch threshold) is not
-    # a glitch and is kept — the detector must not be trigger-happy.
-    cl = _straight_centerline_df(length_m=2000.0)
-    lap = _lap_along(cl, make_lap_samples, gate_glitch_at=500.0, gate_glitch_m=25.0)
-    out = span_time(lap, 500.0, 1500.0, cl)
-    assert out is not None
-    assert out == pytest.approx(10.0, abs=0.2)
+    value, gap = out
+    assert gap >= CONFIDENCE_GAP_S
+    s = lap.sort_values("t")
+    t = s["t"].to_numpy()
+    dl = s["dist_lap_m"].to_numpy()
+    assert value == pytest.approx(_obd_anchored_time(t, dl, 500.0, 1500.0), abs=1e-6)
+    assert value == pytest.approx(10.0, abs=0.3)
 
 
 def test_span_time_uncrossed_bound_returns_none(make_lap_samples):
@@ -492,15 +476,6 @@ def test_span_time_uncrossed_bound_returns_none(make_lap_samples):
     assert span_time(lap, 500.0, 9999.0, cl) is None
 
 
-def test_span_time_clean_lap_returns_positive_elapsed(make_lap_samples):
-    # SPEC: analysis.span_time — gate-to-gate elapsed time on a clean lap
-    cl = _straight_centerline_df(length_m=2000.0)
-    lap = _lap_along(cl, make_lap_samples, total_s=20.0)   # 2000 m / 20 s = 100 m/s
-    out = span_time(lap, 500.0, 1500.0, cl)                 # 1000 m => 10 s
-    assert out is not None
-    assert out == pytest.approx(10.0, abs=0.2)
-
-
 def test_span_time_immune_to_lateral_line_offset(make_lap_samples):
     # SPEC: a laterally-offset (wider) line crosses the same gates at the same
     # times — line variation is NOT rejected and does not distort the time.
@@ -508,25 +483,23 @@ def test_span_time_immune_to_lateral_line_offset(make_lap_samples):
     on = span_time(_lap_along(cl, make_lap_samples, lat_offset_m=0.0), 500.0, 1500.0, cl)
     off = span_time(_lap_along(cl, make_lap_samples, lat_offset_m=15.0), 500.0, 1500.0, cl)
     assert on is not None and off is not None
-    assert off == pytest.approx(on, abs=0.05)
+    assert off[0] == pytest.approx(on[0], abs=0.05)
 
 
-def test_range_section_times_gate_crossing_emits_positive_times(sample_data_root):
-    # SPEC: gate-crossing section times run end-to-end on real ridge data (the
-    # committed sample bundle) and emit positive gate-to-gate times. The OBD-
-    # distance rejection is gone — a lap is emitted whenever both gates are
-    # crossed, so line-length variation is never dropped — hence no
-    # obd_discrepancy_m column. (The specific L2/L3/L4-recovery case that
-    # motivated this lives on session 20260702-101432, which isn't in the
-    # bundle; that recovery was verified manually against the full corpus.)
+def test_range_section_times_emits_confidence_columns(sample_data_root):
+    # SPEC: gate-crossing section times run end-to-end on the committed ridge
+    # bundle and carry a GPS-timing-confidence flag. A transit is emitted whenever
+    # both gates are crossed; timing_reliable says whether the crossing time is
+    # trustworthy (else section_time_s is the OBD-anchored fallback).
     from lap_analyzer.analysis import range_section_times
     td = _ridge_track_def()
     df = range_section_times("ridge", td, "T6", "T6")
-    assert list(df.columns) == ["session_id", "lap", "section_time_s"]
-    assert "obd_discrepancy_m" not in df.columns
+    assert list(df.columns) == [
+        "session_id", "lap", "section_time_s", "timing_gap_s", "timing_reliable"]
+    assert df["timing_reliable"].dtype == bool
+    assert (df["section_time_s"] > 0).all()
     assert len(df) > 10                      # many laps emit across the bundle
     assert df["session_id"].nunique() >= 2
-    assert (df["section_time_s"] > 0).all()
 
 
 # ---------------------------------------------------------------------------
