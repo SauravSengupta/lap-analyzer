@@ -583,9 +583,9 @@ track_dist_m`.
 ## fused_axis.glitch_runs
 
 Import: `from lap_analyzer.fused_axis import glitch_runs, GLITCH_OFFSET_M`.
-Signature: `(track_dist_m, dist_lap_m, fused, threshold_m=GLITCH_OFFSET_M)
--> list[tuple[float, float]]`. Parallel arrays in one time-sorted order; `fused`
-is `compute_fused_dist` for those samples.
+Signature: `(track_dist_m, dist_lap_m, fused, threshold_m=GLITCH_OFFSET_M,
+merge_gap_m=0.0) -> list[tuple[float, float]]`. Parallel arrays in one
+time-sorted order; `fused` is `compute_fused_dist` for those samples.
 
 - **Contract:** one `(fused_lo, fused_hi)` span per contiguous run of samples with
   `|track_dist_m - dist_lap_m| >= threshold_m`, in fused coordinates.
@@ -593,6 +593,8 @@ is `compute_fused_dist` for those samples.
   - `[]` when no sample exceeds the threshold.
   - separate glitched runs -> separate spans; a single contiguous run -> one span.
   - `GLITCH_OFFSET_M == 50.0` (shared with compute_fused_dist's teleport mask).
+  - runs whose fused gap is <= `merge_gap_m` coalesce into one span;
+    `merge_gap_m=0` (default) never merges.
 
 ---
 

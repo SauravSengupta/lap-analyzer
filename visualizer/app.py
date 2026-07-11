@@ -521,7 +521,7 @@ def _prepare_lap_trace(sid_: str, lap_: int) -> tuple[pd.DataFrame, int, list[tu
     td = raw["track_dist_m"].to_numpy()
     dl = raw["dist_lap_m"].to_numpy()
     n_glitched = int((np.abs(td - dl) >= GLITCH_OFFSET_M).sum())
-    spans = glitch_runs(td, dl, fused)
+    spans = glitch_runs(td, dl, fused, merge_gap_m=100.0)
     out = raw.assign(fused_dist_m=fused).sort_values("fused_dist_m")
     out = _insert_gap_breaks(out, "fused_dist_m", gap_threshold=30.0)
     return out, n_glitched, spans

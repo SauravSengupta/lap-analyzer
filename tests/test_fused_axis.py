@@ -220,6 +220,18 @@ def test_glitch_runs_two_separate_spans():
     assert runs[1] == pytest.approx((40.0, 50.0))
 
 
+def test_glitch_runs_merges_within_gap():
+    # SPEC: fused_axis.glitch_runs — runs whose fused gap <= merge_gap_m coalesce.
+    td = np.array([0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+    dl = td.copy()
+    td[1] -= 100.0                       # run A: sample 1 (fused 10)
+    td[4:6] -= 100.0                      # run B: samples 4,5 (fused 40..50)
+    fused = np.array([0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+    # gap between runs = 40 - 10 = 30. merge_gap_m=50 coalesces; default 0 does not.
+    assert glitch_runs(td, dl, fused) == pytest.approx([(10.0, 10.0), (40.0, 50.0)])
+    assert glitch_runs(td, dl, fused, merge_gap_m=50.0) == pytest.approx([(10.0, 50.0)])
+
+
 def test_glitch_runs_respects_threshold():
     # SPEC: fused_axis.glitch_runs — offsets below threshold are not flagged.
     td = np.array([0.0, 10.0, 20.0, 30.0])

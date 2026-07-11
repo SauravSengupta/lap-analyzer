@@ -75,7 +75,7 @@ def compute_fused_dist(samples: pd.DataFrame, smooth_window: int = _SMOOTH_WINDO
     return out
 
 
-def glitch_runs(track_dist_m, dist_lap_m, fused, threshold_m: float = GLITCH_OFFSET_M):
+def glitch_runs(track_dist_m, dist_lap_m, fused, threshold_m: float = GLITCH_OFFSET_M, merge_gap_m: float = 0.0):
     """Fused-distance spans of GPS-unreliable stretches.
 
     A sample is unreliable where its GPS centerline projection disagrees with the
@@ -83,6 +83,8 @@ def glitch_runs(track_dist_m, dist_lap_m, fused, threshold_m: float = GLITCH_OFF
     span per contiguous unreliable run, in the fused-distance coordinates of the
     same samples; [] if none. Inputs are parallel arrays in one consistent
     (time-sorted) order; `fused` is compute_fused_dist() for those samples.
+    Runs whose fused gap is <= merge_gap_m are coalesced into one span (default 0
+    = no merge).
     """
     td = np.asarray(track_dist_m, dtype=float)
     dl = np.asarray(dist_lap_m, dtype=float)
@@ -101,4 +103,14 @@ def glitch_runs(track_dist_m, dist_lap_m, fused, threshold_m: float = GLITCH_OFF
         seg = fu[i:j]
         runs.append((float(seg.min()), float(seg.max())))
         i = j
+
+    if merge_gap_m > 0.0 and runs:
+        merged = [runs[0]]
+        for lo, hi in runs[1:]:
+            prev_lo, prev_hi = merged[-1]
+            if lo - prev_hi <= merge_gap_m:
+                merged[-1] = (prev_lo, max(prev_hi, hi))
+            else:
+                merged.append((lo, hi))
+        runs = merged
     return runs
