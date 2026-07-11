@@ -22,9 +22,9 @@ import numpy as np
 import pandas as pd
 
 # A sample whose GPS projection disagrees with OBD distance by more than this is a
-# teleport; its offset is meaningless and must not enter the low-pass. Callers
-# normally pass already glitch-filtered samples, so this is a backstop.
-_GLITCH_OFFSET_M = 50.0
+# teleport; its offset is meaningless and must not enter the low-pass.
+GLITCH_OFFSET_M = 50.0
+_GLITCH_OFFSET_M = GLITCH_OFFSET_M  # backwards-compatible internal alias
 
 # Low-pass window (samples). At TrackAddict's ~10 Hz this spans a couple of
 # seconds — long enough to kill sample jitter, short enough to keep corner-scale
@@ -73,3 +73,44 @@ def compute_fused_dist(samples: pd.DataFrame, smooth_window: int = _SMOOTH_WINDO
     out = np.empty(len(s))
     out[t_order] = fused_t
     return out
+
+
+def glitch_runs(track_dist_m, dist_lap_m, fused, threshold_m: float = GLITCH_OFFSET_M, merge_gap_m: float = 0.0):
+    """Fused-distance spans of GPS-unreliable stretches.
+
+    A sample is unreliable where its GPS centerline projection disagrees with the
+    OBD-integrated distance by >= threshold_m. Returns one (fused_lo, fused_hi)
+    span per contiguous unreliable run, in the fused-distance coordinates of the
+    same samples; [] if none. Inputs are parallel arrays in one consistent
+    (time-sorted) order; `fused` is compute_fused_dist() for those samples.
+    Runs whose fused gap is <= merge_gap_m are coalesced into one span (default 0
+    = no merge).
+    """
+    td = np.asarray(track_dist_m, dtype=float)
+    dl = np.asarray(dist_lap_m, dtype=float)
+    fu = np.asarray(fused, dtype=float)
+    bad = np.abs(td - dl) >= threshold_m
+    runs: list[tuple[float, float]] = []
+    n = len(bad)
+    i = 0
+    while i < n:
+        if not bad[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and bad[j]:
+            j += 1
+        seg = fu[i:j]
+        runs.append((float(seg.min()), float(seg.max())))
+        i = j
+
+    if merge_gap_m > 0.0 and runs:
+        merged = [runs[0]]
+        for lo, hi in runs[1:]:
+            prev_lo, prev_hi = merged[-1]
+            if lo - prev_hi <= merge_gap_m:
+                merged[-1] = (prev_lo, max(prev_hi, hi))
+            else:
+                merged.append((lo, hi))
+        runs = merged
+    return runs

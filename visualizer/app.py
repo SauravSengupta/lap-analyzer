@@ -25,7 +25,7 @@ from lap_analyzer.analysis import (
     section_times,
     top_decile_laps,
 )
-from lap_analyzer.fused_axis import compute_fused_dist
+from lap_analyzer.fused_axis import GLITCH_OFFSET_M, compute_fused_dist, glitch_runs
 from lap_analyzer.gates import TrackFrame, build_gate, gate_crossing_time
 from shared import available_tracks, current_track, drop_gps_glitches as _drop_gps_glitches
 from shared import corpus as _corpus, laps as _laps, track_def as _track_def
@@ -557,7 +557,9 @@ if not is_full_lap:
 
 # --- channel envelope plot --------------------------------------------------
 
-# Three stacked panels with shared x-axis (track_dist_m).
+# Three stacked panels sharing one numeric x-axis. Focus/best-lap traces are on
+# the fused distance axis; bands and corner shading are on track_dist_m. The two
+# coincide on clean data and diverge only where GPS glitched (shaded).
 PANELS: list[tuple[str, str]] = [
     ("speed_mph", "Speed (mph)"),
     ("throttle_norm", "Throttle"),
@@ -565,22 +567,25 @@ PANELS: list[tuple[str, str]] = [
 ]
 
 
-def _prepare_lap_trace(sid_: str, lap_: int) -> tuple[pd.DataFrame, int]:
-    raw = _samples(track, sid_, lap_)
-    clean = _drop_gps_glitches(raw)
-    dropped = len(raw) - len(clean)
-    out = clean.sort_values("track_dist_m")
-    out = _insert_gap_breaks(out, "track_dist_m", gap_threshold=30.0)
-    return out, dropped
+def _prepare_lap_trace(sid_: str, lap_: int) -> tuple[pd.DataFrame, int, list[tuple[float, float]]]:
+    raw = _samples(track, sid_, lap_).sort_values("t").reset_index(drop=True)
+    fused = compute_fused_dist(raw)
+    td = raw["track_dist_m"].to_numpy()
+    dl = raw["dist_lap_m"].to_numpy()
+    n_glitched = int((np.abs(td - dl) >= GLITCH_OFFSET_M).sum())
+    spans = glitch_runs(td, dl, fused, merge_gap_m=100.0)
+    out = raw.assign(fused_dist_m=fused).sort_values("fused_dist_m")
+    out = _insert_gap_breaks(out, "fused_dist_m", gap_threshold=30.0)
+    return out, n_glitched, spans
 
-lap_s, n_dropped = _prepare_lap_trace(sid, lap)
+lap_s, n_glitched, glitch_spans = _prepare_lap_trace(sid, lap)
 
 # Best-lap reference trace. Skip if the selected lap IS the best (would just overlay).
 best_lap_s = None
 best_label = None
 if best_ref is not None and (best_ref[0] != sid or best_ref[1] != lap):
     b_sid, b_lap, _ = best_ref
-    best_lap_s, _ = _prepare_lap_trace(b_sid, b_lap)
+    best_lap_s, _, _ = _prepare_lap_trace(b_sid, b_lap)
     b_lap_time = float(
         laps[(laps["session_id"] == b_sid) & (laps["lap"] == b_lap)].iloc[0]["lap_time_s"]
     )
@@ -593,16 +598,25 @@ DISPLAY_BUFFER_M = 200.0
 if not is_full_lap:
     display_a = max(0.0, section_lo - DISPLAY_BUFFER_M)
     display_b = section_hi + DISPLAY_BUFFER_M
-    lap_s = lap_s[(lap_s["track_dist_m"] >= display_a)
-                  & (lap_s["track_dist_m"] <= display_b)]
+    lap_s = lap_s[(lap_s["fused_dist_m"] >= display_a)
+                  & (lap_s["fused_dist_m"] <= display_b)]
     if best_lap_s is not None:
-        best_lap_s = best_lap_s[(best_lap_s["track_dist_m"] >= display_a)
-                                & (best_lap_s["track_dist_m"] <= display_b)]
+        best_lap_s = best_lap_s[(best_lap_s["fused_dist_m"] >= display_a)
+                                & (best_lap_s["fused_dist_m"] <= display_b)]
 
-if n_dropped > 0:
-    st.caption(f"⚠ Dropped {n_dropped} GPS-glitched samples on this lap "
-               f"(track_dist_m walked backwards). OBD channels were clean; this only "
-               f"affects how the lap-line plots against track_dist_m.")
+visible_glitch_spans: list[tuple[float, float]] = []
+for glo, ghi in glitch_spans:
+    if not is_full_lap:
+        glo = max(glo, display_a)
+        ghi = min(ghi, display_b)
+    if ghi > glo:
+        visible_glitch_spans.append((glo, ghi))
+
+if visible_glitch_spans:
+    st.caption(f"⚠ {n_glitched} samples on this lap had unreliable GPS "
+               f"(track_dist_m walked backwards). Their OBD channels are clean, so they're "
+               f"positioned from OBD distance — along-track placement is approximate in the "
+               f"shaded stretch(es); the channel values themselves are unaffected.")
 
 # Selected-lap label: match the reference's units — section time in a section
 # view, full lap time in a full-lap view — so the legend compares like with like.
@@ -698,12 +712,12 @@ for i, (ch, label) in enumerate(PANELS, start=1):
                              name="top-decile median", showlegend=show_leg),
                   row=i, col=1)
     if best_lap_s is not None and not best_lap_s.empty and ch in best_lap_s.columns:
-        fig.add_trace(go.Scatter(x=best_lap_s["track_dist_m"], y=best_lap_s[ch],
+        fig.add_trace(go.Scatter(x=best_lap_s["fused_dist_m"], y=best_lap_s[ch],
                                  mode="lines",
                                  line=dict(color="#2e8b57", width=2),
                                  name=best_label, showlegend=show_leg),
                       row=i, col=1)
-    fig.add_trace(go.Scatter(x=lap_s["track_dist_m"], y=lap_s[ch], mode="lines",
+    fig.add_trace(go.Scatter(x=lap_s["fused_dist_m"], y=lap_s[ch], mode="lines",
                              line=dict(color="crimson", width=2.5),
                              name=selected_label, showlegend=show_leg),
                   row=i, col=1)
@@ -730,6 +744,18 @@ for c in visible_corners:
         x=cx, y=1.0, yref="y domain", row=1, col=1, text=c["id"],
         font=dict(color="black" if in_range else "gray",
                   size=12 if in_range else 10),
+        showarrow=False, yanchor="bottom", yshift=2,
+    )
+
+# Shade GPS-unreliable stretches: their along-track x is reconstructed from OBD
+# distance (see the banner). Focus lap only.
+for glo, ghi in visible_glitch_spans:
+    for i in range(1, n_rows + 1):
+        fig.add_vrect(x0=glo, x1=ghi, fillcolor="orange", opacity=0.10,
+                      line_width=0, layer="below", row=i, col=1)
+    fig.add_annotation(
+        x=(glo + ghi) / 2, y=1.0, yref="y domain", row=1, col=1,
+        text="GPS≈OBD", font=dict(color="darkorange", size=9),
         showarrow=False, yanchor="bottom", yshift=2,
     )
 
@@ -776,7 +802,7 @@ if show_delta_panel:
     fig.update_yaxes(title_text="Δ time vs best (s)  + = slower",
                      row=delta_row, col=1)
 
-fig.update_xaxes(title_text="track_dist_m", row=n_rows, col=1)
+fig.update_xaxes(title_text="distance along track (m)", row=n_rows, col=1)
 fig.update_layout(
     height=720 + (180 if show_delta_panel else 0),
     margin=dict(l=20, r=20, t=30, b=30),
