@@ -121,27 +121,38 @@ def _first_crossing_t(xs: np.ndarray, ts: np.ndarray, target: float, after_t: fl
     return float(ts[i] + (target - xs[i]) / dx * (ts[i + 1] - ts[i]))
 
 
-# Default OBD-distance sanity band for gate-to-gate section times, as a fraction
-# of the nominal section length. A transit is dropped when the OBD distance the
-# car actually drove between the two gate crossings falls outside this band — the
-# tell that a GPS glitch mistimed a gate (you cannot drive much shorter than the
-# centerline, and a corner line much longer than +25% is implausible). Two-sided
-# and generous: it catches gross glitches while keeping genuine racing-line
-# variation. Calibrated on the Ridge corpus (clean transits span ~0.82-1.20 of
-# nominal); ~2-3% of clean transits fall outside and are conservatively dropped.
-OBD_RATIO_BAND: tuple[float, float] = (0.85, 1.25)
+# Glitch-at-gate detector for gate-to-gate section times. A gate crossing is only
+# trustworthy where the GPS is clean; a TrackAddict inner-loop glitch freezes /
+# walks track_dist_m and fires the gate at the wrong (lat,long) sample, mistiming
+# the crossing by seconds. The tell is a large track_dist_m-vs-dist_lap_m offset
+# (OBD is clean) local to a gate: on clean data these agree within ~10-25 m, a
+# glitch spikes to 50-70 m+. So a transit is dropped when |track_dist_m −
+# dist_lap_m| reaches GATE_GLITCH_OFFSET_M anywhere within GATE_GLITCH_WINDOW_M
+# (track-distance) of EITHER gate. This rejects the CAUSE (a mistimed gate), not
+# the SYMPTOM (a short OBD distance) — a genuinely tighter/shorter racing line has
+# a small, smooth offset and is kept. Replaces the old OBD-ratio band, which both
+# missed in-band glitches (e.g. ridge 20250810-110836 L4: ratio 0.88, 71 m spike,
+# entry gate ~1.6 s late) and dropped clean fast lines on the low side.
+GATE_GLITCH_OFFSET_M: float = 50.0
+GATE_GLITCH_WINDOW_M: float = 60.0
 
 
-def _obd_ratio_ok(
-    t: np.ndarray, dist_lap_m: np.ndarray, t_a: float, t_b: float,
-    nominal_m: float, band: tuple[float, float],
+def _gates_glitch_free(
+    track_dist_m: np.ndarray, dist_lap_m: np.ndarray,
+    dist_a: float, dist_b: float,
+    window_m: float = GATE_GLITCH_WINDOW_M, offset_m: float = GATE_GLITCH_OFFSET_M,
 ) -> bool:
-    """True if the OBD distance driven between the two crossing times is within
-    `band` (fractions of nominal_m). Rejects gate crossings that enclose an
-    implausible amount of real driving — the signature of a mistimed gate."""
-    lo, hi = band
-    obd = float(np.interp(t_b, t, dist_lap_m) - np.interp(t_a, t, dist_lap_m))
-    return lo * nominal_m <= obd <= hi * nominal_m
+    """False when a GPS glitch makes a gate crossing untrustworthy: the
+    track_dist_m-vs-dist_lap_m offset reaches `offset_m` within `window_m`
+    (track-distance) of either gate. Only the gate neighbourhoods matter — a
+    mid-section glitch does not move a gate crossing, so it is not checked."""
+    td = np.asarray(track_dist_m, dtype=float)
+    off = np.abs(td - np.asarray(dist_lap_m, dtype=float))
+    for seed in (dist_a, dist_b):
+        near = np.abs(td - seed) <= window_m
+        if near.any() and off[near].max() >= offset_m:
+            return False
+    return True
 
 
 def section_times(
@@ -149,15 +160,13 @@ def section_times(
     track_def: dict,
     pre_m: float = 50.0,
     post_cap_m: float = 250.0,
-    obd_ratio_band: tuple[float, float] = OBD_RATIO_BAND,
 ) -> pd.DataFrame:
     """For every (session_id, lap, corner_id), the gate-to-gate section time.
 
     Boundaries are physical gates (perpendicular to the centerline) at the
     section's start/end distances; the time is between the lap's crossings.
-    A transit is emitted when both gates are crossed in order AND the OBD
-    distance driven between the crossings is within `obd_ratio_band` × nominal
-    (drops mistimed gates from severe GPS glitches; see OBD_RATIO_BAND). Genuine
+    A transit is emitted when both gates are crossed in order AND neither gate is
+    glitched (see `_gates_glitch_free` / GATE_GLITCH_OFFSET_M). Genuine
     line-length variation is preserved. Long-form: session_id, lap, corner_id,
     section_time_s.
     """
@@ -191,7 +200,7 @@ def section_times(
                 t_b = gate_crossing_time(lat, lon, tt, td, gb, frame, b)
                 if t_b is None or t_b <= t_a:
                     continue
-                if not _obd_ratio_ok(tt, dl, t_a, t_b, b - a, obd_ratio_band):
+                if not _gates_glitch_free(td, dl, a, b):
                     continue
                 rows.append((sid, int(lap_n), cid, t_b - t_a))
     return pd.DataFrame(rows, columns=["session_id", "lap", "corner_id", "section_time_s"])
@@ -318,15 +327,14 @@ def span_time(
     frame: "TrackFrame | None" = None,
     half_width_m: float = 40.0,
     seed_window_m: float = 120.0,
-    obd_ratio_band: tuple[float, float] = OBD_RATIO_BAND,
 ) -> float | None:
     """Gate-to-gate elapsed seconds for one lap between centerline distances
     dist_a and dist_b. Builds a gate at each distance (perpendicular to the
     centerline) and returns the time between the lap's crossings, or None if
     either gate isn't crossed. Immune to lateral GPS/line offset. Genuine
-    racing-line variation is kept, but a transit whose OBD distance between the
-    crossings is outside `obd_ratio_band` × (dist_b − dist_a) is dropped — a
-    mistimed gate (severe GPS glitch); see OBD_RATIO_BAND."""
+    racing-line variation is kept, but a transit is dropped when a GPS glitch
+    near either gate (a large track_dist_m-vs-dist_lap_m offset) mistimed the
+    crossing; see `_gates_glitch_free` / GATE_GLITCH_OFFSET_M."""
     lap_samples = lap_samples.sort_values("t")
     if frame is None:
         frame = TrackFrame.from_centerline(centerline)
@@ -342,8 +350,7 @@ def span_time(
     t_b = gate_crossing_time(lat, lon, t, td, gb, frame, dist_b, seed_window_m)
     if t_b is None or t_b <= t_a:
         return None
-    if not _obd_ratio_ok(t, lap_samples["dist_lap_m"].to_numpy(), t_a, t_b,
-                         dist_b - dist_a, obd_ratio_band):
+    if not _gates_glitch_free(td, lap_samples["dist_lap_m"].to_numpy(), dist_a, dist_b):
         return None
     return float(t_b - t_a)
 
@@ -382,15 +389,14 @@ def range_section_times(
     to_id: str,
     pre_m: float = 50.0,
     post_cap_m: float = 250.0,
-    obd_ratio_band: tuple[float, float] = OBD_RATIO_BAND,
 ) -> pd.DataFrame:
     """For every (session_id, lap), gate-to-gate time across from_id..to_id.
 
     Uses one entry gate (range start) and one exit gate (range end). Emitted
-    when both gates are crossed in order AND the OBD distance driven between the
-    crossings is within `obd_ratio_band` × nominal (drops mistimed gates from
-    severe GPS glitches; see OBD_RATIO_BAND). For from_id == to_id this matches
-    section_times() for that corner. Long-form: session_id, lap, section_time_s.
+    when both gates are crossed in order AND neither gate is glitched (see
+    `_gates_glitch_free` / GATE_GLITCH_OFFSET_M). For from_id == to_id this
+    matches section_times() for that corner. Long-form: session_id, lap,
+    section_time_s.
     """
     a, b = section_range_bounds(track_def, from_id, to_id, pre_m, post_cap_m)
     centerline = load_centerline(track)
@@ -421,7 +427,7 @@ def range_section_times(
             t_b = gate_crossing_time(lat, lon, tt, td, gb, frame, b)
             if t_b is None or t_b <= t_a:
                 continue
-            if not _obd_ratio_ok(tt, dl, t_a, t_b, b - a, obd_ratio_band):
+            if not _gates_glitch_free(td, dl, a, b):
                 continue
             rows.append((sid, int(lap_n), t_b - t_a))
     return pd.DataFrame(rows, columns=["session_id", "lap", "section_time_s"])

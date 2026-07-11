@@ -375,44 +375,68 @@ def _straight_centerline_df(n=1001, lat=47.0, lon0=-123.0, length_m=2000.0):
                          "lat": np.full(n, lat), "long": lon})
 
 
-def _lap_along(cl, make_lap_samples, lat_offset_m=0.0, n=400, total_s=20.0, obd_scale=1.0):
+def _lap_along(cl, make_lap_samples, lat_offset_m=0.0, n=400, total_s=20.0,
+               line_offset_m=0.0, gate_glitch_at=None, gate_glitch_m=0.0):
     """A lap driving east down `cl`, sampled uniformly; track_dist_m is the
-    centerline projection (independent of the lateral offset). `obd_scale`
-    scales dist_lap_m relative to track_dist_m, so the OBD distance between two
-    gate crossings is `obd_scale` × the nominal section length (obd_scale=1.0 is
-    a clean lap; <1 mimics a glitch that shortened the enclosed OBD distance)."""
+    centerline projection (independent of the lateral offset). dist_lap_m (the
+    OBD channel) is track_dist_m plus two optional distortions:
+      * `line_offset_m` — a constant, smoothly-held offset. Models a genuine
+        tighter/wider racing line: track_dist_m and dist_lap_m disagree by a
+        small bounded amount but neither jumps. A clean lap uses 0.
+      * a localized Gaussian spike of height `gate_glitch_m` centred at
+        `gate_glitch_at` — models a TrackAddict GPS glitch that mistimes a gate
+        crossing (a sharp track_dist_m-vs-OBD offset near one gate).
+    """
     lon = np.linspace(cl["long"].iloc[0], cl["long"].iloc[-1], n)
     m_per_deg_lat = 111_132.0
     lat = np.full(n, cl["lat"].iloc[0] + lat_offset_m / m_per_deg_lat)
     m_per_deg_lon = 111_132.0 * np.cos(np.radians(cl["lat"].iloc[0]))
     track = (lon - cl["long"].iloc[0]) * m_per_deg_lon
+    dist_lap = track + line_offset_m
+    if gate_glitch_at is not None:
+        dist_lap = dist_lap + gate_glitch_m * np.exp(-0.5 * ((track - gate_glitch_at) / 12.0) ** 2)
     t = np.linspace(0.0, total_s, n)
     return make_lap_samples(n=n, t=t, lat=lat, long=lon,
-                            track_dist_m=track, dist_lap_m=track * obd_scale)
+                            track_dist_m=track, dist_lap_m=dist_lap)
 
 
-def test_span_time_rejects_implausibly_short_obd(make_lap_samples):
-    # SPEC: analysis.span_time — a lap whose OBD distance between the gate
-    # crossings is far below nominal (a glitch mistimed a gate) is rejected;
-    # you cannot drive meaningfully shorter than the centerline.
+def test_span_time_rejects_gate_glitch_at_entry(make_lap_samples):
+    # SPEC: analysis.span_time — a GPS glitch near a gate (track_dist_m vs
+    # dist_lap_m offset >= 50 m within ~60 m of the gate) mistimes that crossing,
+    # so the transit is dropped. Reject the CAUSE (a localized glitch), not the
+    # symptom (a short OBD distance). This is the real 20250810-110836 L4 case:
+    # the old OBD-ratio guard kept it (in-band ratio 0.88) though its entry gate
+    # fired ~1.6 s late on a 71 m track_dist_m spike.
     cl = _straight_centerline_df(length_m=2000.0)
-    lap = _lap_along(cl, make_lap_samples, obd_scale=0.70)
+    lap = _lap_along(cl, make_lap_samples, gate_glitch_at=500.0, gate_glitch_m=70.0)
     assert span_time(lap, 500.0, 1500.0, cl) is None
 
 
-def test_span_time_rejects_implausibly_long_obd(make_lap_samples):
-    # SPEC: analysis.span_time — a lap whose OBD distance between the crossings
-    # is far above nominal (a glitch stretched the window) is rejected.
+def test_span_time_rejects_gate_glitch_at_exit(make_lap_samples):
+    # SPEC: analysis.span_time — the glitch check covers BOTH gates; a spike near
+    # the exit gate is caught too.
     cl = _straight_centerline_df(length_m=2000.0)
-    lap = _lap_along(cl, make_lap_samples, obd_scale=1.40)
+    lap = _lap_along(cl, make_lap_samples, gate_glitch_at=1500.0, gate_glitch_m=70.0)
     assert span_time(lap, 500.0, 1500.0, cl) is None
 
 
-def test_span_time_keeps_mild_line_variation(make_lap_samples):
-    # SPEC: analysis.span_time — a mildly longer line (OBD ~110% of nominal) is
-    # legitimate and kept; the band is generous on purpose.
+def test_span_time_keeps_genuine_tight_line(make_lap_samples):
+    # SPEC: analysis.span_time — a genuinely tighter/shorter line shows up as a
+    # small, bounded track_dist-vs-OBD offset with no spike, and is KEPT. The
+    # removed OBD-ratio guard used to drop these fast laps; the glitch detector
+    # must not (a 30 m offset is well under the 50 m glitch threshold).
     cl = _straight_centerline_df(length_m=2000.0)
-    lap = _lap_along(cl, make_lap_samples, obd_scale=1.10)
+    lap = _lap_along(cl, make_lap_samples, line_offset_m=-30.0)
+    out = span_time(lap, 500.0, 1500.0, cl)
+    assert out is not None
+    assert out == pytest.approx(10.0, abs=0.2)
+
+
+def test_span_time_keeps_subthreshold_offset_near_gate(make_lap_samples):
+    # SPEC: a modest offset near a gate (below the 50 m glitch threshold) is not
+    # a glitch and is kept — the detector must not be trigger-happy.
+    cl = _straight_centerline_df(length_m=2000.0)
+    lap = _lap_along(cl, make_lap_samples, gate_glitch_at=500.0, gate_glitch_m=25.0)
     out = span_time(lap, 500.0, 1500.0, cl)
     assert out is not None
     assert out == pytest.approx(10.0, abs=0.2)

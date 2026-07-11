@@ -465,7 +465,7 @@ Needs `t, rpm, speed_mph` columns (use `make_lap_samples`).
 
 Import: `from lap_analyzer.analysis import span_time`. Signature:
 `(lap_samples, dist_a, dist_b, centerline, frame=None, half_width_m=40.0,
-seed_window_m=120.0, obd_ratio_band=(0.85, 1.25)) -> float | None`. Needs
+seed_window_m=120.0) -> float | None`. Needs
 `lat, long, t, track_dist_m, dist_lap_m`.
 
 - **Contract:** gate-to-gate elapsed seconds. A gate is a line segment laid
@@ -477,13 +477,16 @@ seed_window_m=120.0, obd_ratio_band=(0.85, 1.25)) -> float | None`. Needs
     `±half_width_m`, or `t_b <= t_a`).
   - Immune to lateral GPS/line offset: a wider line crossing the same gates
     returns the same time — genuine line-length variation is preserved.
-  - **OBD-distance guard (two-sided):** `None` when the OBD distance driven
-    between the two crossings (`dist_lap_m`) is outside
-    `obd_ratio_band × (dist_b − dist_a)` — a mistimed gate from a severe GPS
-    glitch. The band is generous (default `(0.85, 1.25)`) so real line variation
-    is kept while gross glitches are dropped; `obd_scale ≈ 1.1` is kept,
-    `≈ 0.70` and `≈ 1.40` are rejected. `OBD_RATIO_BAND` is the shared default,
-    also used by `section_times`/`range_section_times`.
+  - **Glitch-at-gate guard:** `None` when a GPS glitch near either gate
+    mistimed the crossing — i.e. `|track_dist_m − dist_lap_m|` reaches
+    `GATE_GLITCH_OFFSET_M` (default 50 m) anywhere within `GATE_GLITCH_WINDOW_M`
+    (default 60 m, track-distance) of a gate. This rejects the *cause* (a
+    mistimed gate), not the *symptom* (a short OBD distance): a localized glitch
+    spike (e.g. `gate_glitch_m ≈ 70`) is dropped, while a genuinely tighter line
+    with a small smooth offset (`line_offset_m ≈ −30`, or a sub-threshold
+    `gate_glitch_m ≈ 25`) is kept. Shared by `section_times` /
+    `range_section_times`. (Replaced the earlier two-sided OBD-ratio band, which
+    both missed in-band glitches and dropped clean fast lines.)
   - a clean synthetic lap driving down the centerline returns the true elapsed
     time between the two gate positions.
 

@@ -86,12 +86,15 @@ Section times come from `lap_analyzer.analysis.section_times` /
 `range_section_times`, which time each lap between two **gates** — line segments
 laid across the track (perpendicular to the centerline, ±40 m wide) at the section
 bounds — measured where the lap's GPS path crosses them. A time is emitted when
-both gates are crossed and the OBD distance driven between them is within a
-generous band of the nominal section length (`OBD_RATIO_BAND`, default 0.85–1.25×):
-a genuinely wider line legitimately takes longer and is kept, but a transit whose
-enclosed distance is implausible — a severe GPS glitch that mistimed a gate — is
-dropped. The channel chart adds ±200 m of context on each side so the adjacent
-brake zones are visible.
+both gates are crossed and neither gate is glitched: a transit is dropped when a
+GPS glitch near a gate mistimed the crossing — `|track_dist_m − dist_lap_m|`
+reaches `GATE_GLITCH_OFFSET_M` (default 50 m) within `GATE_GLITCH_WINDOW_M`
+(default 60 m) of a gate. This rejects the *cause* (a mistimed gate) rather than
+the *symptom* (a short/long enclosed distance): a genuinely tighter or wider line
+has a small, smooth offset and is kept, while a glitch spikes 50–70 m+ at a gate
+and is dropped. (Replaced the earlier `OBD_RATIO_BAND`, which let in-band glitches
+through and dropped clean fast lines.) The channel chart adds ±200 m of context on
+each side so the adjacent brake zones are visible.
 
 ## The Δt panel
 
