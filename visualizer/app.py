@@ -164,7 +164,7 @@ def _insert_gap_breaks(df: pd.DataFrame, x_col: str, gap_threshold: float = 30.0
 # Bump _SECTION_TIMES_VERSION when section_times() / span_time() / range
 # section-time logic changes — baked into the cached functions' source via the
 # default arg below, so @st.cache_data invalidates on reload.
-_SECTION_TIMES_VERSION = 8
+_SECTION_TIMES_VERSION = 9
 
 
 @st.cache_data(show_spinner="computing per-corner section times (one-time)")
@@ -308,6 +308,10 @@ def find_best_lap(range_corners: list[str], is_full_lap: bool,
     eligible = range_sec_t[
         range_sec_t.set_index(["session_id", "lap"]).index.isin(eligible_keys)
     ]
+    # Exclude transits whose GPS was too coarse to time the crossings precisely —
+    # a fake-fast coarse-GPS lap must not win the "fastest through" benchmark.
+    if "timing_reliable" in eligible.columns:
+        eligible = eligible[eligible["timing_reliable"].fillna(False).astype(bool)]
     # NOTE: an `obd_discrepancy_m` gate used to live here to reject "GPS-glitched"
     # laps. It was removed 2026-05-19 — it gated on the *magnitude* of the
     # OBD-vs-centerline distance divergence, which cannot distinguish a GPS glitch
@@ -481,6 +485,15 @@ def _range_section_time(sid_: str, lap_: int) -> float | None:
     return float(r.iloc[0]["section_time_s"]) if not r.empty else None
 
 
+def _range_timing_reliable(sid_: str, lap_: int) -> bool:
+    """Whether this (sid, lap) section time was timed on trustworthy GPS. False
+    when GPS was too coarse to time the gate crossings (value is an OBD estimate)."""
+    r = range_sec_t[(range_sec_t["session_id"] == sid_) & (range_sec_t["lap"] == lap_)]
+    if r.empty or "timing_reliable" not in r.columns:
+        return True
+    return bool(r.iloc[0]["timing_reliable"])
+
+
 # Header metric row. Full-lap view shows no metric row. Single corner keeps the
 # 4-metric row; a range shows section time + entry/exit speed of the complex.
 if not is_full_lap:
@@ -553,6 +566,12 @@ if not is_full_lap:
             c3.metric(f"Exit speed ({to_choice})", f"{xv:.1f} mph", delta=xd)
         else:
             c3.metric(f"Exit speed ({to_choice})", "—")
+
+    if section_t_val is not None and not _range_timing_reliable(sid, lap):
+        st.caption(
+            "⚠️ GPS was too coarse to time this section precisely — the value is an "
+            "OBD-distance estimate and is excluded from the ‘fastest’ benchmark."
+        )
 
 
 # --- channel envelope plot --------------------------------------------------

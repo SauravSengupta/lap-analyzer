@@ -95,7 +95,8 @@ def _classify_all(track: str, endpoint: float, bands_key: tuple) -> pd.DataFrame
             "excluded_reason": res["excluded_reason"],
             "downshift_dist_m": res["downshift_dist_m"],
             "t8_apex_gear": res["t8_apex_gear"],
-            "section_time_s": span_time(s, SPAN_A, endpoint, _centerline),
+            "section_time_s": (lambda r: r[0] if r else None)(
+                span_time(s, SPAN_A, endpoint, _centerline)),
         })
     return pd.DataFrame(rows)
 
