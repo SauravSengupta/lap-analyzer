@@ -160,6 +160,26 @@ def test_estimate_trajectory_monotone_and_aligned(sample_data_root):
     assert traj.status in ("ok", "rescale_invalid", "gps_backbone")
 
 
+def test_estimate_trajectory_monotone_under_any_input_order(make_lap_samples):
+    # SPEC (§5 PR1 property): s_hat is monotone non-decreasing regardless of input
+    # row order — the estimator time-sorts internally, so a shuffled frame yields a
+    # monotone s_hat aligned to that lap's own time-sorted order.
+    from lap_analyzer.gates import TrackFrame
+    from lap_analyzer.trajectory import estimate_trajectory
+    corr = _straight_corridor(n=300)
+    frame = TrackFrame.from_centerline(pd.DataFrame(
+        {"lat": [45.0, 45.0], "long": [-122.0, -121.99]}))
+    n = 200
+    dl = np.linspace(0.0, 2500.0, n)
+    lap = make_lap_samples(n=n, t=np.arange(n) * 0.1, dist_lap_m=dl,
+                           track_dist_m=dl + 3.0, lat=np.full(n, 45.0),
+                           long=np.full(n, -122.0), lat_g=np.zeros(n))
+    shuffled = lap.sample(frac=1.0, random_state=1).reset_index(drop=True)
+    traj = estimate_trajectory(shuffled, corr, frame)
+    assert np.all(np.diff(traj.s_hat) >= -1e-9)
+    assert np.all(np.diff(traj.t) >= 0.0)          # internally time-sorted
+
+
 def test_time_at_returns_none_outside_range(sample_data_root):
     # SPEC: Trajectory.time_at — None when s is outside [s_hat.min, s_hat.max]
     # (np.interp would otherwise clamp and fabricate a crossing time).
