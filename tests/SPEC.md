@@ -555,6 +555,10 @@ Import: `from lap_analyzer.corners import extract_lap_candidates`. Signature:
     `"left"` (consistent with the positive=right convention).
   - offsets (`brake_on_offset_m`, etc.) are relative to the candidate's
     `entry_dist_m`, or `None` when the event doesn't occur.
+  - **GPS-only sessions** (OBD dropout, all-NaN `speed_mph`) fall back to
+    `speed_mph_gps` for the min-speed apex pick (mirrors
+    `labeler.build_corner_transit`), so a candidate is still emitted with a
+    finite `min_speed_mph` instead of crashing on an all-NA `idxmin`.
   - **brake/throttle-lift onset is detected over a lookback window extending
     `LOOKBACK_M` (150 m) before `entry_dist_m`** (mirrors
     `labeler.build_corner_transit`), so braking that begins before turn-in is

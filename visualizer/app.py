@@ -19,6 +19,7 @@ import streamlit as st
 from lap_analyzer.analysis import (
     lap_summary,
     load_centerline,
+    load_samples,
     range_section_times,
     section_bounds,
     section_range_bounds,
@@ -164,7 +165,9 @@ def _insert_gap_breaks(df: pd.DataFrame, x_col: str, gap_threshold: float = 30.0
 # Bump _SECTION_TIMES_VERSION when section_times() / span_time() / range
 # section-time logic changes — baked into the cached functions' source via the
 # default arg below, so @st.cache_data invalidates on reload.
-_SECTION_TIMES_VERSION = 9
+# v10 (2026-07-11, gps-trust PR 0): build_gate now uses a σ=10m smoothed tangent,
+# which shifts gate-crossing section times at rotation-exposed corners.
+_SECTION_TIMES_VERSION = 10
 
 
 @st.cache_data(show_spinner="computing per-corner section times (one-time)")
@@ -220,13 +223,15 @@ def _section_time_help(track: str, sid_: str, lap_: int, corner: str) -> str | N
         return None
     a, b = sec_bounds_all[corner]
     try:
-        s = _samples(track, sid_, lap_).sort_values("t").reset_index(drop=True)
+        # load_samples (not shared.samples) so lat/long are present — the gate
+        # crossing needs the GPS path, and shared.samples() drops those columns.
+        s = load_samples(track, sid_, lap_).sort_values("t").reset_index(drop=True)
+        lat = s["lat"].to_numpy()
+        lon = s["long"].to_numpy()
+        ts = s["t"].to_numpy()
+        td = s["track_dist_m"].to_numpy()
     except Exception:
         return "Samples not available for this lap."
-    lat = s["lat"].to_numpy()
-    lon = s["long"].to_numpy()
-    ts = s["t"].to_numpy()
-    td = s["track_dist_m"].to_numpy()
     centerline = load_centerline(track)
     frame = TrackFrame.from_centerline(centerline)
     if gate_crossing_time(lat, lon, ts, td, build_gate(centerline, a, frame), frame, a) is None:

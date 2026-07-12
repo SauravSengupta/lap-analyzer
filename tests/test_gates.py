@@ -1,7 +1,10 @@
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from lap_analyzer.centerline import M_PER_DEG_LAT
 from lap_analyzer.gates import TrackFrame, build_gate, gate_crossing_time
 
 
@@ -12,6 +15,45 @@ def _straight_centerline(n=1001, lat=47.0, lon0=-123.0, length_deg=0.02):
     frame_m_per_deg_lon = 111_132.0 * np.cos(np.radians(lat))
     dist = (lon - lon0) * frame_m_per_deg_lon
     return pd.DataFrame({"track_dist_m": dist, "lat": lat_arr, "long": lon})
+
+
+def _snaking_centerline(n=2001, lat0=47.0, lon0=-123.0, length_m=2000.0,
+                        amp_m=5.0, wavelength_m=18.0):
+    """A dead-straight (due-east) track carrying the centerline's transverse
+    snaking artifact — the ~5 m amplitude / ~18 m wavelength oscillation the
+    synthetic centerline is known to have (design spec R3, 2026-07-11).
+
+    ``track_dist_m`` is the underlying straight-line distance, so the TRUE track
+    tangent is due east at every point and a correct gate is always a
+    north-south segment. Any rotation of the gate away from north-south is pure
+    artifact — exactly what the smoothed tangent must reject.
+    """
+    m_per_deg_lat = M_PER_DEG_LAT
+    m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat0))
+    s = np.linspace(0.0, length_m, n)
+    x = s                                              # east, metres
+    y = amp_m * np.sin(2.0 * np.pi * s / wavelength_m)  # north snaking, metres
+    lat = lat0 + y / m_per_deg_lat
+    lon = lon0 + x / m_per_deg_lon
+    return pd.DataFrame({"track_dist_m": s, "lat": lat, "long": lon})
+
+
+def _acute_angle_deg(vx, vy, wx=1.0, wy=0.0):
+    """Acute angle (degrees) between (vx,vy) and (wx,wy), ignoring 180° flips."""
+    vn = math.hypot(vx, vy)
+    wn = math.hypot(wx, wy)
+    c = abs((vx * wx + vy * wy) / (vn * wn))
+    return math.degrees(math.acos(min(1.0, c)))
+
+
+def _gate_tangent_rotation_deg(gate, true_tangent=(1.0, 0.0)):
+    """How far the gate's implied track tangent is rotated from ``true_tangent``.
+
+    The gate segment is laid perpendicular to the tangent, so rotating the
+    segment direction by 90° recovers the tangent the gate was built from.
+    """
+    d = gate.p1 - gate.p2
+    return _acute_angle_deg(d[1], -d[0], *true_tangent)
 
 
 def test_trackframe_to_xy_maps_degrees_to_meters():
@@ -41,6 +83,34 @@ def test_build_gate_is_perpendicular_and_centered():
     cx_exp, cy_exp = frame.to_xy(np.array([cl["lat"].iloc[i]]), np.array([cl["long"].iloc[i]]))
     assert (gate.p1[0] + gate.p2[0]) / 2 == pytest.approx(cx_exp[0], abs=0.5)
     assert (gate.p1[1] + gate.p2[1]) / 2 == pytest.approx(cy_exp[0], abs=0.5)
+
+
+def test_build_gate_tangent_survives_centerline_snaking():
+    # The gate tangent must come from a σ=10 m smoothed fit over a ±20 m window,
+    # not a 2-sample baseline (design spec R3 / PR 0, 2026-07-11). Evaluated at a
+    # snake-slope MAXIMUM (a whole number of 18 m wavelengths in), where the
+    # centerline artifact is worst, the gate must still point true (north-south)
+    # within 3° so it never converts a lateral line offset into crossing-time error.
+    cl = _snaking_centerline()
+    frame = TrackFrame.from_centerline(cl)
+    dist_m = 990.0  # 55 * 18 m — cos(2πs/λ) = 1, the steepest point of the snake
+    gate = build_gate(cl, dist_m, frame, half_width_m=40.0)
+    assert _gate_tangent_rotation_deg(gate) < 3.0
+
+
+def test_two_sample_tangent_is_the_bug_being_fixed():
+    # Documents WHY the smoothed tangent is required: the retired 2-sample tangent
+    # (centerline i-1 .. i+1) is rotated tens of degrees off true at the same
+    # snake-slope peak — the >3° failure the test above now guards against.
+    cl = _snaking_centerline()
+    frame = TrackFrame.from_centerline(cl)
+    dist_m = 990.0
+    cd = cl["track_dist_m"].to_numpy()
+    x, y = frame.to_xy(cl["lat"].to_numpy(), cl["long"].to_numpy())
+    i = int(np.argmin(np.abs(cd - dist_m)))
+    i0, i1 = max(0, i - 1), min(len(cd) - 1, i + 1)
+    tx, ty = x[i1] - x[i0], y[i1] - y[i0]  # the old, retired tangent
+    assert _acute_angle_deg(tx, ty) > 40.0
 
 
 def _run_lap_along(cl, lat_offset_deg=0.0, n=400, speed_mps=40.0):

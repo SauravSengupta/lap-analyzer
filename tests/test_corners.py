@@ -171,6 +171,29 @@ def test_extract_lap_candidates_absent_event_offset_is_none(make_lap_samples):
     assert out[0]["brake_on_offset_m"] is None
 
 
+def test_extract_lap_candidates_gps_only_falls_back_to_gps_speed(make_lap_samples):
+    # SPEC: corners.extract_lap_candidates — GPS-only sessions (OBD dropout, ~12%)
+    # have all-NaN speed_mph. The min-speed apex must fall back to speed_mph_gps
+    # instead of crashing on an all-NaN idxmin (mirrors labeler's speed_col rule).
+    n = 120
+    i = np.arange(n)
+    width = 0.05 * n
+    lat_g = 0.8 * np.exp(-0.5 * ((i - 60) / width) ** 2)  # one right hump mid-lap
+    # GPS speed dips to a known 50 mph minimum at the apex; OBD speed is absent.
+    gps_speed = 90.0 - 40.0 * np.exp(-0.5 * ((i - 60) / width) ** 2)
+    lap = make_lap_samples(
+        n=n, t=np.arange(n) * 0.1, lat_g=lat_g, long_g=np.zeros(n),
+        speed_mph=np.full(n, np.nan), speed_mph_gps=gps_speed,
+        throttle_norm=np.full(n, 1.0),
+        dist_lap_m=np.linspace(0.0, 2000.0, n),
+        lat=np.full(n, 45.0), long=np.full(n, -122.0),
+    )
+    out = extract_lap_candidates(lap, sample_rate_hz=10.0)
+    assert len(out) == 1
+    # min_speed_mph came from GPS speed (finite ≈ 50 mph apex dip), not NaN.
+    assert out[0]["min_speed_mph"] == pytest.approx(50.0, abs=1.0)
+
+
 # ---------------------------------------------------------------------------
 # extract_session_candidates — integration tier
 # ---------------------------------------------------------------------------
