@@ -125,8 +125,12 @@ def _top_decile_traces(track: str, filter_version: int = _GLITCH_FILTER_VERSION)
 
 
 @st.cache_data(show_spinner=False)
-def _envelope(track: str, channel: str, n_points: int = 400) -> pd.DataFrame:
-    traces = _top_decile_traces(track, filter_version=_GLITCH_FILTER_VERSION)
+def _envelope(track: str, channel: str, n_points: int = 400,
+              filter_version: int = _GLITCH_FILTER_VERSION) -> pd.DataFrame:
+    # filter_version passed explicitly (below and at the call site) so THIS cache
+    # invalidates on a _GLITCH_FILTER_VERSION bump too — it caches the derived
+    # envelope, so busting only _top_decile_traces would leave it stale.
+    traces = _top_decile_traces(track, filter_version=filter_version)
     if traces.empty or channel not in traces.columns:
         return pd.DataFrame(columns=["track_dist_m", "p10", "p50", "p90"])
     t = traces[["track_dist_m", channel]].dropna()
@@ -722,7 +726,7 @@ n_rows = len(PANELS) + (1 if show_delta_panel else 0)
 fig = make_subplots(rows=n_rows, cols=1, shared_xaxes=True, vertical_spacing=0.04)
 
 for i, (ch, label) in enumerate(PANELS, start=1):
-    env_i = _envelope(track, ch)
+    env_i = _envelope(track, ch, filter_version=_GLITCH_FILTER_VERSION)
     if not is_full_lap:
         env_i = env_i[(env_i["track_dist_m"] >= display_a)
                       & (env_i["track_dist_m"] <= display_b)]

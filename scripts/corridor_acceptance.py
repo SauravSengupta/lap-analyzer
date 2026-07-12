@@ -39,7 +39,45 @@ TRACK = "ridge"
 HEADING_6 = {"T1": 38.3, "T2": 80.6, "T3": 82.5, "T4": 86.6, "T5": 85.1, "T6": 205.5,
              "T7": 50.0, "T8": 149.6, "T9": 68.1, "T10": 27.8, "T11": 175.2, "T12": 131.4,
              "T13": 120.7, "T14": 216.0, "T15": 247.3, "T16": 58.5}
-ENV_TARGET = {"T8": (-13.0, 16.0), "T11": (-14.0, 15.0)}
+# Real Gate 2: does the STORED corridor's weighting w_env = exp(-(excess/5)^2)
+# discriminate the fake short paths from the real tight line over the section?
+# (drift-corrected offsets; plan §7.3 / spec prototype). T8 L6 is on-ribbon so the
+# envelope passes it by design — that's the driven-band's job (Stage 2), reported
+# here only for context.
+CANONICAL = [
+    ("T11 real tight line",  "20250725-160443", 3, "T11", {"mean_ge": 0.90, "frac_le": 0.0}),
+    ("T8 L4 fake #1",        "20260702-101432", 4, "T8",  {"frac_ge": 0.40}),
+    ("T8 honest fastest",    "20260702-091257", 5, "T8",  {"mean_ge": 0.99}),
+    ("T8 L6 on-ribbon fake", "20260702-101432", 6, "T8",  None),
+]
+
+
+def _section_w_env(sid, lap, cid, corr, frame, m_lon, sec):
+    """Corridor weight w_env = exp(-(excess/5m)^2) over corner cid's section for one
+    lap (drift-corrected). Returns (mean_w, frac(w<0.5)) or None."""
+    from lap_analyzer.centerline import M_PER_DEG_LAT
+    a, b = sec[cid]
+    try:
+        g = pd.read_parquet(sessions_dir(TRACK) / sid / "samples.parquet",
+                            columns=["lap", "track_dist_m", "lat", "long",
+                                     "gps_drift_lat_m", "gps_drift_lon_m"])
+    except Exception:
+        return None
+    g = g[g["lap"] == lap]
+    if g.empty:
+        return None
+    td = g["track_dist_m"].to_numpy()
+    lat = g["lat"].to_numpy() - g["gps_drift_lat_m"].to_numpy() / M_PER_DEG_LAT
+    lon = g["long"].to_numpy() - g["gps_drift_lon_m"].to_numpy() / m_lon
+    x, y = frame.to_xy(lat, lon)
+    off = corr.lateral_offset(x, y, td)
+    bi = corr.bin_index(td)
+    excess = np.maximum(0.0, np.maximum(corr.e_lo[bi] - off, off - corr.e_hi[bi]))
+    w = np.exp(-((excess / 5.0) ** 2))
+    m = (td >= a) & (td <= b)
+    if m.sum() < 5:
+        return None
+    return float(w[m].mean()), float((w[m] < 0.5).mean())
 
 
 def _clean_laps():
@@ -80,32 +118,20 @@ def main() -> int:
     # corner box) — verified: the section window reproduces §6 within ±10° at
     # every corner, the box window under-counts high-heading corners.
     sec = section_bounds(track_def)
-    from lap_analyzer.centerline import M_PER_DEG_LAT
-
-    # gather per-lap heading + per-corner lateral offsets
+    # --- Gate 1: per-corner integrated |lat_g| heading over the section vs §6 ---
     hdg = {cid: [] for cid in corners}
-    env = {cid: [] for cid in ENV_TARGET}
     for g in _clean_laps():
         t = g["t"].to_numpy()
         td = g["track_dist_m"].to_numpy()
         v = g["speed_mph"].to_numpy() * MPH_TO_MPS
         latg = g["lat_g"].to_numpy()
-        lat = g["lat"].to_numpy() - g["gps_drift_lat_m"].to_numpy() / M_PER_DEG_LAT
-        lon = g["long"].to_numpy() - g["gps_drift_lon_m"].to_numpy() / m_lon
-        x, y = frame.to_xy(lat, lon)
-        off = corr.lateral_offset(x, y, td)
         dt = np.gradient(t)
         good = np.isfinite(v) & (v > MIN_SPEED_MPS) & np.isfinite(latg)
-        for cid, c in corners.items():
+        for cid in corners:
             a, b = sec[cid]
-            m = good & (td >= a) & (td <= b)   # heading over the gate-to-gate section
-            if m.sum() >= 5:
-                dtheta = np.abs(latg[m]) * 9.81 / v[m] * dt[m]  # |dψ| = |a_lat|/v · dt
-                hdg[cid].append(math.degrees(np.nansum(dtheta)))
-            if cid in ENV_TARGET:
-                mo = (td >= c["start_m"]) & (td <= c["end_m"])
-                if mo.sum() >= 5:
-                    env[cid].extend(off[mo].tolist())
+            m = good & (td >= a) & (td <= b)
+            if m.sum() >= 5:  # |dψ| = |a_lat|/v · dt integrated over the section
+                hdg[cid].append(math.degrees(np.nansum(np.abs(latg[m]) * 9.81 / v[m] * dt[m])))
 
     print("=== Gate 1: per-corner |lat_g|-heading vs §6 (within ±10°) ===")
     worst = 0.0
@@ -115,20 +141,37 @@ def main() -> int:
         worst = max(worst, d)
         flag = "" if d <= 10.0 else "  <-- OUTSIDE ±10°"
         print(f"  {cid:4} measured {med:6.1f}  table {HEADING_6[cid]:6.1f}  diff {d:5.1f}{flag}")
-    print(f"  worst |diff| = {worst:.1f}° -> {'PASS' if worst <= 10.0 else 'FAIL'}")
+    g1 = worst <= 10.0
+    print(f"  worst |diff| = {worst:.1f}° -> {'PASS' if g1 else 'FAIL'}")
 
-    # Gate 2 is INFORMATIONAL (2026-07-12 decision): the [−13,+16]/[−14,+15]
-    # targets come from the design brief's broader per-corner population (331/338
-    # laps); this corridor uses the validated prototype's 95 strict-clean laps and
-    # the spec's 2-pass EM-trim, which the reference corridor doesn't reproduce
-    # either. The envelope's real validation is the canonical-case discrimination
-    # in PR 2 (T8-fake excluded AND T11-real kept).
-    print("\n=== Gate 2 (INFORMATIONAL): T8/T11 lateral envelope ===")
-    for cid, (tlo, thi) in ENV_TARGET.items():
-        p2 = float(np.percentile(env[cid], 2))
-        p98 = float(np.percentile(env[cid], 98))
-        print(f"  {cid}: corridor raw p2/p98 [{p2:6.1f},{p98:6.1f}]  brief target [{tlo:.0f},{thi:.0f}] "
-              f"(broader population — not a pass/fail here)")
+    # --- Gate 2: canonical-case corridor weighting (the actual discriminator) ---
+    print("\n=== Gate 2: canonical-case w_env = exp(-(excess/5m)^2) over the section ===")
+    g2 = True
+    for label, sid, lap, cid, gate in CANONICAL:
+        r = _section_w_env(sid, lap, cid, corr, frame, m_lon, sec)
+        if r is None:
+            print(f"  {label}: n/a")
+            continue
+        mean_w, frac = r
+        if gate is None:
+            print(f"  {label:22} {cid}: mean {mean_w:.2f}  frac(w<0.5) {frac:.2f}  (informational)")
+            continue
+        conds, ok = [], True
+        if "mean_ge" in gate:
+            c = mean_w >= gate["mean_ge"]
+            ok &= c
+            conds.append(f"mean {mean_w:.2f}>={gate['mean_ge']:.2f}{'' if c else ' FAIL'}")
+        if "frac_ge" in gate:
+            c = frac >= gate["frac_ge"]
+            ok &= c
+            conds.append(f"frac {frac:.2f}>={gate['frac_ge']:.2f}{'' if c else ' FAIL'}")
+        if "frac_le" in gate:
+            c = frac <= gate["frac_le"]
+            ok &= c
+            conds.append(f"frac {frac:.2f}<={gate['frac_le']:.2f}{'' if c else ' FAIL'}")
+        g2 &= ok
+        print(f"  {label:22} {cid}: [{', '.join(conds)}] -> {'OK' if ok else 'FAIL'}")
+    print(f"  -> {'PASS' if g2 else 'FAIL'}")
 
     print("\n=== Gate 3: smoothed tangent field has no ~18m spectral peak ===")
     cd = cl["track_dist_m"].to_numpy()
@@ -150,11 +193,14 @@ def main() -> int:
 
     raw_r = band_power(raw_ang)
     sm_r = band_power(sm_ang_1m)
+    g3 = sm_r < raw_r / 10
     print(f"  15-22m band peak / mean power:  raw centerline {raw_r:8.1f}x  smoothed {sm_r:6.1f}x")
-    print(f"  smoothed field 18m peak suppressed -> {'PASS' if sm_r < raw_r / 10 else 'REVIEW'}")
+    print(f"  smoothed field 18m peak suppressed -> {'PASS' if g3 else 'REVIEW'}")
 
     print(f"\ncorridor meta: {corr.meta}")
-    return 0
+    all_pass = g1 and g2 and g3
+    print(f"OVERALL -> {'PASS' if all_pass else 'FAIL'}")
+    return 0 if all_pass else 1
 
 
 if __name__ == "__main__":

@@ -62,9 +62,13 @@ class Corridor:
     meta: dict = field(default_factory=dict)  # calib_version, input hash, n_laps, build date
 
     def bin_index(self, track_dist_m: np.ndarray) -> np.ndarray:
-        """Map track_dist_m to corridor bin indices (clipped to range)."""
-        return np.clip(np.round(np.asarray(track_dist_m) / CORRIDOR_BIN_M).astype(int),
-                       0, len(self.s_bin) - 1)
+        """Map track_dist_m to corridor bin indices (clipped to range).
+
+        Non-finite positions (NaN/inf) map to bin 0 rather than an undefined int
+        cast — callers must filter such samples out of any downstream use."""
+        td = np.asarray(track_dist_m, dtype=float)
+        idx = np.round(np.where(np.isfinite(td), td, 0.0) / CORRIDOR_BIN_M).astype(int)
+        return np.clip(idx, 0, len(self.s_bin) - 1)
 
     def lateral_offset(self, x: np.ndarray, y: np.ndarray, track_dist_m: np.ndarray) -> np.ndarray:
         """Signed lateral offset (metres, + = left of travel) of frame-XY points
@@ -277,7 +281,14 @@ def load_corridor(track: str) -> Corridor:
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
     if meta.get("calib_version") not in (None, CALIB_VERSION):
         raise ValueError(
-            f"corridor {track} calib_version {meta.get('calib_version')!r} != {CALIB_VERSION!r}; rebuild it")
+            f"corridor {track} calib_version {meta.get('calib_version')!r} != {CALIB_VERSION!r}; "
+            f"rebuild it: python -m lap_analyzer.trajectory build-corridor {track}")
+    stored_hash = meta.get("input_hash")
+    if stored_hash is not None and stored_hash != _centerline_hash(load_centerline(track)):
+        raise ValueError(
+            f"corridor {track} was built from a different centerline (input_hash "
+            f"{stored_hash!r} stale); rebuild it: python -m lap_analyzer.trajectory "
+            f"build-corridor {track}")
     return Corridor(
         s_bin=df["s_bin"].to_numpy(), e_lo=df["e_lo"].to_numpy(), e_hi=df["e_hi"].to_numpy(),
         tx=df["tx"].to_numpy(), ty=df["ty"].to_numpy(), gx=df["gx"].to_numpy(),

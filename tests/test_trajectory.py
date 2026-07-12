@@ -8,6 +8,7 @@ documented contract (envelope EM-trim, lateral-offset sign, NaN-safe κ, save/lo
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from lap_analyzer.trajectory import (
@@ -45,6 +46,16 @@ def test_bin_index_clips_to_range():
     corr = _straight_corridor(n=5)          # bins at 0,10,20,30,40
     idx = corr.bin_index(np.array([-100.0, 0.0, 24.0, 26.0, 1e6]))
     assert idx.tolist() == [0, 0, 2, 3, 4]
+
+
+def test_bin_index_maps_non_finite_to_valid_bin():
+    # SPEC: non-finite positions (NaN/inf) map to a defined bin, not an undefined
+    # int cast. Result must stay in [0, n-1] and never crash.
+    corr = _straight_corridor(n=5)
+    idx = corr.bin_index(np.array([np.nan, np.inf, -np.inf, 30.0]))
+    assert idx.dtype.kind == "i"
+    assert np.all((idx >= 0) & (idx <= 4))
+    assert idx[0] == 0 and idx[3] == 3   # NaN → bin 0; finite value unaffected
 
 
 # --- EM-trim convergence (judge-mandated) -----------------------------------
@@ -113,6 +124,20 @@ def test_load_corridor_rejects_stale_calib_version(tmp_path, monkeypatch):
     object.__setattr__(corr, "meta", {"calib_version": "corridor-vOLD"})
     _save_corridor("ridge", corr)
     with pytest.raises(ValueError, match="calib_version"):
+        load_corridor("ridge")
+
+
+def test_load_corridor_rejects_changed_centerline(tmp_path, monkeypatch):
+    # SPEC: load raises when the stored input_hash no longer matches the current
+    # centerline (a stale corridor must be rebuilt, not silently used).
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    import lap_analyzer.trajectory as traj
+    monkeypatch.setattr(traj, "load_centerline", lambda track: pd.DataFrame(
+        {"track_dist_m": [0.0, 1.0], "lat": [0.0, 0.0], "long": [0.0, 0.0]}))
+    corr = _straight_corridor(n=4)
+    object.__setattr__(corr, "meta", {"calib_version": CALIB_VERSION, "input_hash": "deadbeef"})
+    traj._save_corridor("ridge", corr)
+    with pytest.raises(ValueError, match="different centerline|rebuild"):
         load_corridor("ridge")
 
 
