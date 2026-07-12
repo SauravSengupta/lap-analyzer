@@ -707,6 +707,20 @@ on one lap's estimate, and reports honest per-section σ with three physical σ-
   pass}` for at least the driven-band, consistency, and speed-consistency nets, so a
   post-mortem can read *why* a row is/ isn't rankable straight from the object.
 
+### Per-mode σ-calibration (design R7)
+
+`scripts/gps_trust_calibration.py` synthesises randomised laps for each GPS failure
+mode (`clean`, `teleport`, `drift`, `line_offset`, `gps_hold`, `lockup`, `gps_only`)
+with a KNOWN true section time, and asserts the emitted σ honestly covers the error:
+**|section-time error| < 2·σ̂ in ≥95% of draws, asserted separately for each mode** (a
+global scale can hide Mode-4 under-coverage behind Mode-3 over-coverage). The
+authoritative hard gate is ≥500 draws/mode on the real corridor (`run_calibration`);
+`test_per_mode_calibration_within_2sigma` runs it on a self-contained SYNTHETIC
+corridor so CI enforces the property without the (gitignored) corpus. The
+`line_offset` mode doubles as the R4 discrimination check: a genuine in-corridor,
+odometer-consistent tight line is recovered accurately (the estimator follows the
+real δ), not shrunk toward the OBD backbone.
+
 ---
 
 ## fused_axis.compute_fused_dist

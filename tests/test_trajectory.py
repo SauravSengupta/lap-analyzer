@@ -379,3 +379,53 @@ def test_section_timing_emits_all_three_net_checks():
     assert any("driven_band" in x for x in names)
     assert any("consistency" in x for x in names)
     assert any("speed_consistency" in x for x in names)
+
+
+# ===========================================================================
+# Per-mode σ-calibration (Stage 2, item 6 / design R7) — the CI-enforced guard.
+# The authoritative ≥500-draws/mode hard gate runs on the REAL corridor via
+# scripts/gps_trust_calibration.py (output archived in the Stage-2 commit); here
+# a self-contained SYNTHETIC corridor keeps CI honest without the corpus.
+# ===========================================================================
+
+def _load_calibration_module():
+    import importlib
+    import sys
+    from pathlib import Path
+    scripts = str(Path(__file__).resolve().parents[1] / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    return importlib.import_module("gps_trust_calibration")
+
+
+def test_per_mode_calibration_within_2sigma():
+    # SPEC / design R7: on randomised synthetic laps PER failure mode, the emitted
+    # 1σ honestly covers the section-time error — |err| < 2σ̂ in ≥95% of draws,
+    # asserted SEPARATELY for each mode (a global scale can hide Mode-4
+    # under-coverage behind Mode-3 over-coverage). Synthetic corridor → CI-safe.
+    cal = _load_calibration_module()
+    ctx = cal._Ctx.synthetic()
+    res = cal.run_calibration(n_per_mode=40, seed=7, ctx=ctx)
+    for mode in cal.MODES:
+        r = res[mode]
+        assert r["n"] >= 30, f"{mode}: too few valid draws ({r['n']})"
+        assert r["coverage"] >= 0.95, (
+            f"{mode}: only {r['coverage']:.2%} within 2σ (σ under-covers this mode)")
+
+
+def test_calibration_line_offset_is_rankable_and_true():
+    # design R4 discrimination (executable): a genuine in-corridor, odometer-consistent
+    # tight line is recovered ACCURATELY (the estimator follows the real δ), not
+    # shrunk toward the OBD backbone — the property that keeps T11's real line fast.
+    cal = _load_calibration_module()
+    ctx = cal._Ctx.synthetic()
+    import numpy as np
+    rng = np.random.default_rng(3)
+    from lap_analyzer.trajectory import estimate_trajectory, section_timing
+    errs = []
+    for _ in range(30):
+        lap, a, b, truth = cal.make_synth_lap("line_offset", rng, ctx)
+        traj = estimate_trajectory(lap, ctx.corr, ctx.frame)
+        st = section_timing(traj, a, b, ctx.corr)
+        errs.append(abs(st.time_s - truth))
+    assert np.median(errs) < 0.10   # follows the real line, not shrunk to OBD
