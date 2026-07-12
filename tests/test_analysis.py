@@ -469,6 +469,9 @@ def test_span_time_coarse_gps_unreliable_uses_obd_value(make_lap_samples):
     assert value == pytest.approx(10.0, abs=0.3)
 
 
+# 9999 m is off the end of this centerline, so build_gate can't fit a smoothed
+# tangent there and warns before falling back — expected for this off-track bound.
+@pytest.mark.filterwarnings("ignore:build_gate:UserWarning")
 def test_span_time_uncrossed_bound_returns_none(make_lap_samples):
     # SPEC: analysis.span_time — None if a gate isn't crossed
     cl = _straight_centerline_df(length_m=2000.0)

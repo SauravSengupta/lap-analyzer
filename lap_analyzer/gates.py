@@ -10,6 +10,7 @@ genuine racing-line variation is preserved and GPS arc-compression is rejected.
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -52,6 +53,44 @@ class Gate:
     p2: np.ndarray  # [x, y]
 
 
+# 2026-07-11, gps-trust PR 0 (design spec R3): the tangent that orients a gate is
+# a Gaussian-weighted linear regression of centerline position on track_dist_m
+# over a +/-TANGENT_HALF_WINDOW_M window with kernel scale TANGENT_SIGMA_M. The
+# retired 2-sample tangent read the synthetic centerline's ~5 m / ~18 m snaking
+# artifact as real heading and rotated gates up to 59 deg (median 9, p90 46), which
+# turns an ordinary 3-5 m lateral line offset into ~0.1-0.17 s of spurious crossing
+# time. A +/-20 m window spans >2 snake wavelengths, so the oscillation cancels.
+TANGENT_SIGMA_M = 10.0
+TANGENT_HALF_WINDOW_M = 20.0
+
+
+def _smoothed_tangent(
+    cd: np.ndarray, x: np.ndarray, y: np.ndarray, dist_m: float,
+    sigma_m: float = TANGENT_SIGMA_M, half_window_m: float = TANGENT_HALF_WINDOW_M,
+) -> tuple[float, float] | None:
+    """Unit track tangent (dx/ds, dy/ds) at `dist_m` from a Gaussian-weighted
+    local linear regression of position on track_dist_m. Returns None if the
+    window is too sparse or degenerate to fit a direction."""
+    win = np.abs(cd - dist_m) <= half_window_m
+    s = cd[win]
+    if s.size < 2:
+        return None
+    w = np.exp(-0.5 * ((s - dist_m) / sigma_m) ** 2)
+    sw = w.sum()
+    if sw <= 0.0:
+        return None
+    s_c = s - np.sum(w * s) / sw
+    ss = np.sum(w * s_c * s_c)
+    if ss <= 0.0:                               # all evidence at one distance
+        return None
+    tx = np.sum(w * s_c * (x[win] - np.sum(w * x[win]) / sw)) / ss   # slope dx/ds
+    ty = np.sum(w * s_c * (y[win] - np.sum(w * y[win]) / sw)) / ss   # slope dy/ds
+    tnorm = math.hypot(tx, ty)
+    if tnorm == 0.0:
+        return None
+    return tx / tnorm, ty / tnorm
+
+
 def build_gate(
     centerline: pd.DataFrame,
     dist_m: float,
@@ -60,16 +99,29 @@ def build_gate(
 ) -> Gate:
     """Gate perpendicular to the centerline tangent at `dist_m`, +/- half_width_m wide."""
     cd = centerline["track_dist_m"].to_numpy()
-    i = int(np.argmin(np.abs(cd - dist_m)))
-    i0 = max(0, i - 1)
-    i1 = min(len(cd) - 1, i + 1)
     x, y = frame.to_xy(centerline["lat"].to_numpy(), centerline["long"].to_numpy())
+    i = int(np.argmin(np.abs(cd - dist_m)))
     cx, cy = x[i], y[i]
-    tx, ty = x[i1] - x[i0], y[i1] - y[i0]      # tangent
-    tnorm = math.hypot(tx, ty)
-    if tnorm == 0.0:
-        tx, ty, tnorm = 1.0, 0.0, 1.0
-    px, py = -ty / tnorm, tx / tnorm            # unit perpendicular
+    tangent = _smoothed_tangent(cd, x, y, dist_m)
+    if tangent is None:
+        # The ±20m regression window was too sparse to fit a direction. Unreachable
+        # on the ridge centerline (all 32 gates sit ≥219m inside coverage) but
+        # reachable on a sparse bootstrap centerline for a new track — warn rather
+        # than silently lay a gate, and fall back to the nearest-two-point tangent
+        # (best available; a sparse centerline has no snaking artifact to smooth).
+        warnings.warn(
+            f"build_gate: no smoothed tangent at dist_m={dist_m:.1f} "
+            f"(centerline sparse within ±{TANGENT_HALF_WINDOW_M:.0f}m); "
+            "falling back to a 2-point tangent",
+            stacklevel=2,
+        )
+        i0, i1 = max(0, i - 1), min(len(cd) - 1, i + 1)
+        tx, ty = x[i1] - x[i0], y[i1] - y[i0]
+        tnorm = math.hypot(tx, ty) or 1.0
+        tx, ty = tx / tnorm, ty / tnorm
+    else:
+        tx, ty = tangent
+    px, py = -ty, tx                            # unit perpendicular (tangent is unit)
     return Gate(
         p1=np.array([cx + px * half_width_m, cy + py * half_width_m]),
         p2=np.array([cx - px * half_width_m, cy - py * half_width_m]),

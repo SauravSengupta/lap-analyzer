@@ -34,6 +34,12 @@ def extract_lap_candidates(lap_df: pd.DataFrame, sample_rate_hz: float) -> list[
     if len(lap_df) < 50:
         return []
 
+    # GPS-only (OBD-dropout) sessions have all-NaN speed_mph; fall back to GPS
+    # speed for the min-speed apex pick so idxmin() has real values to sort,
+    # mirroring labeler.build_corner_transit (~12% of sessions log without OBD).
+    obd_present = bool(lap_df["speed_mph"].notna().any())
+    speed_col = "speed_mph" if obd_present else "speed_mph_gps"
+
     window = max(3, int(round(SMOOTH_SECONDS * sample_rate_hz)))
     distance = int(round(MIN_PEAK_SPACING_S * sample_rate_hz))
 
@@ -53,7 +59,7 @@ def extract_lap_candidates(lap_df: pd.DataFrame, sample_rate_hz: float) -> list[
             exit_idx += 1
 
         window_df = lap_df.iloc[entry_idx:exit_idx + 1]
-        min_idx = window_df["speed_mph"].idxmin()
+        min_idx = window_df[speed_col].idxmin()
 
         entry_dist = float(lap_df.iloc[entry_idx]["dist_lap_m"])
         post_apex = window_df.loc[min_idx:]
@@ -78,13 +84,17 @@ def extract_lap_candidates(lap_df: pd.DataFrame, sample_rate_hz: float) -> list[
             "entry_dist_m": round(entry_dist, 2),
             "exit_dist_m": round(float(lap_df.iloc[exit_idx]["dist_lap_m"]), 2),
             "duration_s": round(float(lap_df.iloc[exit_idx]["t"] - lap_df.iloc[entry_idx]["t"]), 3),
-            "min_speed_mph": round(float(lap_df.loc[min_idx, "speed_mph"]), 2),
+            "min_speed_mph": round(float(lap_df.loc[min_idx, speed_col]), 2),
             "min_speed_dist_m": round(float(lap_df.loc[min_idx, "dist_lap_m"]), 2),
             "brake_on_offset_m": round(brake_dist - entry_dist, 2) if brake_dist is not None else None,
             "throttle_lift_offset_m": round(lift_dist - entry_dist, 2) if lift_dist is not None else None,
             "throttle_return_offset_m": round(ret_dist - entry_dist, 2) if ret_dist is not None else None,
             "apex_lat": round(float(lap_df.loc[min_idx, "lat"]), 7),
             "apex_long": round(float(lap_df.loc[min_idx, "long"]), 7),
+            # Provenance for min_speed_mph (mirrors labeler.build_corner_transit):
+            # obd_present=False means the speeds above came from GPS, not OBD.
+            "obd_present": obd_present,
+            "speed_source": "obd" if obd_present else "gps",
         })
     return rows
 
@@ -96,6 +106,7 @@ CANDIDATE_COLUMNS = [
     "min_speed_mph", "min_speed_dist_m",
     "brake_on_offset_m", "throttle_lift_offset_m", "throttle_return_offset_m",
     "apex_lat", "apex_long",
+    "obd_present", "speed_source",
 ]
 
 

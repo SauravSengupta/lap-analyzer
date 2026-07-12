@@ -12,8 +12,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from shared import (current_track, drop_gps_glitches, format_lap_time, laps,
-                    samples, session_hhmm, track_def)
+from shared import (_SECTION_TIMES_VERSION, current_track, drop_gps_glitches,
+                    format_lap_time, laps, samples, session_hhmm, track_def)
 from lap_analyzer.analysis import (classify_t8_section, derive_gear, gear_bands,
                                    load_centerline, section_times, span_time)
 
@@ -73,7 +73,11 @@ endpoint_m = T11["start_m"] if endpoint_choice == "T11 entry" else T10["end_m"]
 # --- classify every lap -----------------------------------------------------
 
 @st.cache_data(show_spinner="classifying laps (one-time per endpoint)")
-def _classify_all(track: str, endpoint: float, bands_key: tuple) -> pd.DataFrame:
+def _classify_all(track: str, endpoint: float, bands_key: tuple,
+                  _version: int = _SECTION_TIMES_VERSION) -> pd.DataFrame:
+    # _version pins this cache to the section-timing logic version (span_time via
+    # classify below) — without it the 9→10 gate-tangent bump never invalidates
+    # this page and it would serve pre-fix section times after a hot reload.
     b = np.array(bands_key)
     td = track_def(track)
     _centerline = load_centerline(track)
@@ -323,7 +327,7 @@ if np.isfinite(ds_med) and np.isfinite(nd_med):
 
 
 @st.cache_data(show_spinner="computing per-corner section times (one-time)")
-def _per_corner_times(track: str) -> pd.DataFrame:
+def _per_corner_times(track: str, _version: int = _SECTION_TIMES_VERSION) -> pd.DataFrame:
     return section_times(track, track_def(track))
 
 
