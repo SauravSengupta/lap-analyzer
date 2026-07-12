@@ -328,6 +328,7 @@ class Trajectory:
     s_hat: np.ndarray           # car position on the ruler = maximum.accumulate(dl + delta_hat)
     sigma_m: np.ndarray         # per-sample 1σ (metres) interpolated from the knot σ
     delta_hat: np.ndarray       # per-sample δ̂ (track_dist − dist_lap correction)
+    dl: np.ndarray              # per-sample dist_lap_m (odometer); the knot σ grid is in dl space
     v: np.ndarray               # per-sample speed (m/s), for section σ_t = σ_s/v
     evidence: np.ndarray        # bool: sample contributed accepted GPS evidence
     status: str                 # 'ok' | 'rescale_invalid' | 'gps_backbone'
@@ -336,14 +337,20 @@ class Trajectory:
     checks: list = field(default_factory=list)  # structured audit records (R12)
 
     def time_at(self, s: float):
-        """(t, sigma_t) at ruler position s — the unique s_hat crossing."""
+        """(t, sigma_t) at ruler position s, or None if s is outside the lap's
+        s_hat range — a scalar ruler position crosses the monotone s_hat once, and
+        out-of-range means no crossing (the caller emits no_coverage, never a
+        fabricated clamped time)."""
+        if not (self.s_hat[0] <= s <= self.s_hat[-1]):
+            return None
         t = float(np.interp(s, self.s_hat, self.t))
         return t, self.sigma_at(s) / max(self.v_at(t), MIN_SPEED_MPS)
 
     def sigma_at(self, s: float) -> float:
-        """σ (metres) at ruler position s (interpolated on the knot grid, in dl space)."""
-        dl = s - (self.s_hat[0] - self.knots[0]) if len(self.knots) else s
-        return float(np.interp(dl, self.knots, self.knot_sigma))
+        """σ (metres) at ruler position s. δ̂ is not constant, so invert s→dl
+        through s_hat first, then read the knot σ (which lives in dl space)."""
+        dl_at_s = float(np.interp(s, self.s_hat, self.dl))
+        return float(np.interp(dl_at_s, self.knots, self.knot_sigma))
 
     def v_at(self, t: float) -> float:
         return float(np.interp(t, self.t, self.v))
@@ -372,6 +379,11 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     has_obd = bool(np.isfinite(obd).any())
     v = (obd if has_obd else g["speed_mph_gps"].to_numpy(dtype=float)) * MPH_TO_MPS
     v = np.where(np.isfinite(v), v, MIN_SPEED_MPS)
+    # GPS-only laps (no OBD): dist_lap_m is already integrated from speed_mph_gps by
+    # normalize, so it is a valid backbone — but the lap rides on GPS alone, so it
+    # carries status='gps_backbone' and the wider GPS σ floor throughout (plan §4.1).
+    backbone_status = "gps_backbone" if not has_obd else "ok"
+    sigma_floor = SIGMA_FLOOR_GPS_M if not has_obd else SIGMA_FLOOR_OBD_M
 
     delta = td - dl
     med_delta = float(np.nanmedian(delta))
@@ -396,11 +408,10 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
         ev &= np.abs(delta - np.median(delta[ev])) < EVIDENCE_BACKSTOP_M
     checks.append(_check("evidence_fraction", ev.mean(), 0.0, ev.any()))
 
-    # GPS-only backbone or no usable evidence → prior-only (gps_backbone if no OBD)
+    # No usable GPS evidence → prior-only (OBD/GPS backbone; nothing dropped)
     if not ev.any():
-        status = "gps_backbone" if not has_obd else "ok"
-        return _prior_only_trajectory(t, dl, v, status, corridor, checks,
-                                      sigma_floor=SIGMA_FLOOR_GPS_M if not has_obd else SIGMA_FLOOR_OBD_M)
+        return _prior_only_trajectory(t, dl, v, backbone_status, corridor, checks,
+                                      sigma_floor=sigma_floor)
 
     # --- Step 2: corridor weighting (the Mode-4 discriminator) ---
     lat = g["lat"].to_numpy(dtype=float)
@@ -418,28 +429,33 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     # --- Steps 3-6: knot fit → slope bound → prior blend → σ ---
     knots = np.arange(dl.min(), dl.max(), KNOT_SPACING_M)
     if len(knots) < 2:
-        return _prior_only_trajectory(t, dl, v, "ok", corridor, checks)
+        return _prior_only_trajectory(t, dl, v, backbone_status, corridor, checks,
+                                      sigma_floor=sigma_floor)
     dh, se, neff = _knot_fit(dl[ev], delta[ev], w_env[ev], knots)
     slope_bound = _slope_bound(knots, dl, v, g["lat_g"].to_numpy(dtype=float), corridor, td)
     dh, clip_mag = _rate_limit(dh, slope_bound, knots)
     sig = _knot_sigma(dh, se, clip_mag, knots, dl[ev], slope_bound)
     dh, sig = _prior_blend(dh, sig, knots)
+    sig = np.maximum(sig, sigma_floor)
 
     d_smp = np.interp(dl, knots, dh)
     s_hat = np.maximum.accumulate(dl + d_smp)
     return Trajectory(t=t, s_hat=s_hat, sigma_m=np.interp(dl, knots, sig), delta_hat=d_smp,
-                      v=v, evidence=ev, status="ok", knots=knots, knot_sigma=sig, checks=checks)
+                      dl=dl, v=v, evidence=ev, status=backbone_status, knots=knots,
+                      knot_sigma=sig, checks=checks)
 
 
 def _prior_only_trajectory(t, dl, v, status, corridor, checks, sigma_floor=SIGMA_FLOOR_OBD_M):
-    """δ̂ ≡ 0 (OBD backbone), σ = the mid-lap prior — reproduces the OBD-anchored
-    fallback in the zero-GPS-evidence limit (design R6)."""
+    """δ̂ ≡ 0 (OBD/GPS backbone), σ = the tapered δ=0 prior — reproduces the
+    OBD-anchored fallback in the zero-GPS-evidence limit (design R6)."""
+    dl = dl.astype(float)
     knots = np.arange(dl.min(), dl.max(), KNOT_SPACING_M) if dl.max() > dl.min() else dl[:1]
     sig = np.maximum(_prior_sigma(knots), sigma_floor)
-    s_hat = np.maximum.accumulate(dl.astype(float))
-    return Trajectory(t=t, s_hat=s_hat, sigma_m=np.full(len(dl), float(sig.mean())),
-                      delta_hat=np.zeros(len(dl)), v=v, evidence=np.zeros(len(dl), bool),
-                      status=status, knots=knots, knot_sigma=sig, checks=checks)
+    s_hat = np.maximum.accumulate(dl)
+    return Trajectory(t=t, s_hat=s_hat, sigma_m=np.interp(dl, knots, sig),
+                      delta_hat=np.zeros(len(dl)), dl=dl, v=v,
+                      evidence=np.zeros(len(dl), bool), status=status, knots=knots,
+                      knot_sigma=sig, checks=checks)
 
 
 def _knot_fit(di, zi, wi, knots):

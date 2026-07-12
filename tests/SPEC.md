@@ -636,8 +636,12 @@ corridor-weighted, slope-bounded smooth of the offset evidence
 
 - **`Trajectory`**: `t`, `s_hat`, `sigma_m`, `delta_hat`, `v` (per time-sorted
   sample), `evidence` (bool mask of accepted GPS fixes), `status`
-  (`ok`/`rescale_invalid`/`gps_backbone`), `knots`/`knot_sigma`, and `checks`
-  (structured audit records). Helpers `time_at(s)`/`sigma_at(s)`/`v_at(t)`.
+  (`ok`/`rescale_invalid`/`gps_backbone`), `dl` (per-sample odometer),
+  `knots`/`knot_sigma`, and `checks` (structured audit records). Helpers:
+  `time_at(s)` → `(t, σ_t)`, or **`None`** when `s` is outside
+  `[s_hat.min, s_hat.max]` (no crossing → the caller emits `no_coverage`, never a
+  clamped/fabricated time); `sigma_at(s)` inverts s→dl through `s_hat` before
+  reading the knot σ (δ̂ is not constant); `v_at(t)`.
 - **Invariants:**
   - `s_hat` is **monotone non-decreasing** (`= maximum.accumulate(dist_lap + δ̂)`),
     so a scalar ruler position has a unique crossing — ghost crossings die

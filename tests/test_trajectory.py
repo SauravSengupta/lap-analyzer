@@ -155,8 +155,45 @@ def test_estimate_trajectory_monotone_and_aligned(sample_data_root):
     lap = int(s["lap"].iloc[len(s) // 2])
     traj = estimate_trajectory(s[s["lap"] == lap], corr, frame)
     assert np.all(np.diff(traj.s_hat) >= -1e-9)
-    assert len(traj.s_hat) == len(traj.t) == len(traj.sigma_m) == len(traj.delta_hat)
+    assert (len(traj.s_hat) == len(traj.t) == len(traj.sigma_m)
+            == len(traj.delta_hat) == len(traj.dl))
     assert traj.status in ("ok", "rescale_invalid", "gps_backbone")
+
+
+def test_time_at_returns_none_outside_range(sample_data_root):
+    # SPEC: Trajectory.time_at — None when s is outside [s_hat.min, s_hat.max]
+    # (np.interp would otherwise clamp and fabricate a crossing time).
+    from lap_analyzer.analysis import load_centerline, load_samples
+    from lap_analyzer.gates import TrackFrame
+    from lap_analyzer.trajectory import build_corridor, estimate_trajectory
+    corr = build_corridor("ridge", save=False)
+    frame = TrackFrame.from_centerline(load_centerline("ridge"))
+    s = load_samples("ridge", "20260517-100304")
+    lap = int(s["lap"].iloc[len(s) // 2])
+    traj = estimate_trajectory(s[s["lap"] == lap], corr, frame)
+    assert traj.time_at(traj.s_hat.max() + 1000.0) is None
+    assert traj.time_at(traj.s_hat.min() - 1000.0) is None
+    assert traj.time_at(float(np.median(traj.s_hat))) is not None
+
+
+def test_estimate_trajectory_gps_only_is_gps_backbone(make_lap_samples):
+    # SPEC: a GPS-only lap (no OBD speed) → status 'gps_backbone' with the wider
+    # GPS σ floor, even with GPS evidence present. dist_lap_m stays valid
+    # (normalize integrates it from speed_mph_gps).
+    from lap_analyzer.gates import TrackFrame
+    from lap_analyzer.trajectory import SIGMA_FLOOR_GPS_M, estimate_trajectory
+    corr = _straight_corridor(n=250)
+    frame = TrackFrame.from_centerline(pd.DataFrame(
+        {"lat": [45.0, 45.0], "long": [-122.0, -121.99]}))
+    n = 200
+    lap = make_lap_samples(
+        n=n, speed_mph=np.full(n, np.nan), speed_mph_gps=np.full(n, 100.0),
+        dist_lap_m=np.linspace(0, 2000, n), track_dist_m=np.linspace(0, 2000, n),
+        lat=np.full(n, 45.0), long=np.full(n, -122.0), lat_g=np.zeros(n))
+    traj = estimate_trajectory(lap, corr, frame)
+    assert traj.status == "gps_backbone"
+    assert np.all(traj.knot_sigma >= SIGMA_FLOOR_GPS_M - 1e-9)
+    assert np.all(np.diff(traj.s_hat) >= -1e-9)
 
 
 def test_estimate_trajectory_rescale_invalid_is_prior_only(make_lap_samples):
