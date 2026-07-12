@@ -588,6 +588,46 @@ a `sample_data_root` session dir.
 
 ---
 
+## trajectory.Corridor / build_corridor
+
+Import: `from lap_analyzer.trajectory import Corridor, build_corridor, load_corridor`.
+The corridor is the per-track "asphalt ribbon" the trajectory layer reads: a
+per-10m-bin clean-lap lateral envelope + the σ=10m-smoothed centerline field +
+corpus signed curvature. Design:
+`docs/superpowers/specs/2026-07-11-unified-gps-trust-trajectory-design.md`.
+
+- **`Corridor`** (frozen dataclass): equal-length arrays `s_bin` (10m bin
+  centers), `e_lo`/`e_hi` (signed lateral envelope, metres), `tx`/`ty` (unit
+  smoothed tangent), `gx`/`gy` (smoothed position, TrackFrame metres),
+  `kappa_signed` (per bin, `+` = right, GPS-free from `lat_g·g/v²`), and `meta`.
+  - `bin_index(track_dist_m)` → bin indices clipped to range.
+  - `lateral_offset(x, y, track_dist_m)` → signed offset of frame-XY points from
+    the smoothed centerline, **`+` = left of travel**. Inputs must be
+    drift-corrected (design R5).
+- **`build_corridor(track)`** — from clean flying laps (≥100 samples, sane
+  `dist_lap_m` rescale, no >40m GPS excursion):
+  - **envelope**: per-bin p2/p98 of per-lap-per-bin median lateral offset, +2m
+    pad, hard cap ±20m, built in **two EM-trim passes** (pass 2 drops the votes
+    pass-1's envelope rejects — purges Mode-4 contamination without dragging the
+    ribbon).
+  - **`kappa_signed`**: corpus clean-lap median `lat_g·g/v²` per bin, **NaN-safe**
+    (OBD-dropout laps have NaN `speed_mph`; excluded, never propagated).
+  - **Invariants**: `e_lo ≤ e_hi`; `|e_lo|,|e_hi| ≤ 20`; `kappa_signed` all
+    finite; `s_bin` increases by 10m.
+- **EM-trim convergence** (judge requirement, asserted): on synthetic clean votes
+  plus a Mode-4 contamination cluster (≈ −30m in some bins), the 2-pass envelope
+  recovers the clean ribbon in the contaminated bins where the 1-pass envelope is
+  dragged toward the cap.
+- **`load_corridor` / save**: round-trips arrays + meta; raises when the persisted
+  `calib_version` differs from the code's (forces a rebuild on schema change).
+- Note: the corridor's lateral envelope reproduces the *validated prototype*
+  corridor (95 strict-clean laps + 2-pass EM-trim), which is intentionally tighter
+  than the design brief's broader per-corner [−13,+16]/[−14,+15] figures; the
+  envelope's behavioural validation is the canonical-case discrimination (PR 2),
+  not those numbers.
+
+---
+
 ## fused_axis.compute_fused_dist
 
 Import: `from lap_analyzer.fused_axis import compute_fused_dist`. Signature:
