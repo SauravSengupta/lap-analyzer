@@ -11,6 +11,18 @@ from lap_analyzer.analysis import lap_index, load_corpus, load_samples
 from lap_analyzer.config import tracks_dir
 
 
+# Single source of truth for the section-timing cache version. Both app.py and
+# every page that computes section times (via section_times / span_time /
+# range_section_times) pass it as a `_version=` default arg into their
+# @st.cache_data functions — st.cache_data keys on the decorated function's own
+# source + args, NOT its callees, so a change in gates.py / analysis.py only
+# reaches every cache when this constant bumps. Lives here (not app.py) so pages
+# import it without executing app.py's Streamlit script.
+# v10 (2026-07-11, gps-trust PR 0): build_gate now uses a σ=10m smoothed tangent,
+# which shifts gate-crossing section times at rotation-exposed corners.
+_SECTION_TIMES_VERSION = 10
+
+
 def current_track() -> str:
     """The track the visualizer is currently showing.
 
@@ -53,10 +65,13 @@ def samples(track: str, session_id: str, lap: int) -> pd.DataFrame:
 
     `rpm` is included so the downshift page can derive gear; app.py ignores it.
     `track_dist_m`/`dist_lap_m` feed the fused distance axis (see fused_axis.py).
+    `lat`/`long` are the raw GPS path — every gate-crossing consumer of this
+    loader (analysis.span_time on the downshift page, app.py's section-time
+    tooltip) reads them, so they must be here or those callers KeyError.
     """
     s = load_samples(track, session_id, lap)[
         ["t", "lap", "track_dist_m", "dist_lap_m", "speed_mph", "speed_mph_gps",
-         "throttle_norm", "long_g", "lat_g", "rpm"]
+         "throttle_norm", "long_g", "lat_g", "rpm", "lat", "long"]
     ].copy()
     return s
 

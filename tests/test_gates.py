@@ -86,31 +86,40 @@ def test_build_gate_is_perpendicular_and_centered():
 
 
 def test_build_gate_tangent_survives_centerline_snaking():
-    # The gate tangent must come from a σ=10 m smoothed fit over a ±20 m window,
-    # not a 2-sample baseline (design spec R3 / PR 0, 2026-07-11). Evaluated at a
-    # snake-slope MAXIMUM (a whole number of 18 m wavelengths in), where the
-    # centerline artifact is worst, the gate must still point true (north-south)
-    # within 3° so it never converts a lateral line offset into crossing-time error.
+    # SPEC: analysis.span_time — "Gate tangent is a smoothed local fit, not a
+    # 2-sample tangent": on a straight track carrying a 5 m / 18 m transverse
+    # oscillation the gate stays within 3° of true. Evaluated at a snake-slope
+    # MAXIMUM (a whole number of wavelengths in), where the artifact is worst.
     cl = _snaking_centerline()
     frame = TrackFrame.from_centerline(cl)
     dist_m = 990.0  # 55 * 18 m — cos(2πs/λ) = 1, the steepest point of the snake
+    # The fixture is genuinely adversarial: a naive 2-sample tangent (i-1 .. i+1)
+    # here rotates tens of degrees off true, so a < 3° result proves the smoothing
+    # works rather than the fixture being flat.
+    cd = cl["track_dist_m"].to_numpy()
+    x, y = frame.to_xy(cl["lat"].to_numpy(), cl["long"].to_numpy())
+    i = int(np.argmin(np.abs(cd - dist_m)))
+    assert _acute_angle_deg(x[i + 1] - x[i - 1], y[i + 1] - y[i - 1]) > 40.0
+    # Production gate: the smoothed tangent holds the perpendicular true.
     gate = build_gate(cl, dist_m, frame, half_width_m=40.0)
     assert _gate_tangent_rotation_deg(gate) < 3.0
 
 
-def test_two_sample_tangent_is_the_bug_being_fixed():
-    # Documents WHY the smoothed tangent is required: the retired 2-sample tangent
-    # (centerline i-1 .. i+1) is rotated tens of degrees off true at the same
-    # snake-slope peak — the >3° failure the test above now guards against.
-    cl = _snaking_centerline()
+def test_build_gate_warns_and_falls_back_when_centerline_too_sparse():
+    # Robustness: when the ±20 m smoothing window has < 2 points (a sparse
+    # bootstrap centerline for a new track — unreachable on ridge), build_gate
+    # warns instead of silently laying a gate and falls back to a 2-point tangent.
+    n = 6
+    lon = np.linspace(-123.0, -123.0 + 0.02, n)  # points ~300 m apart
+    m_per_deg_lon = 111_132.0 * np.cos(np.radians(47.0))
+    cl = pd.DataFrame({"track_dist_m": (lon + 123.0) * m_per_deg_lon,
+                       "lat": np.full(n, 47.0), "long": lon})
     frame = TrackFrame.from_centerline(cl)
-    dist_m = 990.0
-    cd = cl["track_dist_m"].to_numpy()
-    x, y = frame.to_xy(cl["lat"].to_numpy(), cl["long"].to_numpy())
-    i = int(np.argmin(np.abs(cd - dist_m)))
-    i0, i1 = max(0, i - 1), min(len(cd) - 1, i + 1)
-    tx, ty = x[i1] - x[i0], y[i1] - y[i0]  # the old, retired tangent
-    assert _acute_angle_deg(tx, ty) > 40.0
+    mid = float(cl["track_dist_m"].iloc[n // 2])
+    with pytest.warns(UserWarning, match="2-point tangent"):
+        gate = build_gate(cl, mid, frame, half_width_m=40.0)
+    # Still a valid perpendicular (north-south) gate on this straight sparse line.
+    assert abs(gate.p1[1] - gate.p2[1]) == pytest.approx(80.0, abs=1e-3)
 
 
 def _run_lap_along(cl, lat_offset_deg=0.0, n=400, speed_mps=40.0):

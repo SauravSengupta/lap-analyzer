@@ -10,6 +10,7 @@ genuine racing-line variation is preserved and GPS arc-compression is rejected.
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -103,7 +104,21 @@ def build_gate(
     cx, cy = x[i], y[i]
     tangent = _smoothed_tangent(cd, x, y, dist_m)
     if tangent is None:
-        tx, ty = 1.0, 0.0
+        # The ±20m regression window was too sparse to fit a direction. Unreachable
+        # on the ridge centerline (all 32 gates sit ≥219m inside coverage) but
+        # reachable on a sparse bootstrap centerline for a new track — warn rather
+        # than silently lay a gate, and fall back to the nearest-two-point tangent
+        # (best available; a sparse centerline has no snaking artifact to smooth).
+        warnings.warn(
+            f"build_gate: no smoothed tangent at dist_m={dist_m:.1f} "
+            f"(centerline sparse within ±{TANGENT_HALF_WINDOW_M:.0f}m); "
+            "falling back to a 2-point tangent",
+            stacklevel=2,
+        )
+        i0, i1 = max(0, i - 1), min(len(cd) - 1, i + 1)
+        tx, ty = x[i1] - x[i0], y[i1] - y[i0]
+        tnorm = math.hypot(tx, ty) or 1.0
+        tx, ty = tx / tnorm, ty / tnorm
     else:
         tx, ty = tangent
     px, py = -ty, tx                            # unit perpendicular (tangent is unit)

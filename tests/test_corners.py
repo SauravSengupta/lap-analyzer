@@ -192,6 +192,19 @@ def test_extract_lap_candidates_gps_only_falls_back_to_gps_speed(make_lap_sample
     assert len(out) == 1
     # min_speed_mph came from GPS speed (finite ≈ 50 mph apex dip), not NaN.
     assert out[0]["min_speed_mph"] == pytest.approx(50.0, abs=1.0)
+    # Provenance records the GPS fallback (mirrors the transit dict).
+    assert out[0]["obd_present"] is False
+    assert out[0]["speed_source"] == "gps"
+
+
+def test_extract_lap_candidates_records_obd_provenance(make_lap_samples):
+    # SPEC: corners.extract_lap_candidates — a lap with OBD speed records
+    # obd_present True / speed_source "obd".
+    lap = _lap_with_latg_hump(make_lap_samples, n=120, peak_g=0.8)
+    out = extract_lap_candidates(lap, sample_rate_hz=10.0)
+    assert len(out) == 1
+    assert out[0]["obd_present"] is True
+    assert out[0]["speed_source"] == "obd"
 
 
 # ---------------------------------------------------------------------------

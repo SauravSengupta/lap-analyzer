@@ -91,6 +91,10 @@ def extract_lap_candidates(lap_df: pd.DataFrame, sample_rate_hz: float) -> list[
             "throttle_return_offset_m": round(ret_dist - entry_dist, 2) if ret_dist is not None else None,
             "apex_lat": round(float(lap_df.loc[min_idx, "lat"]), 7),
             "apex_long": round(float(lap_df.loc[min_idx, "long"]), 7),
+            # Provenance for min_speed_mph (mirrors labeler.build_corner_transit):
+            # obd_present=False means the speeds above came from GPS, not OBD.
+            "obd_present": obd_present,
+            "speed_source": "obd" if obd_present else "gps",
         })
     return rows
 
@@ -102,6 +106,7 @@ CANDIDATE_COLUMNS = [
     "min_speed_mph", "min_speed_dist_m",
     "brake_on_offset_m", "throttle_lift_offset_m", "throttle_return_offset_m",
     "apex_lat", "apex_long",
+    "obd_present", "speed_source",
 ]
 
 

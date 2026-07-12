@@ -476,6 +476,13 @@ seed_window_m=120.0) -> tuple[float, float] | None`. Needs
 - **Invariants:**
   - `None` if either gate isn't crossed (the path stayed beyond the gate's
     `±half_width_m`, or `t_b <= t_a`), or the OBD range can't supply the fallback.
+  - **Gate tangent is a smoothed local fit, not a 2-sample tangent.** The gate
+    perpendicular at each `dist_a`/`dist_b` comes from a σ=10 m Gaussian-weighted
+    linear regression of centerline position over a ±20 m window, so it is immune
+    to the centerline's transverse noise. On a straight track carrying a 5 m /
+    18 m-wavelength transverse oscillation the gate stays within 3° of true — a
+    2-sample tangent there rotates tens of degrees and converts a lateral line
+    offset into spurious crossing time.
   - Immune to lateral GPS/line offset: a wider line crossing the same gates
     returns the same time — genuine line-length variation is preserved.
   - **Reliable** (`timing_gap_s < CONFIDENCE_GAP_S`, default 0.4 s):
@@ -558,7 +565,9 @@ Import: `from lap_analyzer.corners import extract_lap_candidates`. Signature:
   - **GPS-only sessions** (OBD dropout, all-NaN `speed_mph`) fall back to
     `speed_mph_gps` for the min-speed apex pick (mirrors
     `labeler.build_corner_transit`), so a candidate is still emitted with a
-    finite `min_speed_mph` instead of crashing on an all-NA `idxmin`.
+    finite `min_speed_mph` instead of crashing on an all-NA `idxmin`. Each
+    candidate records that provenance: `obd_present` (bool) and `speed_source`
+    (`"obd"`/`"gps"`), like the transit dict.
   - **brake/throttle-lift onset is detected over a lookback window extending
     `LOOKBACK_M` (150 m) before `entry_dist_m`** (mirrors
     `labeler.build_corner_transit`), so braking that begins before turn-in is
