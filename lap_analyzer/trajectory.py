@@ -295,6 +295,250 @@ def load_corridor(track: str) -> Corridor:
         gy=df["gy"].to_numpy(), kappa_signed=df["kappa_signed"].to_numpy(), meta=meta)
 
 
+# --- estimator (Stage 2) ----------------------------------------------------
+# Provenance-carrying constants (design R9); values from the validated prototype
+# (shat_prototype.py) + plan §6 signal-constants block.
+FRESH_FIX_M = 0.01           # 2026-07-11, |Δtrack_dist|>this = a fresh GPS fix (prototype)
+SNAP_MASK_M = 200.0          # 2026-07-11, |δ − lap median|>this = kd-tree wrong-segment snap (design brief 8.6%/600-2700m)
+RESCALE_INVALID_M = 150.0    # 2026-07-11, |median δ|>this → status rescale_invalid (session first/last lap ~-700m)
+HAMPEL_WINDOW = 31           # 2026-07-11, Hampel teleport window (prototype)
+HAMPEL_NSIGMA = 5.0          # 2026-07-11, Hampel k·MAD (prototype)
+TELEPORT_BACKSTOP_M = 15.0   # 2026-07-11, Hampel absolute floor for the residual (prototype uses max(15, 5·MAD))
+EVIDENCE_BACKSTOP_M = 60.0   # 2026-07-11, absolute teleport backstop on |δ − ev median| (design brief 50-200m)
+ENV_SOFT_SCALE_M = 5.0       # 2026-07-11, w_env = exp(−(excess/this)²) (design R4.1)
+KNOT_SPACING_M = 10.0        # 2026-07-11, δ̂ knots every 10m of dist_lap_m (prototype)
+BANDWIDTH_M = 60.0           # 2026-07-11, tricube bandwidth; curvature-adaptive is §9.2/PR1-T5 (prototype)
+SIGMA_MEAS_M = 3.0           # 2026-07-11, per-fix measurement σ floor (plan §6)
+SIGMA_PRIOR_END_M = 2.0      # 2026-07-11, δ=0 prior σ at lap ends (rescale pins them) (plan §6)
+SIGMA_PRIOR_MID_M = 12.0     # 2026-07-11, δ=0 prior σ mid-lap ≡ measured ±0.55s fallback noise (plan §6)
+PRIOR_TAPER_M = 200.0        # 2026-07-11, ends→mid prior taper length (prototype)
+SLOPE_BOUND_KAPPA = 20.0     # 2026-07-11, slope_bound = min(κ·this+0.10, 0.80) m/m (prototype/plan step 4)
+SLOPE_BOUND_FLOOR = 0.10     # 2026-07-11, straight-line offset-slope floor (plan §6 p95=0.111)
+SLOPE_BOUND_CAP = 0.80       # 2026-07-11, max plausible offset slope (prototype)
+SIGMA_FIT_CAP_M = 15.0       # 2026-07-11, cap on SE_fit before combining (prototype)
+SIGMA_FLOOR_OBD_M = 1.0      # 2026-07-11, σ floor with OBD backbone (design §Uncertainty)
+SIGMA_FLOOR_GPS_M = 3.0      # 2026-07-11, σ floor on GPS-only backbone (design §Architecture)
+
+
+@dataclass
+class Trajectory:
+    """Per-lap along-track estimate on the canonical ruler; s_hat monotone."""
+
+    t: np.ndarray               # time-sorted sample times
+    s_hat: np.ndarray           # car position on the ruler = maximum.accumulate(dl + delta_hat)
+    sigma_m: np.ndarray         # per-sample 1σ (metres) interpolated from the knot σ
+    delta_hat: np.ndarray       # per-sample δ̂ (track_dist − dist_lap correction)
+    v: np.ndarray               # per-sample speed (m/s), for section σ_t = σ_s/v
+    evidence: np.ndarray        # bool: sample contributed accepted GPS evidence
+    status: str                 # 'ok' | 'rescale_invalid' | 'gps_backbone'
+    knots: np.ndarray           # dist_lap_m knot grid
+    knot_sigma: np.ndarray      # σ at each knot (metres)
+    checks: list = field(default_factory=list)  # structured audit records (R12)
+
+    def time_at(self, s: float):
+        """(t, sigma_t) at ruler position s — the unique s_hat crossing."""
+        t = float(np.interp(s, self.s_hat, self.t))
+        return t, self.sigma_at(s) / max(self.v_at(t), MIN_SPEED_MPS)
+
+    def sigma_at(self, s: float) -> float:
+        """σ (metres) at ruler position s (interpolated on the knot grid, in dl space)."""
+        dl = s - (self.s_hat[0] - self.knots[0]) if len(self.knots) else s
+        return float(np.interp(dl, self.knots, self.knot_sigma))
+
+    def v_at(self, t: float) -> float:
+        return float(np.interp(t, self.t, self.v))
+
+
+def _check(name, value, threshold, ok):
+    return {"name": name, "value": round(float(value), 3),
+            "threshold": round(float(threshold), 3), "pass": bool(ok)}
+
+
+def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
+                        frame: TrackFrame) -> Trajectory:
+    """Robust corridor-weighted, slope-bounded δ̂ smooth + honest per-sample σ.
+
+    Ports shat_prototype.estimate onto the Corridor. Steps (design §Architecture):
+    evidence extraction → corridor weighting → robust knot fit → slope-bound
+    projection → δ=0 prior blend → σ terms → s_hat = maximum.accumulate(dl + δ̂).
+    """
+    g = lap_samples.sort_values("t")
+    t = g["t"].to_numpy(dtype=float)
+    dl = g["dist_lap_m"].to_numpy(dtype=float)
+    td = g["track_dist_m"].to_numpy(dtype=float)
+    checks = []
+
+    obd = g["speed_mph"].to_numpy(dtype=float)
+    has_obd = bool(np.isfinite(obd).any())
+    v = (obd if has_obd else g["speed_mph_gps"].to_numpy(dtype=float)) * MPH_TO_MPS
+    v = np.where(np.isfinite(v), v, MIN_SPEED_MPS)
+
+    delta = td - dl
+    med_delta = float(np.nanmedian(delta))
+    n = len(td)
+
+    # --- rescale sanity: a bad dist_lap_m rescale (session first/last lap) is prior-only
+    if abs(med_delta) > RESCALE_INVALID_M or not np.isfinite(med_delta):
+        checks.append(_check("rescale_median_delta", med_delta, RESCALE_INVALID_M, False))
+        return _prior_only_trajectory(t, dl, v, "rescale_invalid", corridor, checks)
+
+    # --- Step 1: evidence extraction (fresh → snap-mask → Hampel) ---
+    fresh = np.ones(n, bool)
+    fresh[1:] = np.abs(np.diff(td)) > FRESH_FIX_M
+    ok = fresh & np.isfinite(delta) & (np.abs(delta - med_delta) < SNAP_MASK_M)
+    d_ok = pd.Series(np.where(ok, delta, np.nan))
+    med = d_ok.rolling(HAMPEL_WINDOW, center=True, min_periods=5).median()
+    mad = (d_ok - med).abs().rolling(HAMPEL_WINDOW, center=True, min_periods=5).median() * 1.4826
+    keep = (np.abs(delta - med.to_numpy()) <=
+            np.maximum(TELEPORT_BACKSTOP_M, HAMPEL_NSIGMA * mad.fillna(SIGMA_MEAS_M).to_numpy()))
+    ev = ok & keep
+    if ev.any():
+        ev &= np.abs(delta - np.median(delta[ev])) < EVIDENCE_BACKSTOP_M
+    checks.append(_check("evidence_fraction", ev.mean(), 0.0, ev.any()))
+
+    # GPS-only backbone or no usable evidence → prior-only (gps_backbone if no OBD)
+    if not ev.any():
+        status = "gps_backbone" if not has_obd else "ok"
+        return _prior_only_trajectory(t, dl, v, status, corridor, checks,
+                                      sigma_floor=SIGMA_FLOOR_GPS_M if not has_obd else SIGMA_FLOOR_OBD_M)
+
+    # --- Step 2: corridor weighting (the Mode-4 discriminator) ---
+    lat = g["lat"].to_numpy(dtype=float)
+    lon = g["long"].to_numpy(dtype=float)
+    if "gps_drift_lat_m" in g:  # drift-correct (R5) when the columns are present
+        lat = lat - g["gps_drift_lat_m"].to_numpy(dtype=float) / M_PER_DEG_LAT
+        lon = lon - g["gps_drift_lon_m"].to_numpy(dtype=float) / frame.m_per_deg_lon
+    x, y = frame.to_xy(lat, lon)
+    e_lat = corridor.lateral_offset(x, y, td)
+    b = corridor.bin_index(td)
+    excess = np.maximum(0.0, np.maximum(corridor.e_lo[b] - e_lat, e_lat - corridor.e_hi[b]))
+    w_env = np.exp(-((excess / ENV_SOFT_SCALE_M) ** 2))
+    checks.append(_check("w_env_mean_evidence", float(w_env[ev].mean()), 0.0, True))
+
+    # --- Steps 3-6: knot fit → slope bound → prior blend → σ ---
+    knots = np.arange(dl.min(), dl.max(), KNOT_SPACING_M)
+    if len(knots) < 2:
+        return _prior_only_trajectory(t, dl, v, "ok", corridor, checks)
+    dh, se, neff = _knot_fit(dl[ev], delta[ev], w_env[ev], knots)
+    slope_bound = _slope_bound(knots, dl, v, g["lat_g"].to_numpy(dtype=float), corridor, td)
+    dh, clip_mag = _rate_limit(dh, slope_bound, knots)
+    sig = _knot_sigma(dh, se, clip_mag, knots, dl[ev], slope_bound)
+    dh, sig = _prior_blend(dh, sig, knots)
+
+    d_smp = np.interp(dl, knots, dh)
+    s_hat = np.maximum.accumulate(dl + d_smp)
+    return Trajectory(t=t, s_hat=s_hat, sigma_m=np.interp(dl, knots, sig), delta_hat=d_smp,
+                      v=v, evidence=ev, status="ok", knots=knots, knot_sigma=sig, checks=checks)
+
+
+def _prior_only_trajectory(t, dl, v, status, corridor, checks, sigma_floor=SIGMA_FLOOR_OBD_M):
+    """δ̂ ≡ 0 (OBD backbone), σ = the mid-lap prior — reproduces the OBD-anchored
+    fallback in the zero-GPS-evidence limit (design R6)."""
+    knots = np.arange(dl.min(), dl.max(), KNOT_SPACING_M) if dl.max() > dl.min() else dl[:1]
+    sig = np.maximum(_prior_sigma(knots), sigma_floor)
+    s_hat = np.maximum.accumulate(dl.astype(float))
+    return Trajectory(t=t, s_hat=s_hat, sigma_m=np.full(len(dl), float(sig.mean())),
+                      delta_hat=np.zeros(len(dl)), v=v, evidence=np.zeros(len(dl), bool),
+                      status=status, knots=knots, knot_sigma=sig, checks=checks)
+
+
+def _knot_fit(di, zi, wi, knots):
+    """Corridor-weighted tricube local-linear fit with 2 IRLS Huber passes."""
+    dh = np.full(len(knots), np.nan)
+    se = np.full(len(knots), np.inf)
+    neff = np.zeros(len(knots))
+    for k, s0 in enumerate(knots):
+        u = np.abs(di - s0) / BANDWIDTH_M
+        m = u < 1
+        if m.sum() < 3:
+            continue
+        x = di[m] - s0
+        z = zi[m]
+        w = wi[m] * (1 - u[m] ** 3) ** 3
+        zm = 0.0
+        r = z
+        for _ in range(2):
+            W = w.sum()
+            if W < 1e-9:
+                break
+            xm = np.sum(w * x) / W
+            zm = np.sum(w * z) / W
+            sxx = np.sum(w * (x - xm) ** 2)
+            slope = np.sum(w * (x - xm) * (z - zm)) / sxx if sxx > 1e-9 else 0.0
+            r = z - (zm + slope * (x - xm))
+            mad_r = 1.4826 * np.median(np.abs(r - np.median(r))) + 0.5
+            w = wi[m] * (1 - u[m] ** 3) ** 3 * np.minimum(1.0, 3 * mad_r / np.maximum(np.abs(r), 1e-9))
+        W = w.sum()
+        if W < 1e-6:
+            continue
+        dh[k] = zm
+        neff[k] = W ** 2 / np.sum(w ** 2)
+        res_sd = max(1.4826 * np.median(np.abs(r - np.median(r))), SIGMA_MEAS_M)
+        se[k] = res_sd / np.sqrt(max(neff[k], 1e-9))
+    return dh, se, neff
+
+
+def _slope_bound(knots, dl, v, latg, corridor, td):
+    """Per-knot offset-slope bound from local |lat_g| curvature (prototype step)."""
+    kappa = np.zeros(len(knots))
+    for k, s0 in enumerate(knots):
+        m = np.abs(dl - s0) < 30
+        if m.any():
+            vv = np.maximum(v[m], MIN_SPEED_MPS)
+            kappa[k] = np.nanmedian(np.abs(latg[m]) * 9.81 / vv ** 2)
+    kappa = np.where(np.isfinite(kappa), kappa, 0.0)
+    return np.minimum(kappa * SLOPE_BOUND_KAPPA + SLOPE_BOUND_FLOOR, SLOPE_BOUND_CAP)
+
+
+def _rate_limit(dh, slope_bound, knots):
+    """Forward+backward slope-bound projection; clip magnitude → a σ term."""
+    valid = ~np.isnan(dh)
+    if valid.sum() < 2:
+        return np.zeros(len(knots)), np.zeros(len(knots))
+    dh = np.interp(knots, knots[valid], dh[valid])
+    step = KNOT_SPACING_M
+    fwd = dh.copy()
+    for k in range(1, len(knots)):
+        lim = slope_bound[k] * step
+        fwd[k] = np.clip(fwd[k], fwd[k - 1] - lim, fwd[k - 1] + lim)
+    bwd = dh.copy()
+    for k in range(len(knots) - 2, -1, -1):
+        lim = slope_bound[k] * step
+        bwd[k] = np.clip(bwd[k], bwd[k + 1] - lim, bwd[k + 1] + lim)
+    merged = 0.5 * (fwd + bwd)
+    return merged, np.abs(dh - merged)
+
+
+def _knot_sigma(dh, se, clip_mag, knots, di, slope_bound):
+    """σ² = SE_fit² + σ_gap² + σ_clip², σ_gap = slope_bound × distance-to-evidence."""
+    gap = np.full(len(knots), 1e4)
+    if len(di):
+        ds = np.sort(di)
+        j = np.searchsorted(ds, knots)
+        left = np.where(j > 0, knots - ds[np.maximum(j - 1, 0)], 1e4)
+        right = np.where(j < len(ds), ds[np.minimum(j, len(ds) - 1)] - knots, 1e4)
+        gap = np.minimum(np.abs(left), np.abs(right))
+    sig_gap = slope_bound * gap
+    return np.sqrt(np.minimum(se, SIGMA_FIT_CAP_M) ** 2 + sig_gap ** 2 + clip_mag ** 2)
+
+
+def _prior_sigma(knots):
+    if len(knots) < 2:
+        return np.full(len(knots), SIGMA_PRIOR_MID_M)
+    frac = np.minimum(knots - knots[0], knots[-1] - knots) / PRIOR_TAPER_M
+    return np.clip(SIGMA_PRIOR_END_M + (SIGMA_PRIOR_MID_M - SIGMA_PRIOR_END_M) * frac,
+                   SIGMA_PRIOR_END_M, SIGMA_PRIOR_MID_M)
+
+
+def _prior_blend(dh, sig, knots):
+    """Precision-weighted blend toward the δ=0 prior (one good fix outweighs it 16:1)."""
+    sig_prior = _prior_sigma(knots)
+    prec_ev = 1.0 / np.maximum(sig, 0.5) ** 2
+    prec_pr = 1.0 / sig_prior ** 2
+    dh_b = (dh * prec_ev) / (prec_ev + prec_pr)   # prior mean is 0
+    return dh_b, np.sqrt(1.0 / (prec_ev + prec_pr))
+
+
 # --- CLI --------------------------------------------------------------------
 
 def _main(argv=None) -> int:

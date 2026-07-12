@@ -143,6 +143,38 @@ def test_load_corridor_rejects_changed_centerline(tmp_path, monkeypatch):
 
 # --- integration on the committed sample bundle -----------------------------
 
+def test_estimate_trajectory_monotone_and_aligned(sample_data_root):
+    # SPEC: estimate_trajectory — s_hat is monotone non-decreasing and all
+    # per-sample arrays are aligned; status is one of the three documented values.
+    from lap_analyzer.analysis import load_centerline, load_samples
+    from lap_analyzer.gates import TrackFrame
+    from lap_analyzer.trajectory import build_corridor, estimate_trajectory
+    corr = build_corridor("ridge", save=False)
+    frame = TrackFrame.from_centerline(load_centerline("ridge"))
+    s = load_samples("ridge", "20260517-100304")
+    lap = int(s["lap"].iloc[len(s) // 2])
+    traj = estimate_trajectory(s[s["lap"] == lap], corr, frame)
+    assert np.all(np.diff(traj.s_hat) >= -1e-9)
+    assert len(traj.s_hat) == len(traj.t) == len(traj.sigma_m) == len(traj.delta_hat)
+    assert traj.status in ("ok", "rescale_invalid", "gps_backbone")
+
+
+def test_estimate_trajectory_rescale_invalid_is_prior_only(make_lap_samples):
+    # SPEC: a lap with an invalid dist_lap_m rescale (|median δ| > 150m) →
+    # status 'rescale_invalid', δ̂ ≡ 0 (prior only), still monotone, nothing dropped.
+    from lap_analyzer.gates import TrackFrame
+    from lap_analyzer.trajectory import estimate_trajectory
+    corr = _straight_corridor(n=250)
+    frame = TrackFrame.from_centerline(pd.DataFrame(
+        {"lat": [45.0, 45.0], "long": [-122.0, -121.99]}))
+    lap = make_lap_samples(n=200, dist_lap_m=np.linspace(0, 2000, 200),
+                           track_dist_m=np.linspace(0, 2000, 200) + 700.0)  # +700m offset
+    traj = estimate_trajectory(lap, corr, frame)
+    assert traj.status == "rescale_invalid"
+    assert np.allclose(traj.delta_hat, 0.0)
+    assert np.all(np.diff(traj.s_hat) >= -1e-9)
+
+
 def test_build_corridor_structural(sample_data_root):
     # SPEC invariants on a real (small) corpus: aligned arrays, monotone 10m bins,
     # ordered/​capped envelope, all-finite NaN-safe κ.

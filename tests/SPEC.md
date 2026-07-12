@@ -626,6 +626,34 @@ corpus signed curvature. Design:
   envelope's behavioural validation is the canonical-case discrimination (PR 2),
   not those numbers.
 
+## trajectory.estimate_trajectory
+
+Import: `from lap_analyzer.trajectory import estimate_trajectory, Trajectory`.
+Signature: `(lap_samples, corridor, frame) -> Trajectory`. Estimates one lap's
+along-track position on the canonical ruler with honest per-sample σ — a robust,
+corridor-weighted, slope-bounded smooth of the offset evidence
+`δ = track_dist_m − dist_lap_m`, blended toward the δ=0 (OBD-backbone) prior.
+
+- **`Trajectory`**: `t`, `s_hat`, `sigma_m`, `delta_hat`, `v` (per time-sorted
+  sample), `evidence` (bool mask of accepted GPS fixes), `status`
+  (`ok`/`rescale_invalid`/`gps_backbone`), `knots`/`knot_sigma`, and `checks`
+  (structured audit records). Helpers `time_at(s)`/`sigma_at(s)`/`v_at(t)`.
+- **Invariants:**
+  - `s_hat` is **monotone non-decreasing** (`= maximum.accumulate(dist_lap + δ̂)`),
+    so a scalar ruler position has a unique crossing — ghost crossings die
+    structurally.
+  - `len(s_hat) == len(t) == len(sigma_m) == len(delta_hat)`.
+  - a lap whose `dist_lap_m` rescale is invalid (`|median δ| > 150m`, e.g. a
+    session's first/last lap) → `status='rescale_invalid'`, δ̂≡0 (prior only),
+    nothing silently dropped.
+  - no GPS evidence (all fixes masked, or an OBD-dropout GPS-only lap) → δ̂≡0 with
+    the mid-lap prior σ; the zero-evidence limit reproduces the legacy
+    OBD-anchored fallback (design R6). GPS-only laps carry `status='gps_backbone'`.
+  - drift-corrected coords (design R5): subtracts `gps_drift_{lat,lon}_m` when
+    present before computing lateral offsets.
+- **section_timing** (the always-emit consumer with the driven-band /
+  consistency / speed-consistency σ-nets and derived tiers) — SPEC'd with Stage 2.
+
 ---
 
 ## fused_axis.compute_fused_dist
