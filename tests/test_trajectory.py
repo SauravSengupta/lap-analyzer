@@ -225,3 +225,157 @@ def test_build_corridor_structural(sample_data_root):
     assert np.all(np.abs(corr.e_hi) <= ENV_CAP_M + 1e-9)
     assert np.all(np.isfinite(corr.kappa_signed))      # NaN-safe even with OBD dropout
     assert np.allclose(np.hypot(corr.tx, corr.ty), 1.0, atol=1e-6)  # unit tangents
+
+
+# ===========================================================================
+# section_timing (Stage 2, item 5) — SPEC: tests/SPEC.md ## trajectory.section_timing
+# ===========================================================================
+
+def _straight_trajectory(sigma0=1.0, v=40.0, length=2500.0, n=250):
+    """A controlled straight-line Trajectory: s_hat == dl (monotone), constant
+    speed, constant per-knot σ, on-centerline (e_lat ≡ 0, κ ≡ 0). Lets a test
+    isolate the correlation-aware section-σ formula from the nets."""
+    from lap_analyzer.trajectory import Trajectory
+    dl = np.linspace(0.0, length, n)
+    t = dl / v
+    knots = np.arange(dl.min(), dl.max(), 10.0)
+    return Trajectory(
+        t=t, s_hat=dl.copy(), sigma_m=np.full(n, sigma0), delta_hat=np.zeros(n),
+        dl=dl, v=np.full(n, v), evidence=np.ones(n, bool), status="ok",
+        knots=knots, knot_sigma=np.full(len(knots), sigma0),
+        e_lat=np.zeros(n), checks=[])
+
+
+def test_section_timing_always_emits_no_coverage():
+    # SPEC: gate outside the lap's s_hat range → status 'no_coverage', NaN value,
+    # tier C, not rank-eligible — a row is ALWAYS emitted (R10), never None.
+    from lap_analyzer.trajectory import section_timing
+    traj = _straight_trajectory(length=2000.0)
+    st = section_timing(traj, 100.0, 5000.0, _straight_corridor(n=600))
+    assert st.status == "no_coverage"
+    assert np.isnan(st.time_s) and np.isnan(st.sigma_s)
+    assert st.tier == "C" and st.rank_eligible is False
+
+
+def test_section_timing_clean_straight_is_rankable_and_true():
+    # SPEC: a clean section (tight σ, driven == b−a, on-ribbon) → status 'ok',
+    # value = true traversal time, tier A, rank-eligible.
+    from lap_analyzer.trajectory import section_timing
+    v = 40.0
+    traj = _straight_trajectory(sigma0=1.0, v=v, length=2500.0)
+    a, b = 500.0, 1000.0
+    st = section_timing(traj, a, b, _straight_corridor(n=300))
+    assert st.status == "ok"
+    assert st.time_s == pytest.approx((b - a) / v, rel=1e-6)
+    assert st.driven_m == pytest.approx(b - a, abs=1e-6)
+    assert st.tier == "A" and st.rank_eligible is True
+
+
+def test_section_timing_sigma_is_correlation_aware():
+    # SPEC: Var(T) = [σ_A² + σ_B² − 2ρσ_Aσ_B]/(v_A v_B). With equal per-gate σ and
+    # ρ = RHO_SECTION > 0 the section σ is BELOW the independence value √2·σ/v.
+    from lap_analyzer.trajectory import RHO_SECTION, section_timing
+    sigma0, v = 2.0, 40.0
+    traj = _straight_trajectory(sigma0=sigma0, v=v, length=2500.0)
+    st = section_timing(traj, 500.0, 1000.0, _straight_corridor(n=300))
+    expected = np.sqrt((sigma0**2 + sigma0**2 - 2 * RHO_SECTION * sigma0 * sigma0)
+                       / (v * v))
+    assert st.sigma_s == pytest.approx(expected, rel=1e-6)
+    assert 0.0 < RHO_SECTION < 1.0
+    assert st.sigma_s < np.sqrt(2) * sigma0 / v          # sharper than independent
+
+
+def test_section_timing_r6_zero_gps_equals_obd_anchored(make_lap_samples):
+    # SPEC R6: a lap with no accepted GPS evidence (δ̂≡0) → emitted time equals the
+    # legacy analysis._obd_anchored_time to 1e-6 — the OBD-anchored fallback limit.
+    from lap_analyzer.analysis import _obd_anchored_time
+    from lap_analyzer.gates import TrackFrame
+    from lap_analyzer.trajectory import estimate_trajectory, section_timing
+    corr = _straight_corridor(n=300)
+    frame = TrackFrame.from_centerline(pd.DataFrame(
+        {"lat": [45.0, 45.0], "long": [-122.0, -121.99]}))
+    n = 200
+    dl = np.linspace(0.0, 2500.0, n)
+    # constant track_dist_m → no fresh fixes → zero GPS evidence (δ̂≡0 prior only)
+    lap = make_lap_samples(n=n, t=np.arange(n) * 0.1, dist_lap_m=dl,
+                           track_dist_m=np.full(n, 1250.0), lat_g=np.zeros(n))
+    traj = estimate_trajectory(lap, corr, frame)
+    assert not traj.evidence.any()
+    a, b = 500.0, 1500.0
+    st = section_timing(traj, a, b, corr)
+    expected = _obd_anchored_time(lap["t"].to_numpy(), dl, a, b)
+    assert st.time_s == pytest.approx(expected, abs=1e-6)
+
+
+def test_section_timing_driven_band_inflates_and_demotes():
+    # SPEC: the driven-band net inflates σ (never rejects) when the odometer distance
+    # between the posterior crossings is implausibly short for the section geometry.
+    # A lap that drives far under (b−a)−band over a straight (band = 7m, κ=0) is
+    # demoted below tier A but STILL emits a value.
+    from lap_analyzer.trajectory import Trajectory, section_timing
+    v = 40.0
+    n = 250
+    # s_hat spans 0..2500 (so both gates are covered) but the odometer dl is
+    # compressed: the car "covers" the section on the ruler while its odometer
+    # advances far less than the ruler distance → short driven distance.
+    s_hat = np.linspace(0.0, 2500.0, n)
+    dl = np.linspace(0.0, 2500.0, n).copy()
+    dl[s_hat >= 500.0] -= 0.0  # baseline
+    # compress odometer between 500 and 1000 on the ruler: only 400m driven for a
+    # 500m section (dev −100m ≫ band 7m)
+    seg = (s_hat >= 500.0) & (s_hat <= 1000.0)
+    comp = np.interp(s_hat, [500.0, 1000.0], [0.0, 100.0])
+    dl = dl - np.where(s_hat > 1000.0, 100.0, np.where(seg, comp, 0.0))
+    t = np.linspace(0.0, s_hat[-1] / v, n)
+    knots = np.arange(dl.min(), dl.max(), 10.0)
+    traj = Trajectory(
+        t=t, s_hat=s_hat, sigma_m=np.full(n, 1.0), delta_hat=s_hat - dl, dl=dl,
+        v=np.full(n, v), evidence=np.ones(n, bool), status="ok", knots=knots,
+        knot_sigma=np.full(len(knots), 1.0), e_lat=np.zeros(n), checks=[])
+    st = section_timing(traj, 500.0, 1000.0, _straight_corridor(n=300))
+    assert st.status == "ok"
+    assert not np.isnan(st.time_s)              # value STILL emitted (never rejected)
+    assert st.driven_m == pytest.approx(400.0, abs=5.0)
+    assert st.rank_eligible is False            # demoted by the σ inflation
+    band_checks = [c for c in st.checks if "driven_band" in c["name"]]
+    assert band_checks and band_checks[0]["pass"] is False
+
+
+def test_section_timing_rescale_invalid_emits_value_not_rankable(make_lap_samples):
+    # SPEC: a rescale_invalid trajectory still yields a (prior-only) value with
+    # status 'rescale_invalid' and rank_eligible False — nothing silently dropped.
+    from lap_analyzer.gates import TrackFrame
+    from lap_analyzer.trajectory import estimate_trajectory, section_timing
+    corr = _straight_corridor(n=300)
+    frame = TrackFrame.from_centerline(pd.DataFrame(
+        {"lat": [45.0, 45.0], "long": [-122.0, -121.99]}))
+    lap = make_lap_samples(n=200, dist_lap_m=np.linspace(0, 2500, 200),
+                           track_dist_m=np.linspace(0, 2500, 200) + 700.0)
+    traj = estimate_trajectory(lap, corr, frame)
+    st = section_timing(traj, 500.0, 1500.0, corr)
+    assert st.status == "rescale_invalid"
+    assert not np.isnan(st.time_s)
+    assert st.rank_eligible is False
+
+
+def test_section_timing_gps_backbone_caps_at_B():
+    # SPEC (reserved §9.3): a gps_backbone trajectory never reaches tier A even when
+    # its σ would otherwise qualify.
+    from lap_analyzer.trajectory import section_timing
+    traj = _straight_trajectory(sigma0=0.5, v=40.0, length=2500.0)
+    object.__setattr__(traj, "status", "gps_backbone")
+    st = section_timing(traj, 500.0, 1000.0, _straight_corridor(n=300))
+    assert st.tier in ("B", "C")
+    assert st.rank_eligible is False
+
+
+def test_section_timing_emits_all_three_net_checks():
+    # SPEC R12: every row carries structured check records for the driven-band,
+    # consistency, and speed-consistency nets.
+    from lap_analyzer.trajectory import section_timing
+    traj = _straight_trajectory()
+    st = section_timing(traj, 500.0, 1000.0, _straight_corridor(n=300))
+    names = {c["name"] for c in st.checks}
+    assert any("driven_band" in x for x in names)
+    assert any("consistency" in x for x in names)
+    assert any("speed_consistency" in x for x in names)

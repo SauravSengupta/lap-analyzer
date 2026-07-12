@@ -319,6 +319,32 @@ SIGMA_FIT_CAP_M = 15.0       # 2026-07-11, cap on SE_fit before combining (proto
 SIGMA_FLOOR_OBD_M = 1.0      # 2026-07-11, σ floor with OBD backbone (design §Uncertainty)
 SIGMA_FLOOR_GPS_M = 3.0      # 2026-07-11, σ floor on GPS-only backbone (design §Architecture)
 
+# --- section-timing constants (Stage 2, item 5) -----------------------------
+# ρ for the correlation-aware section variance Var(T)=[σ_A²+σ_B²−2ρσ_Aσ_B]/(v_A v_B)
+# (judge-mandated; independence is wrong-signed for Mode 4). Fitted 2026-07-12 as
+# the Fisher-z weighted-mean offset autocorrelation δ=track_dist−dist_lap between
+# each corner's entry/exit gates over the 95 clean corpus laps (= 0.454); the
+# common-mode Mode-1 offset is positively correlated (T7 0.88, T14 0.79) so section
+# times sharpen, while Mode-4 corners go negative when the constant is removed
+# (T8 −0.50, T11 −0.21) — that widening is carried by the driven-band/consistency
+# σ-nets and validated per-mode by the R7 battery.
+RHO_SECTION = 0.45
+# driven-band net: band = (∫|κ| ds over [a,b])·6 + 7 m. The heading integral of the
+# corridor κ reproduces the plan §6 band_m table (heading_rad·6+7) within ~1m per
+# corner (verified 2026-07-12 vs corner_bounds_verdict.csv hdg_deg / baseline
+# heading_rad). NOTE: the §6 note's "max(…, clean p99.5+2 from all_rel_devs)" branch
+# does NOT bind — all_rel_devs is the contaminated *reliable* set (p99.5|dev| 35–67m),
+# so using it would widen the band 2–3× and let the T8 fakes (dev −31…−37m) pass,
+# defeating the net (a §9.7-forbidden widening). §6 band_m == heading formula; used.
+DRIVEN_BAND_HDG_SCALE = 6.0
+DRIVEN_BAND_FLOOR_M = 7.0
+# line-length consistency net: resid = driven − [(b−a) + Σ κ_signed·e_left·Δs];
+# clean std 6.6m (design §Prototype / item 5). Inflate σ beyond ±2σ.
+CONSISTENCY_STD_M = 6.6
+SPEED_CONSIST_TOL_S = 0.2     # 2026-07-11, speed-consistency slack (design tripwire)
+TIER_A_S = 0.10              # 2026-07-11, rankable σ_t ceiling (PROVISIONAL until R7, §9.1)
+TIER_B_S = 0.30             # 2026-07-11, shown-shaded σ_t ceiling (PROVISIONAL until R7, §9.1)
+
 
 @dataclass
 class Trajectory:
@@ -334,6 +360,7 @@ class Trajectory:
     status: str                 # 'ok' | 'rescale_invalid' | 'gps_backbone'
     knots: np.ndarray           # dist_lap_m knot grid
     knot_sigma: np.ndarray      # σ at each knot (metres)
+    e_lat: np.ndarray | None = None  # drift-corrected signed lateral offset per sample
     checks: list = field(default_factory=list)  # structured audit records (R12)
 
     def time_at(self, s: float):
@@ -379,6 +406,10 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     has_obd = bool(np.isfinite(obd).any())
     v = (obd if has_obd else g["speed_mph_gps"].to_numpy(dtype=float)) * MPH_TO_MPS
     v = np.where(np.isfinite(v), v, MIN_SPEED_MPS)
+
+    # Drift-corrected signed lateral offset for EVERY sample (R5) — the consistency
+    # net reads it even on prior-only laps; NaN where the lap carries no position.
+    e_lat_all = _lap_lateral_offset(g, corridor, frame, td)
     # GPS-only laps (no OBD): dist_lap_m is already integrated from speed_mph_gps by
     # normalize, so it is a valid backbone — but the lap rides on GPS alone, so it
     # carries status='gps_backbone' and the wider GPS σ floor throughout (plan §4.1).
@@ -392,7 +423,8 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     # --- rescale sanity: a bad dist_lap_m rescale (session first/last lap) is prior-only
     if abs(med_delta) > RESCALE_INVALID_M or not np.isfinite(med_delta):
         checks.append(_check("rescale_median_delta", med_delta, RESCALE_INVALID_M, False))
-        return _prior_only_trajectory(t, dl, v, "rescale_invalid", corridor, checks)
+        return _prior_only_trajectory(t, dl, v, "rescale_invalid", corridor, checks,
+                                      e_lat=e_lat_all)
 
     # --- Step 1: evidence extraction (fresh → snap-mask → Hampel) ---
     fresh = np.ones(n, bool)
@@ -411,16 +443,10 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     # No usable GPS evidence → prior-only (OBD/GPS backbone; nothing dropped)
     if not ev.any():
         return _prior_only_trajectory(t, dl, v, backbone_status, corridor, checks,
-                                      sigma_floor=sigma_floor)
+                                      sigma_floor=sigma_floor, e_lat=e_lat_all)
 
     # --- Step 2: corridor weighting (the Mode-4 discriminator) ---
-    lat = g["lat"].to_numpy(dtype=float)
-    lon = g["long"].to_numpy(dtype=float)
-    if "gps_drift_lat_m" in g:  # drift-correct (R5) when the columns are present
-        lat = lat - g["gps_drift_lat_m"].to_numpy(dtype=float) / M_PER_DEG_LAT
-        lon = lon - g["gps_drift_lon_m"].to_numpy(dtype=float) / frame.m_per_deg_lon
-    x, y = frame.to_xy(lat, lon)
-    e_lat = corridor.lateral_offset(x, y, td)
+    e_lat = e_lat_all
     b = corridor.bin_index(td)
     excess = np.maximum(0.0, np.maximum(corridor.e_lo[b] - e_lat, e_lat - corridor.e_hi[b]))
     w_env = np.exp(-((excess / ENV_SOFT_SCALE_M) ** 2))
@@ -442,10 +468,11 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     s_hat = np.maximum.accumulate(dl + d_smp)
     return Trajectory(t=t, s_hat=s_hat, sigma_m=np.interp(dl, knots, sig), delta_hat=d_smp,
                       dl=dl, v=v, evidence=ev, status=backbone_status, knots=knots,
-                      knot_sigma=sig, checks=checks)
+                      knot_sigma=sig, e_lat=e_lat_all, checks=checks)
 
 
-def _prior_only_trajectory(t, dl, v, status, corridor, checks, sigma_floor=SIGMA_FLOOR_OBD_M):
+def _prior_only_trajectory(t, dl, v, status, corridor, checks,
+                           sigma_floor=SIGMA_FLOOR_OBD_M, e_lat=None):
     """δ̂ ≡ 0 (OBD/GPS backbone), σ = the tapered δ=0 prior — reproduces the
     OBD-anchored fallback in the zero-GPS-evidence limit (design R6)."""
     dl = dl.astype(float)
@@ -455,7 +482,22 @@ def _prior_only_trajectory(t, dl, v, status, corridor, checks, sigma_floor=SIGMA
     return Trajectory(t=t, s_hat=s_hat, sigma_m=np.interp(dl, knots, sig),
                       delta_hat=np.zeros(len(dl)), dl=dl, v=v,
                       evidence=np.zeros(len(dl), bool), status=status, knots=knots,
-                      knot_sigma=sig, checks=checks)
+                      knot_sigma=sig, e_lat=e_lat, checks=checks)
+
+
+def _lap_lateral_offset(g: pd.DataFrame, corridor: Corridor, frame: TrackFrame,
+                        td: np.ndarray) -> np.ndarray:
+    """Per-sample drift-corrected signed lateral offset from the smoothed centerline
+    (metres, + = left of travel), or all-NaN when the lap has no position columns."""
+    if "lat" not in g or "long" not in g:
+        return np.full(len(td), np.nan)
+    lat = g["lat"].to_numpy(dtype=float)
+    lon = g["long"].to_numpy(dtype=float)
+    if "gps_drift_lat_m" in g:  # drift-correct (R5) when the columns are present
+        lat = lat - g["gps_drift_lat_m"].to_numpy(dtype=float) / M_PER_DEG_LAT
+        lon = lon - g["gps_drift_lon_m"].to_numpy(dtype=float) / frame.m_per_deg_lon
+    x, y = frame.to_xy(lat, lon)
+    return corridor.lateral_offset(x, y, td)
 
 
 def _knot_fit(di, zi, wi, knots):
@@ -553,6 +595,135 @@ def _prior_blend(dh, sig, knots):
     prec_pr = 1.0 / sig_prior ** 2
     dh_b = (dh * prec_ev) / (prec_ev + prec_pr)   # prior mean is 0
     return dh_b, np.sqrt(1.0 / (prec_ev + prec_pr))
+
+
+# --- section timing (Stage 2, item 5) ---------------------------------------
+
+
+@dataclass
+class SectionTiming:
+    """One (lap, section) timing row — ALWAYS emitted (design R10). Value and
+    confidence come from the SAME trajectory pass (R1); the three σ-nets inflate
+    σ, they never reject."""
+
+    time_s: float               # t_b − t_a (NaN if no_coverage)
+    sigma_s: float              # correlation-aware 1σ in seconds, after the σ-nets
+    t_a: float
+    t_b: float
+    driven_m: float             # odometer distance between the posterior crossings
+    status: str                 # 'ok' | 'no_coverage' | 'rescale_invalid'
+    tier: str                   # 'A' | 'B' | 'C' (derived from sigma_s)
+    rank_eligible: bool         # tier == 'A' and status == 'ok'
+    checks: list = field(default_factory=list)  # structured audit records (R12)
+
+
+def _tier(sigma_s: float, cap_b: bool = False) -> str:
+    if not np.isfinite(sigma_s):
+        return "C"
+    if sigma_s <= TIER_A_S and not cap_b:
+        return "A"
+    if sigma_s <= TIER_B_S:
+        return "B"
+    return "C"
+
+
+def _section_heading_rad(corridor: Corridor, a: float, b: float) -> float:
+    """GPS-free section heading = ∫|κ| ds over [a,b] from the corpus κ (R3)."""
+    m = (corridor.s_bin >= a) & (corridor.s_bin <= b)
+    return float(np.sum(np.abs(corridor.kappa_signed[m])) * CORRIDOR_BIN_M)
+
+
+def _consistency_resid(traj: Trajectory, corridor: Corridor, a: float, b: float,
+                       driven: float) -> float:
+    """resid = driven − [(b−a) + Σ κ_signed·e_left·Δs]: does the lap's own lateral
+    line explain its odometer shortening? NaN when the lap has no lateral offset."""
+    e = traj.e_lat
+    if e is None:
+        return np.nan
+    e = np.asarray(e, dtype=float)
+    s = traj.s_hat
+    m = (s >= a) & (s <= b) & np.isfinite(e)
+    if m.sum() < 5:
+        return np.nan
+    bidx = corridor.bin_index(s[m])
+    prof = pd.Series(e[m]).groupby(bidx).median()
+    lo, hi = int(a // CORRIDOR_BIN_M), int(b // CORRIDOR_BIN_M)
+    bins_in = np.arange(lo, hi + 1)
+    e_bins = pd.Series([prof.get(bi, np.nan) for bi in bins_in]).interpolate(
+        limit_direction="both").to_numpy()
+    k_bins = corridor.kappa_signed[np.clip(bins_in, 0, len(corridor.s_bin) - 1)]
+    predicted = (b - a) + float(np.nansum(k_bins * e_bins) * CORRIDOR_BIN_M)
+    return driven - predicted
+
+
+def section_timing(traj: Trajectory, dist_a: float, dist_b: float,
+                   corridor: Corridor) -> SectionTiming:
+    """Time the section [dist_a, dist_b] on one lap's estimate; ALWAYS emit a row.
+
+    The value (t at the monotone s_hat crossings) and its σ come from the same pass
+    (R1). σ is correlation-aware, then inflated (never rejected) by the driven-band
+    and line-length-consistency nets; the speed-consistency tripwire is diagnostic.
+    Design: docs/…/trajectory-design.md §Section timing; SPEC tests/SPEC.md.
+    """
+    s, t = traj.s_hat, traj.t
+    checks: list = []
+
+    # --- coverage (R10): a scalar ruler position must fall inside monotone s_hat ---
+    covered = (s[0] <= dist_a <= s[-1]) and (s[0] <= dist_b <= s[-1]) and dist_b > dist_a
+    checks.append(_check("coverage", float(covered), 1.0, covered))
+    if not covered:
+        return SectionTiming(np.nan, np.nan, np.nan, np.nan, np.nan,
+                             "no_coverage", "C", False, checks)
+
+    t_a = float(np.interp(dist_a, s, t))
+    t_b = float(np.interp(dist_b, s, t))
+    time_s = t_b - t_a
+    v_a = max(traj.v_at(t_a), MIN_SPEED_MPS)
+    v_b = max(traj.v_at(t_b), MIN_SPEED_MPS)
+    vbar = 0.5 * (v_a + v_b)
+    sig_a = traj.sigma_at(dist_a)
+    sig_b = traj.sigma_at(dist_b)
+
+    # --- correlation-aware base variance (seconds²) ---
+    var_base = max(0.0, (sig_a ** 2 + sig_b ** 2 - 2 * RHO_SECTION * sig_a * sig_b)
+                   / (v_a * v_b))
+
+    # odometer distance between the POSTERIOR crossings (R4.2)
+    driven = float(np.interp(t_b, t, traj.dl) - np.interp(t_a, t, traj.dl))
+
+    # --- net 1: driven-band (σ inflation, never a rejector) ---
+    band = _section_heading_rad(corridor, dist_a, dist_b) * DRIVEN_BAND_HDG_SCALE + DRIVEN_BAND_FLOOR_M
+    dev = driven - (dist_b - dist_a)
+    excess_band = max(0.0, abs(dev) - band)
+    sig_band = excess_band / vbar
+    checks.append(_check("driven_band_dev_m", dev, band, abs(dev) <= band))
+
+    # --- net 2: line-length consistency (σ inflation) ---
+    resid = _consistency_resid(traj, corridor, dist_a, dist_b, driven)
+    if np.isfinite(resid):
+        excess_resid = max(0.0, abs(resid) - 2 * CONSISTENCY_STD_M)
+        sig_resid = excess_resid / vbar
+        checks.append(_check("consistency_resid_m", resid, 2 * CONSISTENCY_STD_M,
+                             abs(resid) <= 2 * CONSISTENCY_STD_M))
+    else:
+        sig_resid = 0.0
+        checks.append(_check("consistency_resid_m", np.nan, 2 * CONSISTENCY_STD_M, True))
+
+    sigma_s = float(np.sqrt(var_base + sig_band ** 2 + sig_resid ** 2))
+
+    # --- net 3: speed-consistency tripwire (DIAGNOSTIC only, never inflates) ---
+    obd_time = float(np.interp(dist_b, traj.dl, t) - np.interp(dist_a, traj.dl, t))
+    delta_a = float(np.interp(dist_a, s, traj.delta_hat))
+    delta_b = float(np.interp(dist_b, s, traj.delta_hat))
+    tol = (abs(delta_a) + abs(delta_b)) / vbar + SPEED_CONSIST_TOL_S
+    checks.append(_check("speed_consistency_s", time_s - obd_time, tol,
+                         abs(time_s - obd_time) <= tol))
+
+    status = "rescale_invalid" if traj.status == "rescale_invalid" else "ok"
+    tier = _tier(sigma_s, cap_b=(traj.status == "gps_backbone"))
+    rank_eligible = (tier == "A") and (status == "ok")
+    return SectionTiming(time_s, sigma_s, t_a, t_b, driven, status, tier,
+                         rank_eligible, checks)
 
 
 # --- CLI --------------------------------------------------------------------

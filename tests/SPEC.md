@@ -655,8 +655,57 @@ corridor-weighted, slope-bounded smooth of the offset evidence
     OBD-anchored fallback (design R6). GPS-only laps carry `status='gps_backbone'`.
   - drift-corrected coords (design R5): subtracts `gps_drift_{lat,lon}_m` when
     present before computing lateral offsets.
-- **section_timing** (the always-emit consumer with the driven-band /
-  consistency / speed-consistency σ-nets and derived tiers) — SPEC'd with Stage 2.
+- **Extra Trajectory field `e_lat`** (per time-sorted sample): the drift-corrected
+  signed lateral offset from the smoothed centerline (metres, + = left of travel),
+  or NaN where the lap has no usable `lat`/`long`. Consumed by the consistency net.
+
+## trajectory.section_timing
+
+Import: `from lap_analyzer.trajectory import section_timing, SectionTiming`.
+Signature: `(traj: Trajectory, dist_a: float, dist_b: float, corridor: Corridor)
+-> SectionTiming`. Times the section between ruler positions `dist_a` and `dist_b`
+on one lap's estimate, and reports honest per-section σ with three physical σ-nets.
+
+- **`SectionTiming`** fields: `time_s`, `sigma_s` (1σ in **seconds**), `t_a`, `t_b`,
+  `driven_m` (odometer distance between the posterior crossings), `status`
+  (`ok`/`no_coverage`/`rescale_invalid`), `tier` (`A`/`B`/`C`, derived from
+  `sigma_s`), `rank_eligible` (bool), and `checks` (structured audit records, R12).
+- **Always emits a row (design R10).** It never returns `None` and never raises on a
+  missing crossing:
+  - `dist_a`/`dist_b` outside the lap's `s_hat` range → `status='no_coverage'`,
+    `time_s`/`sigma_s`/`driven_m` NaN, `tier='C'`, `rank_eligible=False`.
+  - the lap's trajectory `status=='rescale_invalid'` → `status='rescale_invalid'`,
+    a value is still computed (prior-only, OBD-anchored), `rank_eligible=False`.
+  - otherwise `status='ok'`.
+- **Value** comes from the SAME estimate as the confidence (design R1): `t_a`, `t_b`
+  are the times where the monotone `s_hat` crosses `dist_a`, `dist_b`;
+  `time_s = t_b - t_a`. A scalar ruler position crosses a monotone `s_hat` exactly
+  once, so ghost crossings are structurally impossible.
+- **R6 exact-equality:** when the lap has no accepted GPS evidence (δ̂≡0), the emitted
+  `time_s` equals the legacy `analysis._obd_anchored_time(t, dist_lap_m, a, b)` to
+  within 1e-6 s — the zero-evidence limit reproduces the OBD-anchored fallback.
+- **σ is correlation-aware** (judge-mandated; independence is wrong-signed for
+  Mode 4): `Var(T) = [σ_A² + σ_B² − 2ρσ_Aσ_B] / (v_A·v_B)` with `σ_A`/`σ_B` the
+  posterior σ at the two crossings and `ρ = RHO_SECTION` a corpus-fitted constant.
+  A common-mode (Mode-1) offset error partly cancels; the three nets below then
+  **inflate** σ (never reject — design R2):
+  - **driven-band net:** the per-section band `= (∫|κ| ds over [a,b])·6 + 7` metres
+    (κ from the corridor, GPS-free); `excess = max(0, |driven_m − (b−a)| − band)`
+    inflates σ by `excess / v̄` in quadrature. Evaluated at the **posterior**
+    crossings, so a genuine tight line (in-band there) is untouched while on-ribbon
+    odometer-inconsistent drift is demoted.
+  - **line-length consistency net:** `resid = driven_m − [(b−a) + Σ κ_signed·e_left·Δs]`
+    over the section (does the lap's own lateral line explain its odometer
+    shortening?); `excess = max(0, |resid| − 2·CONSISTENCY_STD_M)` inflates σ by
+    `excess / v̄`. `CONSISTENCY_STD_M = 6.6`. Always emitted as a check record.
+  - **speed-consistency tripwire:** `|time_s − obd_anchored_time|` vs
+    `(|δ_a|+|δ_b|)/v̄ + 0.2s` — a **diagnostic** check record only, never inflates.
+- **Derived tiers (never stored booleans):** `A` if `sigma_s ≤ 0.10`, `B` if
+  `≤ 0.30`, else `C`. A `gps_backbone` trajectory caps at `B` (reserved §9.3).
+  `rank_eligible == (tier == 'A' and status == 'ok')`.
+- **Structured checks (R12):** every row carries records `{name, value, threshold,
+  pass}` for at least the driven-band, consistency, and speed-consistency nets, so a
+  post-mortem can read *why* a row is/ isn't rankable straight from the object.
 
 ---
 
