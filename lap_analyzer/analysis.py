@@ -353,40 +353,24 @@ def span_time(
     dist_b: float,
     centerline: pd.DataFrame,
     frame: "TrackFrame | None" = None,
-    half_width_m: float = 40.0,
-    seed_window_m: float = 120.0,
-) -> "tuple[float, float] | None":
-    """Gate-to-gate section time for one lap, with a GPS-timing-confidence gap.
+    corridor=None,
+):
+    """Gate-to-gate section time for one lap — a thin shell over the trajectory layer.
 
-    Returns (section_time_s, timing_gap_s). When the max gate gap is below
-    CONFIDENCE_GAP_S the crossing time is trustworthy and captures line-length;
-    otherwise GPS was too coarse to time the crossings and section_time_s is the
-    OBD-anchored fallback (see crossing_gap_s / _obd_anchored_time). None if either
-    gate isn't crossed, t_b <= t_a, or OBD range is insufficient for the fallback.
+    Estimates the lap's monotone `s_hat` (once) and times the section between its
+    `dist_a`/`dist_b` crossings via `section_timing`, so value and confidence come
+    from the SAME evidence pass (design R1). Returns a `SectionTiming` (never None,
+    design R10): `status='no_coverage'` with NaN value when a bound is outside the
+    lap's `s_hat` range. `corridor=None` builds a `default_corridor` from
+    `centerline`; real callers pass the loaded per-track corridor.
     """
-    lap_samples = lap_samples.sort_values("t")
+    from .trajectory import default_corridor, estimate_trajectory, section_timing
     if frame is None:
         frame = TrackFrame.from_centerline(centerline)
-    ga = build_gate(centerline, dist_a, frame, half_width_m)
-    gb = build_gate(centerline, dist_b, frame, half_width_m)
-    lat = lap_samples["lat"].to_numpy()
-    lon = lap_samples["long"].to_numpy()
-    t = lap_samples["t"].to_numpy()
-    td = lap_samples["track_dist_m"].to_numpy()
-    dl = lap_samples["dist_lap_m"].to_numpy()
-    t_a = gate_crossing_time(lat, lon, t, td, ga, frame, dist_a, seed_window_m)
-    if t_a is None:
-        return None
-    t_b = gate_crossing_time(lat, lon, t, td, gb, frame, dist_b, seed_window_m)
-    if t_b is None or t_b <= t_a:
-        return None
-    gap = max(crossing_gap_s(t, td, dl, dist_a), crossing_gap_s(t, td, dl, dist_b))
-    if gap < CONFIDENCE_GAP_S:
-        return (float(t_b - t_a), gap)
-    fallback = _obd_anchored_time(t, dl, dist_a, dist_b)
-    if fallback is None:
-        return None
-    return (fallback, gap)
+    if corridor is None:
+        corridor = default_corridor(centerline, frame)
+    traj = estimate_trajectory(lap_samples, corridor, frame)
+    return section_timing(traj, dist_a, dist_b, corridor)
 
 
 def section_range_bounds(

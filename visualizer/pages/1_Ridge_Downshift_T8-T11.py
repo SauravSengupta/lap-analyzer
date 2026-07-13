@@ -101,7 +101,9 @@ def _classify_all(track: str, endpoint: float, bands_key: tuple,
             "excluded_reason": res["excluded_reason"],
             "downshift_dist_m": res["downshift_dist_m"],
             "t8_apex_gear": res["t8_apex_gear"],
-            "section_time_s": (lambda r: r[0] if r else None)(
+            # span_time now returns a SectionTiming (trajectory layer, v11); take the
+            # value when the section is covered, else None. σ/status wiring: PR 2-C.
+            "section_time_s": (lambda st: st.time_s if st.status == "ok" else None)(
                 span_time(s, SPAN_A, endpoint, _centerline)),
         })
     return pd.DataFrame(rows)

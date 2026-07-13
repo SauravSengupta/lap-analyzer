@@ -274,6 +274,23 @@ def _save_corridor(track: str, corridor: Corridor) -> None:
     path.with_suffix(".meta.json").write_text(json.dumps(corridor.meta), encoding="utf-8")
 
 
+def default_corridor(centerline: pd.DataFrame, frame: TrackFrame | None = None) -> Corridor:
+    """A corridor with no corpus behind it: the σ=10m smoothed centerline field, a
+    flat ±ENV_DEFAULT envelope, and zero κ. The design's cold-start path (a new
+    track with <30 clean laps) and what span_time uses when no per-track corridor is
+    supplied — a straight synthetic lap has κ=0 and needs no ribbon to be timed."""
+    if frame is None:
+        frame = TrackFrame.from_centerline(centerline)
+    cd = centerline["track_dist_m"].to_numpy(dtype=float)
+    cx, cy = frame.to_xy(centerline["lat"].to_numpy(), centerline["long"].to_numpy())
+    grid = np.arange(0.0, float(cd.max()), CORRIDOR_BIN_M)
+    n = len(grid)
+    gx, gy, tx, ty = _smoothed_field(cd, cx, cy, grid)
+    return Corridor(s_bin=grid, e_lo=np.full(n, ENV_DEFAULT_LO), e_hi=np.full(n, ENV_DEFAULT_HI),
+                    tx=tx, ty=ty, gx=gx, gy=gy, kappa_signed=np.full(n, KAPPA_DEFAULT),
+                    meta={"calib_version": CALIB_VERSION, "cold_start": True})
+
+
 def load_corridor(track: str) -> Corridor:
     path = _corridor_path(track)
     df = pd.read_parquet(path)
