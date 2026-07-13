@@ -320,10 +320,13 @@ def find_best_lap(range_corners: list[str], is_full_lap: bool,
     eligible = range_sec_t[
         range_sec_t.set_index(["session_id", "lap"]).index.isin(eligible_keys)
     ]
-    # Exclude transits whose GPS was too coarse to time the crossings precisely —
-    # a fake-fast coarse-GPS lap must not win the "fastest through" benchmark.
-    if "timing_reliable" in eligible.columns:
-        eligible = eligible[eligible["timing_reliable"].fillna(False).astype(bool)]
+    # Only rank_eligible (tier-A σ) transits win the "fastest through" benchmark —
+    # a fake-fast Mode-4/coarse-GPS lap has wide σ and is excluded (design R2: σ
+    # decides rankability). rank_eligible is the canonical column; timing_reliable
+    # is its v11 compat alias.
+    rank_col = "rank_eligible" if "rank_eligible" in eligible.columns else "timing_reliable"
+    if rank_col in eligible.columns:
+        eligible = eligible[eligible[rank_col].fillna(False).astype(bool)]
     # NOTE: an `obd_discrepancy_m` gate used to live here to reject "GPS-glitched"
     # laps. It was removed 2026-05-19 — it gated on the *magnitude* of the
     # OBD-vs-centerline distance divergence, which cannot distinguish a GPS glitch
@@ -492,19 +495,38 @@ st.subheader(
 best_ref = find_best_lap(range_corners, is_full_lap, range_sec_t)
 
 
+def _range_row(sid_: str, lap_: int):
+    """The range_sec_t row for one (sid, lap), or None."""
+    r = range_sec_t[(range_sec_t["session_id"] == sid_) & (range_sec_t["lap"] == lap_)]
+    return None if r.empty else r.iloc[0]
+
+
 def _range_section_time(sid_: str, lap_: int) -> float | None:
-    """Range section time for one (sid, lap) from range_sec_t, or None."""
-    r = range_sec_t[(range_sec_t["session_id"] == sid_) & (range_sec_t["lap"] == lap_)]
-    return float(r.iloc[0]["section_time_s"]) if not r.empty else None
+    """Range section time for one (sid, lap); None when uncovered (NaN)."""
+    r = _range_row(sid_, lap_)
+    if r is None:
+        return None
+    v = float(r["section_time_s"])
+    return None if pd.isna(v) else v
 
 
-def _range_timing_reliable(sid_: str, lap_: int) -> bool:
-    """Whether this (sid, lap) section time was timed on trustworthy GPS. False
-    when GPS was too coarse to time the gate crossings (value is an OBD estimate)."""
-    r = range_sec_t[(range_sec_t["session_id"] == sid_) & (range_sec_t["lap"] == lap_)]
-    if r.empty or "timing_reliable" not in r.columns:
+def _range_sigma(sid_: str, lap_: int) -> float | None:
+    r = _range_row(sid_, lap_)
+    if r is None or "sigma_t_s" not in range_sec_t.columns:
+        return None
+    v = float(r["sigma_t_s"])
+    return None if pd.isna(v) else v
+
+
+def _range_rank_eligible(sid_: str, lap_: int) -> bool:
+    """Whether this (sid, lap) section time is rankable (tier-A σ). False when the
+    estimate is wide (Mode-4 / coarse GPS) — the value is an honest estimate ±σ,
+    not a measurement, and is excluded from the 'fastest' benchmark (design R11)."""
+    r = _range_row(sid_, lap_)
+    col = "rank_eligible" if "rank_eligible" in range_sec_t.columns else "timing_reliable"
+    if r is None or col not in range_sec_t.columns:
         return True
-    return bool(r.iloc[0]["timing_reliable"])
+    return bool(r[col])
 
 
 # Header metric row. Full-lap view shows no metric row. Single corner keeps the
@@ -580,10 +602,13 @@ if not is_full_lap:
         else:
             c3.metric(f"Exit speed ({to_choice})", "—")
 
-    if section_t_val is not None and not _range_timing_reliable(sid, lap):
+    if section_t_val is not None and not _range_rank_eligible(sid, lap):
+        _sig = _range_sigma(sid, lap)
+        _sig_txt = f" (estimate {section_t_val:.2f} ± {_sig:.2f}s)" if _sig is not None else ""
         st.caption(
-            "⚠️ GPS was too coarse to time this section precisely — the value is an "
-            "OBD-distance estimate and is excluded from the ‘fastest’ benchmark."
+            "⚠️ This section's along-track estimate is wide (GPS drift / coarse fixes) "
+            f"— it is an honest estimate ± σ, not a precise measurement{_sig_txt}, and "
+            "is excluded from the ‘fastest’ benchmark."
         )
 
 

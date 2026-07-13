@@ -22,7 +22,11 @@ from lap_analyzer.config import tracks_dir
 # no-op. Lives here (not app.py) so pages import it without executing app.py.
 # v10 (2026-07-11, gps-trust PR 0): build_gate now uses a σ=10m smoothed tangent,
 # which shifts gate-crossing section times at rotation-exposed corners.
-_SECTION_TIMES_VERSION = 10
+# v11 (2026-07-12, gps-trust PR 2): section_times / span_time / range_section_times
+# now read the trajectory layer (estimate_trajectory + section_timing) — value AND
+# confidence from one pass, always-emit rows, new sigma_t_s/status/rank_eligible/
+# checks_json columns; timing_reliable is a compat alias of rank_eligible.
+_SECTION_TIMES_VERSION = 11
 
 
 def current_track() -> str:
