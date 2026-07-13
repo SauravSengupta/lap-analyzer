@@ -124,6 +124,14 @@ def run(df: pd.DataFrame) -> bool:
     print(f"  impossible-short in top-5: {n_imp}/80  (baseline 62/80; all within "
           f"{max_exc:.1f}m of the band, honest-limit)")
 
+    # rankable coverage among status==ok rows vs the OLD 79.0% timing_reliable baseline
+    okrows = df[df["status"] == "ok"]
+    overall = okrows["rank"].mean() if len(okrows) else float("nan")
+    pc = okrows.groupby("corner")["rank"].mean().reindex(CORNERS)
+    print(f"  rankable coverage (status==ok): overall {overall*100:.1f}%  "
+          f"(old boolean timing_reliable 79.0%)")
+    print("    per-corner: " + "  ".join(f"{c}:{pc[c]*100:.0f}%" for c in CORNERS))
+
     # paradox rate among rankable: same-session-corner pair A faster by >=0.5s but LOWER mean_v
     npair = npar = 0
     for (sid, cid), grp in rk.groupby(["session", "corner"]):
@@ -162,7 +170,9 @@ def run(df: pd.DataFrame) -> bool:
     if {"T11", "T12"} <= set(piv.columns):
         pair = piv[["T11", "T12"]].dropna()
         r = float(np.corrcoef(pair["T11"], pair["T12"])[0, 1]) if len(pair) > 3 else float("nan")
-        print(f"  adjacent T11/T12 dev correlation: {r:+.2f}  (baseline -0.68; expect toward 0)")
+        print(f"  adjacent T11/T12 dev correlation: {r:+.2f}  (baseline -0.68; anticorrelated "
+              f"BY CONSTRUCTION via the shared boundary gate, NOT a failure signal; "
+              f"amended plan 7.2)")
 
     # 20250726-140555 T11 laps 3-5 (accepted T11-margin tension)
     print("  20250726-140555 T11 laps 3-5 (accepted-as-rankable, PR5 gps_unreliable flag):")
