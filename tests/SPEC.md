@@ -464,39 +464,33 @@ Needs `t, rpm, speed_mph` columns (use `make_lap_samples`).
 ## analysis.span_time
 
 Import: `from lap_analyzer.analysis import span_time`. Signature:
-`(lap_samples, dist_a, dist_b, centerline, frame=None, half_width_m=40.0,
-seed_window_m=120.0) -> tuple[float, float] | None`. Needs
-`lat, long, t, track_dist_m, dist_lap_m`. See `docs/GPS_TRUST.md`.
+`(lap_samples, dist_a, dist_b, centerline, frame=None, corridor=None) ->
+trajectory.SectionTiming`. Needs `lat, long, t, track_dist_m, dist_lap_m,
+speed_mph, lat_g`. **As of `_SECTION_TIMES_VERSION` 11 span_time is a thin shell
+over the trajectory layer** (`estimate_trajectory` → `section_timing`), so value
+and confidence come from ONE evidence pass (design R1). See `docs/GPS_TRUST.md`.
 
-- **Contract:** returns `(section_time_s, timing_gap_s)`. A gate is a line segment
-  laid across the track (perpendicular to the centerline) at each of
-  `dist_a`/`dist_b`. `timing_gap_s` is the GPS-timing-confidence gap (max over the
-  two gates) from `crossing_gap_s` — the elapsed time between the good GPS fixes
-  bracketing a gate.
+- **Contract:** returns a `SectionTiming` (value `time_s`, honest `sigma_s`, `t_a`,
+  `t_b`, `driven_m`, `status`, `tier`, `rank_eligible`, `checks`). The section is
+  timed where the lap's monotone `s_hat` crosses `dist_a`/`dist_b`. When `corridor`
+  is `None` a `default_corridor` (flat ±env, zero κ, smoothed centerline field) is
+  built from `centerline` — real callers pass the loaded per-track corridor.
 - **Invariants:**
-  - `None` if either gate isn't crossed (the path stayed beyond the gate's
-    `±half_width_m`, or `t_b <= t_a`), or the OBD range can't supply the fallback.
-  - **Gate tangent is a smoothed local fit, not a 2-sample tangent.** The gate
-    perpendicular at each `dist_a`/`dist_b` comes from a σ=10 m Gaussian-weighted
-    linear regression of centerline position over a ±20 m window, so it is immune
-    to the centerline's transverse noise. On a straight track carrying a 5 m /
-    18 m-wavelength transverse oscillation the gate stays within 3° of true — a
-    2-sample tangent there rotates tens of degrees and converts a lateral line
-    offset into spurious crossing time.
-  - Immune to lateral GPS/line offset: a wider line crossing the same gates
-    returns the same time — genuine line-length variation is preserved.
-  - **Reliable** (`timing_gap_s < CONFIDENCE_GAP_S`, default 0.4 s):
-    `section_time_s` is the gate-crossing time (`t_b − t_a`).
-  - **Not reliable** (coarse GPS / a teleport-punctured bracket): `section_time_s`
-    is the OBD-anchored fallback — time between the `dist_lap_m` crossings of
-    `dist_a` and `dist_b` (`_obd_anchored_time`). Surfaced/flagged, never silently
-    dropped. (Replaced the earlier spatial `_gates_glitch_free` offset guard, which
-    missed coarse-GPS mistiming and over-dropped clean fast lines.)
-  - a clean synthetic lap driving down the centerline returns the true elapsed
-    time between the two gate positions with a sub-threshold gap.
+  - **Always returns a row (design R10), never `None`.** A bound outside the lap's
+    `s_hat` range → `status='no_coverage'`, `time_s` NaN, not rank-eligible.
+  - value and confidence are from the same pass (R1); a monotone `s_hat` crosses a
+    scalar bound exactly once → ghost crossings structurally impossible.
+  - Immune to lateral GPS/line offset: a wider line over the same section returns
+    the same time — genuine line-length variation is preserved.
+  - a clean synthetic lap down the centerline → true elapsed time, `tier='A'`,
+    `rank_eligible`.
+  - coarse GPS (Mode 3) → value still ≈ the true elapsed time (the estimator
+    reverts toward the OBD backbone) but `sigma_s` widens; never silently dropped.
+  - zero GPS evidence → `time_s` equals the legacy `_obd_anchored_time` to 1e-6.
 
-`section_times` / `range_section_times` share `crossing_gap_s` and emit
-`timing_gap_s` + `timing_reliable` columns alongside `section_time_s`.
+`section_times` / `range_section_times` emit `section_time_s, sigma_t_s, status,
+driven_m, rank_eligible, checks_json` plus compat columns `timing_gap_s` and
+`timing_reliable` (alias of `rank_eligible`).
 
 ## analysis.section_range_bounds
 

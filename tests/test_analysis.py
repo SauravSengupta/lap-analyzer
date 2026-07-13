@@ -31,10 +31,8 @@ import pandas as pd
 import pytest
 
 from lap_analyzer.analysis import (
-    CONFIDENCE_GAP_S,
     _confirm_runs,
     _first_crossing_t,
-    _obd_anchored_time,
     classify_t8_section,
     crossing_gap_s,
     derive_gear,
@@ -442,66 +440,80 @@ def _lap_along(cl, make_lap_samples, lat_offset_m=0.0, n=400, total_s=20.0,
                             track_dist_m=track, dist_lap_m=dist_lap)
 
 
-def test_span_time_clean_lap_reliable_gate_value(make_lap_samples):
-    # SPEC: analysis.span_time — clean lap → (gate-crossing time, tiny gap), reliable.
+def test_span_time_clean_lap_is_rankable_true_time(make_lap_samples):
+    # SPEC (v11): span_time is a thin shell over the trajectory layer — a clean lap
+    # down the centerline → status 'ok', true elapsed time, tier A, rank-eligible.
     cl = _straight_centerline_df(length_m=2000.0)
     lap = _lap_along(cl, make_lap_samples, total_s=20.0)   # 100 m/s
-    out = span_time(lap, 500.0, 1500.0, cl)                 # 1000 m => 10 s
-    assert out is not None
-    value, gap = out
-    assert value == pytest.approx(10.0, abs=0.2)
-    assert gap < CONFIDENCE_GAP_S
+    st = span_time(lap, 500.0, 1500.0, cl)                  # 1000 m => 10 s
+    assert st.status == "ok"
+    assert st.time_s == pytest.approx(10.0, abs=0.2)
+    assert st.tier == "A" and st.rank_eligible is True
 
 
-def test_span_time_coarse_gps_unreliable_uses_obd_value(make_lap_samples):
-    # SPEC: analysis.span_time — coarse GPS (Mode 3) → gap >= threshold; value is
-    # the OBD-anchored fallback (still ~true elapsed), NOT dropped.
+def test_span_time_coarse_gps_value_near_true_wider_sigma(make_lap_samples):
+    # SPEC (v11): coarse GPS (Mode 3) → value still ≈ true elapsed (estimator reverts
+    # toward the OBD backbone), but σ widens vs a fine-GPS lap; never dropped.
     cl = _straight_centerline_df(length_m=2000.0)
-    lap = _lap_along(cl, make_lap_samples, total_s=20.0, gps_hold=20)  # ~1 s fixes
-    out = span_time(lap, 500.0, 1500.0, cl)
-    assert out is not None
-    value, gap = out
-    assert gap >= CONFIDENCE_GAP_S
-    s = lap.sort_values("t")
-    t = s["t"].to_numpy()
-    dl = s["dist_lap_m"].to_numpy()
-    assert value == pytest.approx(_obd_anchored_time(t, dl, 500.0, 1500.0), abs=1e-6)
-    assert value == pytest.approx(10.0, abs=0.3)
+    fine = span_time(_lap_along(cl, make_lap_samples, total_s=20.0), 500.0, 1500.0, cl)
+    coarse = span_time(_lap_along(cl, make_lap_samples, total_s=20.0, gps_hold=20),
+                       500.0, 1500.0, cl)
+    assert coarse.time_s == pytest.approx(10.0, abs=0.4)
+    assert coarse.sigma_s > fine.sigma_s
 
 
-# 9999 m is off the end of this centerline, so build_gate can't fit a smoothed
-# tangent there and warns before falling back — expected for this off-track bound.
-@pytest.mark.filterwarnings("ignore:build_gate:UserWarning")
-def test_span_time_uncrossed_bound_returns_none(make_lap_samples):
-    # SPEC: analysis.span_time — None if a gate isn't crossed
+def test_span_time_uncrossed_bound_is_no_coverage(make_lap_samples):
+    # SPEC (v11): a bound outside the lap's s_hat range → status 'no_coverage' with
+    # NaN value (a row is ALWAYS emitted, design R10 — never None).
     cl = _straight_centerline_df(length_m=2000.0)
     lap = _lap_along(cl, make_lap_samples)
-    assert span_time(lap, 500.0, 9999.0, cl) is None
+    st = span_time(lap, 500.0, 9999.0, cl)
+    assert st.status == "no_coverage"
+    assert np.isnan(st.time_s) and st.rank_eligible is False
 
 
 def test_span_time_immune_to_lateral_line_offset(make_lap_samples):
-    # SPEC: a laterally-offset (wider) line crosses the same gates at the same
+    # SPEC: a laterally-offset (wider) line crosses the same section at the same
     # times — line variation is NOT rejected and does not distort the time.
     cl = _straight_centerline_df(length_m=2000.0)
     on = span_time(_lap_along(cl, make_lap_samples, lat_offset_m=0.0), 500.0, 1500.0, cl)
     off = span_time(_lap_along(cl, make_lap_samples, lat_offset_m=15.0), 500.0, 1500.0, cl)
-    assert on is not None and off is not None
-    assert off[0] == pytest.approx(on[0], abs=0.05)
+    assert off.time_s == pytest.approx(on.time_s, abs=0.05)
 
 
-def test_range_section_times_emits_confidence_columns(sample_data_root):
-    # SPEC: gate-crossing section times run end-to-end on the committed ridge
-    # bundle and carry a GPS-timing-confidence flag. A transit is emitted whenever
-    # both gates are crossed; timing_reliable says whether the crossing time is
-    # trustworthy (else section_time_s is the OBD-anchored fallback).
+_SECTION_SCHEMA = [
+    "session_id", "lap", "corner_id", "section_time_s", "sigma_t_s", "status",
+    "driven_m", "rank_eligible", "timing_gap_s", "timing_reliable", "checks_json"]
+_RANGE_SCHEMA = [c for c in _SECTION_SCHEMA if c != "corner_id"]
+
+
+def test_section_times_new_schema_always_emits(sample_data_root):
+    # SPEC (v11): section_times emits one row per (session, lap, corner) — ALWAYS
+    # (R10) — value+confidence from the trajectory layer; timing_reliable is a compat
+    # alias of rank_eligible; every corner in the track appears.
+    from lap_analyzer.analysis import section_times
+    td = _ridge_track_def()
+    df = section_times("ridge", td)
+    assert list(df.columns) == _SECTION_SCHEMA
+    assert set(df["status"]) <= {"ok", "no_coverage", "rescale_invalid"}
+    assert df["rank_eligible"].dtype == bool
+    assert (df["timing_reliable"] == df["rank_eligible"]).all()   # compat alias
+    assert set(df["corner_id"]) == {c["id"] for c in td["corners"]}
+    ok = df[df["status"] == "ok"]
+    assert ok["section_time_s"].notna().all() and (ok["sigma_t_s"] >= 0).all()
+    json.loads(df["checks_json"].iloc[0])                          # parseable audit records
+
+
+def test_range_section_times_new_schema(sample_data_root):
+    # SPEC (v11): range_section_times shares the schema minus corner_id; always emits.
     from lap_analyzer.analysis import range_section_times
     td = _ridge_track_def()
     df = range_section_times("ridge", td, "T6", "T6")
-    assert list(df.columns) == [
-        "session_id", "lap", "section_time_s", "timing_gap_s", "timing_reliable"]
-    assert df["timing_reliable"].dtype == bool
-    assert (df["section_time_s"] > 0).all()
-    assert len(df) > 10                      # many laps emit across the bundle
+    assert list(df.columns) == _RANGE_SCHEMA
+    assert df["rank_eligible"].dtype == bool
+    assert (df["timing_reliable"] == df["rank_eligible"]).all()
+    assert set(df["status"]) <= {"ok", "no_coverage", "rescale_invalid"}
+    assert (df[df["status"] == "ok"]["section_time_s"] > 0).all()
     assert df["session_id"].nunique() >= 2
 
 

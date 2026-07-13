@@ -10,6 +10,8 @@ Docs: docs/VISUALIZER.md.
 """
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -18,7 +20,6 @@ import streamlit as st
 
 from lap_analyzer.analysis import (
     lap_summary,
-    load_centerline,
     range_section_times,
     section_bounds,
     section_range_bounds,
@@ -26,7 +27,6 @@ from lap_analyzer.analysis import (
     top_decile_laps,
 )
 from lap_analyzer.fused_axis import GLITCH_OFFSET_M, compute_fused_dist, glitch_runs
-from lap_analyzer.gates import TrackFrame, build_gate, gate_crossing_time
 from shared import available_tracks, current_track, drop_gps_glitches as _drop_gps_glitches
 from shared import corpus as _corpus, laps as _laps, track_def as _track_def
 from shared import samples as _samples, session_hhmm, format_lap_time
@@ -220,35 +220,37 @@ def reset_cascade_to(date_str, sid: str, lap: int):
     st.session_state["pick_lap_sel"] = lap
 
 
-def _section_time_help(track: str, sid_: str, lap_: int, corner: str) -> str | None:
-    """Diagnostic text explaining why a gate-to-gate section_time is missing.
-
-    Section times are emitted only when the lap's GPS path crosses both the
-    entry and exit gate (line segments laid across the track at the section
-    bounds). A missing time means one gate was never crossed."""
+def _section_time_help(sid_: str, lap_: int, corner: str) -> str | None:
+    """Explain a missing / non-rankable section time from the trajectory layer's OWN
+    emitted verdict — the row's `status` and its R12 audit records (`checks_json`) —
+    not a re-derivation. Reading what the layer actually produced means the message
+    can never contradict the value/confidence shown (the old version re-ran gate
+    crossings and could report 'didn't cross the gate' for a rescale_invalid lap)."""
     if corner == "full lap":
         return None
+    row = sec_t[(sec_t["session_id"] == sid_) & (sec_t["lap"] == lap_)
+                & (sec_t["corner_id"] == corner)]
+    if row.empty:
+        return "No section-timing row was emitted for this lap."
+    r = row.iloc[0]
     a, b = sec_bounds_all[corner]
-    try:
-        # shared.samples() now carries lat/long (needed for the gate crossing);
-        # read them inside the try so a lap missing GPS degrades to the message.
-        s = _samples(track, sid_, lap_).sort_values("t").reset_index(drop=True)
-        lat = s["lat"].to_numpy()
-        lon = s["long"].to_numpy()
-        ts = s["t"].to_numpy()
-        td = s["track_dist_m"].to_numpy()
-    except Exception:
-        return "Samples not available for this lap."
-    centerline = load_centerline(track)
-    frame = TrackFrame.from_centerline(centerline)
-    if gate_crossing_time(lat, lon, ts, td, build_gate(centerline, a, frame), frame, a) is None:
-        return (f"Lap didn't cross the entry gate at {a:.0f}m — its GPS path stayed "
-                f"outside the ±40m gate there (a very wide line, or a GPS data gap). "
-                f"section_time can't be computed.")
-    if gate_crossing_time(lat, lon, ts, td, build_gate(centerline, b, frame), frame, b) is None:
-        return (f"Lap didn't cross the exit gate at {b:.0f}m — its GPS path stayed "
-                f"outside the ±40m gate there (a very wide line, or a GPS data gap). "
-                f"section_time can't be computed.")
+    if r["status"] == "no_coverage":
+        return (f"The lap's estimated path doesn't span {corner} ({a:.0f}–{b:.0f}m) — a "
+                f"GPS data gap or an out/in lap, so there is no crossing to time "
+                f"(status: no_coverage).")
+    if r["status"] == "rescale_invalid":
+        return ("This lap's odometer rescale is invalid (a session first/last lap), so its "
+                "position on the ruler can't be trusted — any value is a prior-only "
+                "estimate, excluded from ranking (status: rescale_invalid).")
+    if not bool(r["rank_eligible"]):
+        try:
+            failed = [c for c in json.loads(r["checks_json"] or "[]")
+                      if not c.get("pass", True) and c.get("name") != "coverage"]
+        except (ValueError, TypeError):
+            failed = []
+        why = "; ".join(f"{c['name']} = {c['value']} (vs {c['threshold']})" for c in failed)
+        return (f"Estimate ± σ = {r['sigma_t_s']:.2f}s is too wide to rank (below tier A)"
+                + (f" — {why}." if why else "."))
     return None
 
 
@@ -320,10 +322,13 @@ def find_best_lap(range_corners: list[str], is_full_lap: bool,
     eligible = range_sec_t[
         range_sec_t.set_index(["session_id", "lap"]).index.isin(eligible_keys)
     ]
-    # Exclude transits whose GPS was too coarse to time the crossings precisely —
-    # a fake-fast coarse-GPS lap must not win the "fastest through" benchmark.
-    if "timing_reliable" in eligible.columns:
-        eligible = eligible[eligible["timing_reliable"].fillna(False).astype(bool)]
+    # Only rank_eligible (tier-A σ) transits win the "fastest through" benchmark —
+    # a fake-fast Mode-4/coarse-GPS lap has wide σ and is excluded (design R2: σ
+    # decides rankability). rank_eligible is the canonical column; timing_reliable
+    # is its v11 compat alias.
+    rank_col = "rank_eligible" if "rank_eligible" in eligible.columns else "timing_reliable"
+    if rank_col in eligible.columns:
+        eligible = eligible[eligible[rank_col].fillna(False).astype(bool)]
     # NOTE: an `obd_discrepancy_m` gate used to live here to reject "GPS-glitched"
     # laps. It was removed 2026-05-19 — it gated on the *magnitude* of the
     # OBD-vs-centerline distance divergence, which cannot distinguish a GPS glitch
@@ -492,19 +497,38 @@ st.subheader(
 best_ref = find_best_lap(range_corners, is_full_lap, range_sec_t)
 
 
+def _range_row(sid_: str, lap_: int):
+    """The range_sec_t row for one (sid, lap), or None."""
+    r = range_sec_t[(range_sec_t["session_id"] == sid_) & (range_sec_t["lap"] == lap_)]
+    return None if r.empty else r.iloc[0]
+
+
 def _range_section_time(sid_: str, lap_: int) -> float | None:
-    """Range section time for one (sid, lap) from range_sec_t, or None."""
-    r = range_sec_t[(range_sec_t["session_id"] == sid_) & (range_sec_t["lap"] == lap_)]
-    return float(r.iloc[0]["section_time_s"]) if not r.empty else None
+    """Range section time for one (sid, lap); None when uncovered (NaN)."""
+    r = _range_row(sid_, lap_)
+    if r is None:
+        return None
+    v = float(r["section_time_s"])
+    return None if pd.isna(v) else v
 
 
-def _range_timing_reliable(sid_: str, lap_: int) -> bool:
-    """Whether this (sid, lap) section time was timed on trustworthy GPS. False
-    when GPS was too coarse to time the gate crossings (value is an OBD estimate)."""
-    r = range_sec_t[(range_sec_t["session_id"] == sid_) & (range_sec_t["lap"] == lap_)]
-    if r.empty or "timing_reliable" not in r.columns:
+def _range_sigma(sid_: str, lap_: int) -> float | None:
+    r = _range_row(sid_, lap_)
+    if r is None or "sigma_t_s" not in range_sec_t.columns:
+        return None
+    v = float(r["sigma_t_s"])
+    return None if pd.isna(v) else v
+
+
+def _range_rank_eligible(sid_: str, lap_: int) -> bool:
+    """Whether this (sid, lap) section time is rankable (tier-A σ). False when the
+    estimate is wide (Mode-4 / coarse GPS) — the value is an honest estimate ±σ,
+    not a measurement, and is excluded from the 'fastest' benchmark (design R11)."""
+    r = _range_row(sid_, lap_)
+    col = "rank_eligible" if "rank_eligible" in range_sec_t.columns else "timing_reliable"
+    if r is None or col not in range_sec_t.columns:
         return True
-    return bool(r.iloc[0]["timing_reliable"])
+    return bool(r[col])
 
 
 # Header metric row. Full-lap view shows no metric row. Single corner keeps the
@@ -530,7 +554,7 @@ if not is_full_lap:
             f"{section_label} section",
             f"{section_t_val:.2f}s" if section_t_val is not None else "—",
             delta=section_delta, delta_color="inverse",
-            help=(_section_time_help(track, sid, lap, from_choice)
+            help=(_section_time_help(sid, lap, from_choice)
                   if section_t_val is None else None),
         )
         if not t_row.empty:
@@ -562,8 +586,8 @@ if not is_full_lap:
             f"{section_t_val:.2f}s" if section_t_val is not None else "—",
             delta=section_delta, delta_color="inverse",
             help=None if section_t_val is not None else
-                 "Lap doesn't cleanly cross the range bounds (or failed OBD-distance "
-                 "validation — likely a GPS glitch in the section).",
+                 "The lap's estimated path doesn't span this range (status: no_coverage) "
+                 "— a GPS data gap or an out/in lap, so there is no crossing to time.",
         )
         if not entry_row.empty:
             ev = float(entry_row.iloc[0]["entry_speed_mph"])
@@ -580,10 +604,13 @@ if not is_full_lap:
         else:
             c3.metric(f"Exit speed ({to_choice})", "—")
 
-    if section_t_val is not None and not _range_timing_reliable(sid, lap):
+    if section_t_val is not None and not _range_rank_eligible(sid, lap):
+        _sig = _range_sigma(sid, lap)
+        _sig_txt = f" (estimate {section_t_val:.2f} ± {_sig:.2f}s)" if _sig is not None else ""
         st.caption(
-            "⚠️ GPS was too coarse to time this section precisely — the value is an "
-            "OBD-distance estimate and is excluded from the ‘fastest’ benchmark."
+            "⚠️ This section's along-track estimate is wide (GPS drift / coarse fixes) "
+            f"— it is an honest estimate ± σ, not a precise measurement{_sig_txt}, and "
+            "is excluded from the ‘fastest’ benchmark."
         )
 
 

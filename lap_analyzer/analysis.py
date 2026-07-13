@@ -5,12 +5,14 @@ visualizer needs new operations.
 """
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 
 from .config import corpus_dir, sessions_dir
 from .fused_axis import GLITCH_OFFSET_M
-from .gates import TrackFrame, build_gate, gate_crossing_time
+from .gates import TrackFrame
 
 
 def load_corpus(track: str) -> pd.DataFrame:
@@ -162,64 +164,115 @@ def crossing_gap_s(
     return abs(float(t[i_hi]) - float(t[i_lo]))
 
 
+# The trajectory layer needs these per-sample channels; missing ones default so
+# OBD-dropout / drift-less sessions still estimate (design R5/R6). session_id, lap
+# come from the row context.
+_TRAJ_SAMPLE_COLS = ["lap", "t", "track_dist_m", "dist_lap_m", "lat", "long", "lat_g",
+                     "speed_mph", "speed_mph_gps", "gps_drift_lat_m", "gps_drift_lon_m"]
+_SECTION_TIME_COLS = ["session_id", "lap", "corner_id", "section_time_s", "sigma_t_s",
+                      "status", "driven_m", "rank_eligible", "timing_gap_s",
+                      "timing_reliable", "checks_json"]
+_RANGE_TIME_COLS = [c for c in _SECTION_TIME_COLS if c != "corner_id"]
+
+
+def _read_traj_samples(sp) -> "pd.DataFrame | None":
+    """A session's samples with every channel the trajectory estimator needs.
+    None when the parquet lacks the core columns or has no GPS at all."""
+    try:
+        import pyarrow.parquet as pq
+        have = set(pq.read_schema(sp).names)
+        if not {"lap", "t", "track_dist_m", "dist_lap_m", "lat", "long"} <= have:
+            return None
+        s = pd.read_parquet(sp, columns=[c for c in _TRAJ_SAMPLE_COLS if c in have])
+    except Exception:
+        return None
+    if s["track_dist_m"].isna().all():
+        return None
+    for c in _TRAJ_SAMPLE_COLS:
+        if c not in s.columns:
+            if c.startswith("gps_drift") or c == "lat_g":
+                s[c] = 0.0
+            elif c == "speed_mph_gps":
+                s[c] = s.get("speed_mph", np.nan)
+            elif c == "speed_mph":
+                s[c] = np.nan
+    return s.sort_values(["lap", "t"])
+
+
+def _load_or_build_corridor(track: str):
+    """The per-track corridor, built on the fly (unsaved) when none is persisted
+    (e.g. a fresh DATA_ROOT / the CI sample bundle)."""
+    from .trajectory import build_corridor, load_corridor
+    try:
+        return load_corridor(track)
+    except (FileNotFoundError, ValueError, OSError):
+        return build_corridor(track, save=False)
+
+
+def _corpus_trajectories(track: str):
+    """Yield (session_id, lap, lap_df, corridor, Trajectory|None) for every lap in
+    the corpus — corridor + centerline/frame built once, one trajectory per lap
+    (reused across all corners). Trajectory is None only for a degenerate lap."""
+    from .trajectory import estimate_trajectory
+    centerline = load_centerline(track)
+    frame = TrackFrame.from_centerline(centerline)
+    corridor = _load_or_build_corridor(track)
+    root = sessions_dir(track)
+    for sid_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        sp = sid_dir / "samples.parquet"
+        if not sp.exists():
+            continue
+        s = _read_traj_samples(sp)
+        if s is None:
+            continue
+        for lap_n, g in s.groupby("lap"):
+            traj = None
+            if len(g) >= 2:
+                try:
+                    traj = estimate_trajectory(g, corridor, frame)
+                except Exception:
+                    traj = None
+            yield sid_dir.name, int(lap_n), g, corridor, traj
+
+
+def _section_row(traj, g, corridor, a: float, b: float):
+    """(section_time_s, sigma_t_s, status, driven_m, rank_eligible, timing_gap_s,
+    checks_json) for one (lap, section) — ALWAYS a row (design R10)."""
+    from .trajectory import section_timing
+    tt = g["t"].to_numpy()
+    td = g["track_dist_m"].to_numpy()
+    dl = g["dist_lap_m"].to_numpy()
+    gap = max(crossing_gap_s(tt, td, dl, a), crossing_gap_s(tt, td, dl, b))
+    if traj is None:
+        return (np.nan, np.nan, "no_coverage", np.nan, False, gap, "[]")
+    st = section_timing(traj, a, b, corridor)
+    return (st.time_s, st.sigma_s, st.status, st.driven_m, bool(st.rank_eligible),
+            gap, json.dumps(st.checks))
+
+
 def section_times(
     track: str,
     track_def: dict,
     pre_m: float = 50.0,
     post_cap_m: float = 250.0,
 ) -> pd.DataFrame:
-    """For every (session_id, lap, corner_id), the gate-to-gate section time.
+    """For every (session_id, lap, corner_id), the section time on the trajectory layer.
 
-    Boundaries are physical gates (perpendicular to the centerline) at the
-    section's start/end distances; the time is between the lap's crossings.
-    A transit is emitted when both gates are crossed in order. Each carries a
-    GPS-timing-confidence flag: `timing_reliable` (max gate gap < CONFIDENCE_GAP_S)
-    uses the gate-crossing time (line-length preserved); otherwise GPS was too
-    coarse to time the crossings and `section_time_s` is the OBD-anchored fallback
-    (see crossing_gap_s / _obd_anchored_time / docs/GPS_TRUST.md). Long-form:
-    session_id, lap, corner_id, section_time_s, timing_gap_s, timing_reliable.
+    A thin corpus loop over `estimate_trajectory` (once per lap) + `section_timing`
+    (per corner). Value AND confidence come from the same evidence pass (design R1);
+    a row is ALWAYS emitted (R10) with `status ∈ {ok, no_coverage, rescale_invalid}`
+    and NaN value where uncomputable. Long-form columns:
+    session_id, lap, corner_id, section_time_s, sigma_t_s, status, driven_m,
+    rank_eligible, timing_gap_s (compat GPS-fix gap), timing_reliable (compat alias
+    of rank_eligible), checks_json (structured audit records, R12).
     """
     bounds = section_bounds(track_def, pre_m=pre_m, post_cap_m=post_cap_m)
-    centerline = load_centerline(track)
-    frame = TrackFrame.from_centerline(centerline)
-    gates = {cid: (build_gate(centerline, a, frame), build_gate(centerline, b, frame), a, b)
-             for cid, (a, b) in bounds.items()}
     rows: list[tuple] = []
-    root = sessions_dir(track)
-    for sid_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        sp = sid_dir / "samples.parquet"
-        if not sp.exists():
-            continue
-        sid = sid_dir.name
-        try:
-            s = pd.read_parquet(sp, columns=["lap", "t", "track_dist_m", "dist_lap_m", "lat", "long"])
-        except Exception:
-            continue
-        s = s.sort_values(["lap", "t"])
-        for lap_n, g in s.groupby("lap"):
-            lat = g["lat"].to_numpy()
-            lon = g["long"].to_numpy()
-            tt = g["t"].to_numpy()
-            td = g["track_dist_m"].to_numpy()
-            dl = g["dist_lap_m"].to_numpy()
-            for cid, (ga, gb, a, b) in gates.items():
-                t_a = gate_crossing_time(lat, lon, tt, td, ga, frame, a)
-                if t_a is None:
-                    continue
-                t_b = gate_crossing_time(lat, lon, tt, td, gb, frame, b)
-                if t_b is None or t_b <= t_a:
-                    continue
-                gap = max(crossing_gap_s(tt, td, dl, a), crossing_gap_s(tt, td, dl, b))
-                reliable = gap < CONFIDENCE_GAP_S
-                if reliable:
-                    value = float(t_b - t_a)
-                else:
-                    value = _obd_anchored_time(tt, dl, a, b)
-                    if value is None:
-                        continue
-                rows.append((sid, int(lap_n), cid, value, gap, reliable))
-    return pd.DataFrame(rows, columns=["session_id", "lap", "corner_id",
-                                       "section_time_s", "timing_gap_s", "timing_reliable"])
+    for sid, lap_n, g, corridor, traj in _corpus_trajectories(track):
+        for cid, (a, b) in bounds.items():
+            val, sig, status, driven, rank, gap, checks = _section_row(traj, g, corridor, a, b)
+            rows.append((sid, lap_n, cid, val, sig, status, driven, rank, gap, rank, checks))
+    return pd.DataFrame(rows, columns=_SECTION_TIME_COLS)
 
 
 # --- gear derivation --------------------------------------------------------
@@ -353,40 +406,24 @@ def span_time(
     dist_b: float,
     centerline: pd.DataFrame,
     frame: "TrackFrame | None" = None,
-    half_width_m: float = 40.0,
-    seed_window_m: float = 120.0,
-) -> "tuple[float, float] | None":
-    """Gate-to-gate section time for one lap, with a GPS-timing-confidence gap.
+    corridor=None,
+):
+    """Gate-to-gate section time for one lap — a thin shell over the trajectory layer.
 
-    Returns (section_time_s, timing_gap_s). When the max gate gap is below
-    CONFIDENCE_GAP_S the crossing time is trustworthy and captures line-length;
-    otherwise GPS was too coarse to time the crossings and section_time_s is the
-    OBD-anchored fallback (see crossing_gap_s / _obd_anchored_time). None if either
-    gate isn't crossed, t_b <= t_a, or OBD range is insufficient for the fallback.
+    Estimates the lap's monotone `s_hat` (once) and times the section between its
+    `dist_a`/`dist_b` crossings via `section_timing`, so value and confidence come
+    from the SAME evidence pass (design R1). Returns a `SectionTiming` (never None,
+    design R10): `status='no_coverage'` with NaN value when a bound is outside the
+    lap's `s_hat` range. `corridor=None` builds a `default_corridor` from
+    `centerline`; real callers pass the loaded per-track corridor.
     """
-    lap_samples = lap_samples.sort_values("t")
+    from .trajectory import default_corridor, estimate_trajectory, section_timing
     if frame is None:
         frame = TrackFrame.from_centerline(centerline)
-    ga = build_gate(centerline, dist_a, frame, half_width_m)
-    gb = build_gate(centerline, dist_b, frame, half_width_m)
-    lat = lap_samples["lat"].to_numpy()
-    lon = lap_samples["long"].to_numpy()
-    t = lap_samples["t"].to_numpy()
-    td = lap_samples["track_dist_m"].to_numpy()
-    dl = lap_samples["dist_lap_m"].to_numpy()
-    t_a = gate_crossing_time(lat, lon, t, td, ga, frame, dist_a, seed_window_m)
-    if t_a is None:
-        return None
-    t_b = gate_crossing_time(lat, lon, t, td, gb, frame, dist_b, seed_window_m)
-    if t_b is None or t_b <= t_a:
-        return None
-    gap = max(crossing_gap_s(t, td, dl, dist_a), crossing_gap_s(t, td, dl, dist_b))
-    if gap < CONFIDENCE_GAP_S:
-        return (float(t_b - t_a), gap)
-    fallback = _obd_anchored_time(t, dl, dist_a, dist_b)
-    if fallback is None:
-        return None
-    return (fallback, gap)
+    if corridor is None:
+        corridor = default_corridor(centerline, frame)
+    traj = estimate_trajectory(lap_samples, corridor, frame)
+    return section_timing(traj, dist_a, dist_b, corridor)
 
 
 def section_range_bounds(
@@ -424,55 +461,21 @@ def range_section_times(
     pre_m: float = 50.0,
     post_cap_m: float = 250.0,
 ) -> pd.DataFrame:
-    """For every (session_id, lap), gate-to-gate time across from_id..to_id.
+    """For every (session_id, lap), the section time across from_id..to_id.
 
-    Uses one entry gate (range start) and one exit gate (range end). Emitted
-    when both gates are crossed in order; each carries a GPS-timing-confidence
-    flag (`timing_reliable`) and uses the OBD-anchored fallback value when GPS is
-    too coarse to time the crossings (see crossing_gap_s / _obd_anchored_time).
-    For from_id == to_id this matches section_times() for that corner. Long-form:
-    session_id, lap, section_time_s, timing_gap_s, timing_reliable.
+    Same trajectory-layer path as `section_times` over the single range window
+    (`section_range_bounds`): one `estimate_trajectory` per lap + one
+    `section_timing`; a row is ALWAYS emitted (R10). For from_id == to_id this
+    matches `section_times()` for that corner. Long-form columns match
+    `section_times` minus `corner_id`: session_id, lap, section_time_s, sigma_t_s,
+    status, driven_m, rank_eligible, timing_gap_s, timing_reliable, checks_json.
     """
     a, b = section_range_bounds(track_def, from_id, to_id, pre_m, post_cap_m)
-    centerline = load_centerline(track)
-    frame = TrackFrame.from_centerline(centerline)
-    ga = build_gate(centerline, a, frame)
-    gb = build_gate(centerline, b, frame)
     rows: list[tuple] = []
-    root = sessions_dir(track)
-    for sid_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        sp = sid_dir / "samples.parquet"
-        if not sp.exists():
-            continue
-        sid = sid_dir.name
-        try:
-            s = pd.read_parquet(sp, columns=["lap", "t", "track_dist_m", "dist_lap_m", "lat", "long"])
-        except Exception:
-            continue
-        s = s.sort_values(["lap", "t"])
-        for lap_n, g in s.groupby("lap"):
-            lat = g["lat"].to_numpy()
-            lon = g["long"].to_numpy()
-            tt = g["t"].to_numpy()
-            td = g["track_dist_m"].to_numpy()
-            dl = g["dist_lap_m"].to_numpy()
-            t_a = gate_crossing_time(lat, lon, tt, td, ga, frame, a)
-            if t_a is None:
-                continue
-            t_b = gate_crossing_time(lat, lon, tt, td, gb, frame, b)
-            if t_b is None or t_b <= t_a:
-                continue
-            gap = max(crossing_gap_s(tt, td, dl, a), crossing_gap_s(tt, td, dl, b))
-            reliable = gap < CONFIDENCE_GAP_S
-            if reliable:
-                value = float(t_b - t_a)
-            else:
-                value = _obd_anchored_time(tt, dl, a, b)
-                if value is None:
-                    continue
-            rows.append((sid, int(lap_n), value, gap, reliable))
-    return pd.DataFrame(rows, columns=["session_id", "lap", "section_time_s",
-                                       "timing_gap_s", "timing_reliable"])
+    for sid, lap_n, g, corridor, traj in _corpus_trajectories(track):
+        val, sig, status, driven, rank, gap, checks = _section_row(traj, g, corridor, a, b)
+        rows.append((sid, lap_n, val, sig, status, driven, rank, gap, rank, checks))
+    return pd.DataFrame(rows, columns=_RANGE_TIME_COLS)
 
 
 def classify_t8_section(
