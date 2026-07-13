@@ -588,6 +588,141 @@ a `sample_data_root` session dir.
 
 ---
 
+## trajectory.Corridor / build_corridor
+
+Import: `from lap_analyzer.trajectory import Corridor, build_corridor, load_corridor`.
+The corridor is the per-track "asphalt ribbon" the trajectory layer reads: a
+per-10m-bin clean-lap lateral envelope + the σ=10m-smoothed centerline field +
+corpus signed curvature. Design:
+`docs/superpowers/specs/2026-07-11-unified-gps-trust-trajectory-design.md`.
+
+- **`Corridor`** (frozen dataclass): equal-length arrays `s_bin` (10m bin
+  centers), `e_lo`/`e_hi` (signed lateral envelope, metres), `tx`/`ty` (unit
+  smoothed tangent), `gx`/`gy` (smoothed position, TrackFrame metres),
+  `kappa_signed` (per bin, `+` = right, GPS-free from `lat_g·g/v²`), and `meta`.
+  - `bin_index(track_dist_m)` → bin indices clipped to range.
+  - `lateral_offset(x, y, track_dist_m)` → signed offset of frame-XY points from
+    the smoothed centerline, **`+` = left of travel**. Inputs must be
+    drift-corrected (design R5).
+- **`build_corridor(track)`** — from clean flying laps (≥100 samples, sane
+  `dist_lap_m` rescale, no >40m GPS excursion):
+  - **envelope**: per-bin p2/p98 of per-lap-per-bin median lateral offset, +2m
+    pad, hard cap ±20m, built in **two EM-trim passes** (pass 2 drops the votes
+    pass-1's envelope rejects — purges Mode-4 contamination without dragging the
+    ribbon).
+  - **`kappa_signed`**: corpus clean-lap median `lat_g·g/v²` per bin, **NaN-safe**
+    (OBD-dropout laps have NaN `speed_mph`; excluded, never propagated).
+  - **Invariants**: `e_lo ≤ e_hi`; `|e_lo|,|e_hi| ≤ 20`; `kappa_signed` all
+    finite; `s_bin` increases by 10m.
+- **EM-trim convergence** (judge requirement, asserted): on synthetic clean votes
+  plus a Mode-4 contamination cluster (≈ −30m in some bins), the 2-pass envelope
+  recovers the clean ribbon in the contaminated bins where the 1-pass envelope is
+  dragged toward the cap.
+- **`load_corridor` / save**: round-trips arrays + meta; raises when the persisted
+  `calib_version` differs from the code's (forces a rebuild on schema change).
+- Note: the corridor's lateral envelope reproduces the *validated prototype*
+  corridor (95 strict-clean laps + 2-pass EM-trim), which is intentionally tighter
+  than the design brief's broader per-corner [−13,+16]/[−14,+15] figures; the
+  envelope's behavioural validation is the canonical-case discrimination (PR 2),
+  not those numbers.
+
+## trajectory.estimate_trajectory
+
+Import: `from lap_analyzer.trajectory import estimate_trajectory, Trajectory`.
+Signature: `(lap_samples, corridor, frame) -> Trajectory`. Estimates one lap's
+along-track position on the canonical ruler with honest per-sample σ — a robust,
+corridor-weighted, slope-bounded smooth of the offset evidence
+`δ = track_dist_m − dist_lap_m`, blended toward the δ=0 (OBD-backbone) prior.
+
+- **`Trajectory`**: `t`, `s_hat`, `sigma_m`, `delta_hat`, `v` (per time-sorted
+  sample), `evidence` (bool mask of accepted GPS fixes), `status`
+  (`ok`/`rescale_invalid`/`gps_backbone`), `dl` (per-sample odometer),
+  `knots`/`knot_sigma`, and `checks` (structured audit records). Helpers:
+  `time_at(s)` → `(t, σ_t)`, or **`None`** when `s` is outside
+  `[s_hat.min, s_hat.max]` (no crossing → the caller emits `no_coverage`, never a
+  clamped/fabricated time); `sigma_at(s)` inverts s→dl through `s_hat` before
+  reading the knot σ (δ̂ is not constant); `v_at(t)`.
+- **Invariants:**
+  - `s_hat` is **monotone non-decreasing** (`= maximum.accumulate(dist_lap + δ̂)`),
+    so a scalar ruler position has a unique crossing — ghost crossings die
+    structurally.
+  - `len(s_hat) == len(t) == len(sigma_m) == len(delta_hat)`.
+  - a lap whose `dist_lap_m` rescale is invalid (`|median δ| > 150m`, e.g. a
+    session's first/last lap) → `status='rescale_invalid'`, δ̂≡0 (prior only),
+    nothing silently dropped.
+  - no GPS evidence (all fixes masked, or an OBD-dropout GPS-only lap) → δ̂≡0 with
+    the mid-lap prior σ; the zero-evidence limit reproduces the legacy
+    OBD-anchored fallback (design R6). GPS-only laps carry `status='gps_backbone'`.
+  - drift-corrected coords (design R5): subtracts `gps_drift_{lat,lon}_m` when
+    present before computing lateral offsets.
+- **Extra Trajectory field `e_lat`** (per time-sorted sample): the drift-corrected
+  signed lateral offset from the smoothed centerline (metres, + = left of travel),
+  or NaN where the lap has no usable `lat`/`long`. Consumed by the consistency net.
+
+## trajectory.section_timing
+
+Import: `from lap_analyzer.trajectory import section_timing, SectionTiming`.
+Signature: `(traj: Trajectory, dist_a: float, dist_b: float, corridor: Corridor)
+-> SectionTiming`. Times the section between ruler positions `dist_a` and `dist_b`
+on one lap's estimate, and reports honest per-section σ with three physical σ-nets.
+
+- **`SectionTiming`** fields: `time_s`, `sigma_s` (1σ in **seconds**), `t_a`, `t_b`,
+  `driven_m` (odometer distance between the posterior crossings), `status`
+  (`ok`/`no_coverage`/`rescale_invalid`), `tier` (`A`/`B`/`C`, derived from
+  `sigma_s`), `rank_eligible` (bool), and `checks` (structured audit records, R12).
+- **Always emits a row (design R10).** It never returns `None` and never raises on a
+  missing crossing:
+  - `dist_a`/`dist_b` outside the lap's `s_hat` range → `status='no_coverage'`,
+    `time_s`/`sigma_s`/`driven_m` NaN, `tier='C'`, `rank_eligible=False`.
+  - the lap's trajectory `status=='rescale_invalid'` → `status='rescale_invalid'`,
+    a value is still computed (prior-only, OBD-anchored), `rank_eligible=False`.
+  - otherwise `status='ok'`.
+- **Value** comes from the SAME estimate as the confidence (design R1): `t_a`, `t_b`
+  are the times where the monotone `s_hat` crosses `dist_a`, `dist_b`;
+  `time_s = t_b - t_a`. A scalar ruler position crosses a monotone `s_hat` exactly
+  once, so ghost crossings are structurally impossible.
+- **R6 exact-equality:** when the lap has no accepted GPS evidence (δ̂≡0), the emitted
+  `time_s` equals the legacy `analysis._obd_anchored_time(t, dist_lap_m, a, b)` to
+  within 1e-6 s — the zero-evidence limit reproduces the OBD-anchored fallback.
+- **σ is correlation-aware** (judge-mandated; independence is wrong-signed for
+  Mode 4): `Var(T) = [σ_A² + σ_B² − 2ρσ_Aσ_B] / (v_A·v_B)` with `σ_A`/`σ_B` the
+  posterior σ at the two crossings and `ρ = RHO_SECTION` a corpus-fitted constant.
+  A common-mode (Mode-1) offset error partly cancels; the three nets below then
+  **inflate** σ (never reject — design R2):
+  - **driven-band net:** the per-section band `= (∫|κ| ds over [a,b])·6 + 7` metres
+    (κ from the corridor, GPS-free); `excess = max(0, |driven_m − (b−a)| − band)`
+    inflates σ by `excess / v̄` in quadrature. Evaluated at the **posterior**
+    crossings, so a genuine tight line (in-band there) is untouched while on-ribbon
+    odometer-inconsistent drift is demoted.
+  - **line-length consistency net:** `resid = driven_m − [(b−a) + Σ κ_signed·e_left·Δs]`
+    over the section (does the lap's own lateral line explain its odometer
+    shortening?); `excess = max(0, |resid| − 2·CONSISTENCY_STD_M)` inflates σ by
+    `excess / v̄`. `CONSISTENCY_STD_M = 6.6`. Always emitted as a check record.
+  - **speed-consistency tripwire:** `|time_s − obd_anchored_time|` vs
+    `(|δ_a|+|δ_b|)/v̄ + 0.2s` — a **diagnostic** check record only, never inflates.
+- **Derived tiers (never stored booleans):** `A` if `sigma_s ≤ 0.10`, `B` if
+  `≤ 0.30`, else `C`. A `gps_backbone` trajectory caps at `B` (reserved §9.3).
+  `rank_eligible == (tier == 'A' and status == 'ok')`.
+- **Structured checks (R12):** every row carries records `{name, value, threshold,
+  pass}` for at least the driven-band, consistency, and speed-consistency nets, so a
+  post-mortem can read *why* a row is/ isn't rankable straight from the object.
+
+### Per-mode σ-calibration (design R7)
+
+`scripts/gps_trust_calibration.py` synthesises randomised laps for each GPS failure
+mode (`clean`, `teleport`, `drift`, `line_offset`, `gps_hold`, `lockup`, `gps_only`)
+with a KNOWN true section time, and asserts the emitted σ honestly covers the error:
+**|section-time error| < 2·σ̂ in ≥95% of draws, asserted separately for each mode** (a
+global scale can hide Mode-4 under-coverage behind Mode-3 over-coverage). The
+authoritative hard gate is ≥500 draws/mode on the real corridor (`run_calibration`);
+`test_per_mode_calibration_within_2sigma` runs it on a self-contained SYNTHETIC
+corridor so CI enforces the property without the (gitignored) corpus. The
+`line_offset` mode doubles as the R4 discrimination check: a genuine in-corridor,
+odometer-consistent tight line is recovered accurately (the estimator follows the
+real δ), not shrunk toward the OBD backbone.
+
+---
+
 ## fused_axis.compute_fused_dist
 
 Import: `from lap_analyzer.fused_axis import compute_fused_dist`. Signature:

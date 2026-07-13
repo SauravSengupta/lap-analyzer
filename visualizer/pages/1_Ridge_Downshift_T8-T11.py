@@ -74,10 +74,12 @@ endpoint_m = T11["start_m"] if endpoint_choice == "T11 entry" else T10["end_m"]
 
 @st.cache_data(show_spinner="classifying laps (one-time per endpoint)")
 def _classify_all(track: str, endpoint: float, bands_key: tuple,
-                  _version: int = _SECTION_TIMES_VERSION) -> pd.DataFrame:
-    # _version pins this cache to the section-timing logic version (span_time via
-    # classify below) — without it the 9→10 gate-tangent bump never invalidates
-    # this page and it would serve pre-fix section times after a hot reload.
+                  version: int = _SECTION_TIMES_VERSION) -> pd.DataFrame:
+    # version (passed explicitly at the call site) pins this cache to the
+    # section-timing logic version (span_time via classify below). It must be a
+    # non-underscore name AND passed — Streamlit drops underscore args / unpassed
+    # defaults from the key — else the 9→10 gate-tangent bump never invalidates
+    # this page and it serves pre-fix section times after a hot reload.
     b = np.array(bands_key)
     td = track_def(track)
     _centerline = load_centerline(track)
@@ -105,7 +107,7 @@ def _classify_all(track: str, endpoint: float, bands_key: tuple,
     return pd.DataFrame(rows)
 
 
-cls = _classify_all(track, endpoint_m, tuple(bands.tolist()))
+cls = _classify_all(track, endpoint_m, tuple(bands.tolist()), version=_SECTION_TIMES_VERSION)
 
 # Drop GPS-unreliable laps. This page positions everything by track_dist_m, and
 # a lap_reliable=False lap has track_dist_m off by tens of metres (or more) — its
@@ -327,11 +329,11 @@ if np.isfinite(ds_med) and np.isfinite(nd_med):
 
 
 @st.cache_data(show_spinner="computing per-corner section times (one-time)")
-def _per_corner_times(track: str, _version: int = _SECTION_TIMES_VERSION) -> pd.DataFrame:
+def _per_corner_times(track: str, version: int = _SECTION_TIMES_VERSION) -> pd.DataFrame:
     return section_times(track, track_def(track))
 
 
-per_corner = _per_corner_times(track)
+per_corner = _per_corner_times(track, version=_SECTION_TIMES_VERSION)
 label_map = cls.set_index(["session_id", "lap"])["label"]
 pc = per_corner[per_corner["corner_id"].isin(["T8", "T9", "T10"])].copy()
 pc["label"] = pc.set_index(["session_id", "lap"]).index.map(label_map)

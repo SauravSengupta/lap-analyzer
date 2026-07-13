@@ -95,15 +95,17 @@ def _fix_dropdown_overflow() -> None:
 _fix_dropdown_overflow()
 
 
-# Bump _GLITCH_FILTER_VERSION whenever _drop_gps_glitches logic changes — its
-# value is baked into the cached function's source via the keyword default below,
-# which forces @st.cache_data to invalidate. Otherwise the helper's source is
-# invisible to Streamlit's hash and stale envelopes survive a reload.
+# Bump _GLITCH_FILTER_VERSION whenever _drop_gps_glitches logic changes. It is
+# passed explicitly as filter_version= at the call site so it enters the cache
+# key: Streamlit hashes passed non-underscore args by value but EXCLUDES
+# underscore-prefixed args and unpassed defaults (cache_utils.py), so a bare
+# `_filter_version=` default never actually invalidated — only the process
+# restart that a code reload requires cleared the in-memory cache.
 _GLITCH_FILTER_VERSION = 6
 
 
 @st.cache_data(show_spinner="loading top-decile samples (one-time)")
-def _top_decile_traces(track: str, _filter_version: int = _GLITCH_FILTER_VERSION) -> pd.DataFrame:
+def _top_decile_traces(track: str, filter_version: int = _GLITCH_FILTER_VERSION) -> pd.DataFrame:
     """Long-form: all top-decile lap samples concatenated, with per-lap GPS-glitch
     samples removed so envelope bins aren't polluted by backward/forward teleports.
     Per-channel envelope is derived on demand so adding a channel doesn't invalidate cache.
@@ -123,8 +125,12 @@ def _top_decile_traces(track: str, _filter_version: int = _GLITCH_FILTER_VERSION
 
 
 @st.cache_data(show_spinner=False)
-def _envelope(track: str, channel: str, n_points: int = 400) -> pd.DataFrame:
-    traces = _top_decile_traces(track)
+def _envelope(track: str, channel: str, n_points: int = 400,
+              filter_version: int = _GLITCH_FILTER_VERSION) -> pd.DataFrame:
+    # filter_version passed explicitly (below and at the call site) so THIS cache
+    # invalidates on a _GLITCH_FILTER_VERSION bump too — it caches the derived
+    # envelope, so busting only _top_decile_traces would leave it stale.
+    traces = _top_decile_traces(track, filter_version=filter_version)
     if traces.empty or channel not in traces.columns:
         return pd.DataFrame(columns=["track_dist_m", "p10", "p50", "p90"])
     t = traces[["track_dist_m", channel]].dropna()
@@ -163,18 +169,22 @@ def _insert_gap_breaks(df: pd.DataFrame, x_col: str, gap_threshold: float = 30.0
 
 
 # _SECTION_TIMES_VERSION is defined once in shared.py (imported above) and passed
-# as a `_version=` default arg into every section-time cache here and on the pages,
-# so one bump invalidates all of them (st.cache_data keys on args, not callees).
+# explicitly as version= into every section-time cache here and on the pages, so
+# one bump invalidates all of them. It must be a plain (non-underscore) name AND
+# actually passed at each call site: Streamlit excludes underscore-prefixed args
+# and unpassed defaults from the cache key (cache_utils.py), so the old
+# `_version=` default never invalidated — a process restart (needed for code
+# reloads anyway) was what cleared the cache.
 
 
 @st.cache_data(show_spinner="computing per-corner section times (one-time)")
-def _section_times(track: str, _version: int = _SECTION_TIMES_VERSION) -> pd.DataFrame:
+def _section_times(track: str, version: int = _SECTION_TIMES_VERSION) -> pd.DataFrame:
     return section_times(track, _track_def(track))
 
 
 @st.cache_data(show_spinner="computing range section times")
 def _range_section_times(track: str, from_id: str, to_id: str,
-                         _version: int = _SECTION_TIMES_VERSION) -> pd.DataFrame:
+                         version: int = _SECTION_TIMES_VERSION) -> pd.DataFrame:
     """Per-(session, lap) elapsed time across the from_id..to_id section window.
     Keyed on (track, from_id, to_id); recomputed when the selected range changes."""
     return range_section_times(track, _track_def(track), from_id, to_id)
@@ -268,7 +278,7 @@ track = current_track()
 laps = _laps(track)
 corpus = _corpus(track)
 track_def = _track_def(track)
-sec_t = _section_times(track)
+sec_t = _section_times(track, version=_SECTION_TIMES_VERSION)
 sec_bounds_all = section_bounds(track_def)
 corner_apex = {c["id"]: c for c in track_def["corners"]}
 corner_order = [c["id"] for c in sorted(track_def["corners"], key=lambda c: c["start_m"])]
@@ -369,7 +379,8 @@ with st.sidebar:
     is_range = (not is_full_lap) and len(range_corners) > 1
     range_sec_t = (
         pd.DataFrame(columns=["session_id", "lap", "section_time_s"])
-        if is_full_lap else _range_section_times(track, from_choice, to_choice))
+        if is_full_lap else _range_section_times(track, from_choice, to_choice,
+                                                 version=_SECTION_TIMES_VERSION))
 
     if not is_full_lap:
         best = find_best_lap(range_corners, False, range_sec_t)
@@ -715,7 +726,7 @@ n_rows = len(PANELS) + (1 if show_delta_panel else 0)
 fig = make_subplots(rows=n_rows, cols=1, shared_xaxes=True, vertical_spacing=0.04)
 
 for i, (ch, label) in enumerate(PANELS, start=1):
-    env_i = _envelope(track, ch)
+    env_i = _envelope(track, ch, filter_version=_GLITCH_FILTER_VERSION)
     if not is_full_lap:
         env_i = env_i[(env_i["track_dist_m"] >= display_a)
                       & (env_i["track_dist_m"] <= display_b)]

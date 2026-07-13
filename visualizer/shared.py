@@ -13,11 +13,13 @@ from lap_analyzer.config import tracks_dir
 
 # Single source of truth for the section-timing cache version. Both app.py and
 # every page that computes section times (via section_times / span_time /
-# range_section_times) pass it as a `_version=` default arg into their
-# @st.cache_data functions — st.cache_data keys on the decorated function's own
-# source + args, NOT its callees, so a change in gates.py / analysis.py only
-# reaches every cache when this constant bumps. Lives here (not app.py) so pages
-# import it without executing app.py's Streamlit script.
+# range_section_times) pass it EXPLICITLY as version= into their @st.cache_data
+# functions — st.cache_data keys on the function's own source + PASSED args, not
+# its callees, so a change in gates.py / analysis.py only reaches every cache when
+# this constant bumps AND is passed. It must be a plain (non-underscore) name and
+# actually passed at the call site: Streamlit drops underscore-prefixed args and
+# unpassed defaults from the key (cache_utils.py), so a `_version=` default is a
+# no-op. Lives here (not app.py) so pages import it without executing app.py.
 # v10 (2026-07-11, gps-trust PR 0): build_gate now uses a σ=10m smoothed tangent,
 # which shifts gate-crossing section times at rotation-exposed corners.
 _SECTION_TIMES_VERSION = 10
