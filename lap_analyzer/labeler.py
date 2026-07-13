@@ -590,26 +590,41 @@ def build_session_corners(
     return df[head + [c for c in df.columns if c not in head]]
 
 
-def label_session(session_dir: Path, track: Track, ref: ReferenceIndex | None = None) -> tuple[int, int]:
-    """Process one session: rewrite samples.parquet with `track_dist_m` + `corner`,
-    write corners.parquet.
-
-    Returns (n_samples_labeled, n_transits).
-    """
+def label_session_samples(session_dir: Path, track: Track, ref: ReferenceIndex | None = None) -> int:
+    """Phase 1 of labeling one session: rewrite samples.parquet with `track_dist_m`
+    + `corner` + drift columns. Returns n_samples. Split from corner-building so the
+    rebuild can build the corridor (which reads labeled samples) BETWEEN the two
+    phases (design PR-4)."""
     samples = pd.read_parquet(session_dir / "samples.parquet")
-    laps = pd.read_csv(session_dir / "laps.csv")
-    session_id = session_dir.name
-    date = f"{session_id[:4]}-{session_id[4:6]}-{session_id[6:8]}"
-
     if ref is None:
         ref = build_reference_index(track)
-
     labeled = label_samples(samples, track, ref=ref)
     tmp = session_dir / "samples.parquet.tmp"
     labeled.to_parquet(tmp, index=False)
     tmp.replace(session_dir / "samples.parquet")
+    return len(labeled)
 
-    transits = build_session_corners(labeled, laps, track, session_id, date)
+
+def build_session_corners_file(session_dir: Path, track: Track,
+                               corridor=None, frame=None) -> int:
+    """Phase 2: read the (already labeled) samples.parquet + laps.csv and write
+    corners.parquet. The corridor + TrackFrame are passed by the CLI (built once for
+    the whole rebuild) or loaded on demand when omitted. Returns n_transits."""
+    samples = pd.read_parquet(session_dir / "samples.parquet")
+    laps = pd.read_csv(session_dir / "laps.csv")
+    session_id = session_dir.name
+    date = f"{session_id[:4]}-{session_id[4:6]}-{session_id[6:8]}"
+    transits = build_session_corners(samples, laps, track, session_id, date,
+                                     corridor=corridor, frame=frame)
     transits.to_parquet(session_dir / "corners.parquet", index=False)
+    return len(transits)
 
-    return len(labeled), len(transits)
+
+def label_session(session_dir: Path, track: Track, ref: ReferenceIndex | None = None,
+                  corridor=None, frame=None) -> tuple[int, int]:
+    """Both labeling phases for one session (single-session use / back-compat):
+    rewrite samples.parquet, then write corners.parquet. Returns
+    (n_samples_labeled, n_transits)."""
+    n_samples = label_session_samples(session_dir, track, ref=ref)
+    n_transits = build_session_corners_file(session_dir, track, corridor=corridor, frame=frame)
+    return n_samples, n_transits

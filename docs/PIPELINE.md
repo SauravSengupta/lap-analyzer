@@ -363,10 +363,20 @@ python -m lap_analyzer.cli.normalize "data/raw/ridge/Log-20260517-100304 ....csv
 ```powershell
 $env:PYTHONPATH = "."
 python -m lap_analyzer.cli.normalize --track ridge --all
-python -m lap_analyzer.cli.label_corners --track ridge
+python -m lap_analyzer.trajectory build-corridor ridge     # refresh the trajectory corridor
+python -m lap_analyzer.cli.label_corners --track ridge     # corner transits on s_hat (2-phase)
 python -m lap_analyzer.cli.flag_quality --track ridge
 python -m lap_analyzer.cli.build_corpus --track ridge
 ```
+
+`label_corners` runs internally in **two phases** (design PR-4): it first labels
+every session's `samples.parquet` with `track_dist_m`, then builds/loads the
+per-track trajectory **corridor** (which reads those labeled samples), then builds
+every `corners.parquet` with transit positions on the corrected ruler `s_hat`.
+Running `build-corridor` first persists a fresh corridor so section-times and the
+visualizer read the same one the corners were built on; if you skip it,
+`label_corners` builds an unsaved corridor on the fly (corners are still correct,
+but nothing is persisted for the other consumers).
 
 **Full rebuild including the centerline** (after a corner-box edit or many new
 laps — see [NEW-TRACK.md](NEW-TRACK.md) for the full bootstrap):
@@ -376,7 +386,8 @@ python -m lap_analyzer.cli.normalize --track ridge --all
 python -m lap_analyzer.cli.label_corners --track ridge      # first pass (uses old centerline)
 python -m lap_analyzer.cli.build_centerline --track ridge
 python -m lap_analyzer.cli.install_centerline --track ridge
-python -m lap_analyzer.cli.label_corners --track ridge      # second pass (uses new centerline)
+python -m lap_analyzer.trajectory build-corridor ridge      # corridor on the new centerline
+python -m lap_analyzer.cli.label_corners --track ridge      # second pass (new centerline + s_hat)
 python -m lap_analyzer.cli.flag_quality --track ridge
 python -m lap_analyzer.cli.build_corpus --track ridge
 ```

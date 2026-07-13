@@ -719,3 +719,38 @@ def test_build_session_corners_corner_ids_are_track_corners(ridge_session_corner
     corner_ids = {c.id for c in track.corners}
     emitted = set(corners["corner_id"].unique())
     assert emitted.issubset(corner_ids)
+
+
+# ---------------------------------------------------------------------------
+# label_session split (PR4): phase-1 sample labeling and phase-2 corner building
+# are separable so the rebuild can slot the corridor build between them.
+# ---------------------------------------------------------------------------
+
+def test_build_session_corners_file_writes_traj_sigma(sample_data_root, tmp_path):
+    # SPEC: build_session_corners_file(session_dir, track, corridor, frame) reads a
+    # labeled samples.parquet + laps.csv from the dir and writes corners.parquet
+    # carrying the trajectory column traj_sigma_max_m. Given an explicit corridor,
+    # it does not rebuild one. Run on a writable COPY of a bundle session.
+    import shutil
+
+    from lap_analyzer.analysis import _load_or_build_corridor, load_centerline
+    from lap_analyzer.gates import TrackFrame
+    from lap_analyzer.labeler import build_session_corners_file
+
+    track = load_track("ridge")
+    src = sample_data_root / "sessions" / "ridge" / "20260517-100304"
+    dst = tmp_path / "20260517-100304"
+    dst.mkdir()
+    for name in ("samples.parquet", "laps.csv"):
+        shutil.copy(src / name, dst / name)
+
+    corridor = _load_or_build_corridor("ridge")
+    frame = TrackFrame.from_centerline(load_centerline("ridge"))
+    n_transits = build_session_corners_file(dst, track, corridor=corridor, frame=frame)
+
+    assert n_transits > 0
+    corners = pd.read_parquet(dst / "corners.parquet")
+    assert len(corners) == n_transits
+    assert "traj_sigma_max_m" in corners.columns
+    # σ is a non-negative distance (metres) on every emitted transit.
+    assert (corners["traj_sigma_max_m"] >= 0).all()
