@@ -20,14 +20,17 @@ import streamlit as st
 
 from lap_analyzer.analysis import (
     lap_summary,
+    load_centerline,
     range_section_times,
     section_bounds,
     section_range_bounds,
     section_times,
     top_decile_laps,
 )
-from lap_analyzer.fused_axis import GLITCH_OFFSET_M, compute_fused_dist, glitch_runs
-from shared import available_tracks, current_track, drop_gps_glitches as _drop_gps_glitches
+from lap_analyzer.fused_axis import GLITCH_OFFSET_M, glitch_runs
+from lap_analyzer.gates import TrackFrame
+from lap_analyzer.trajectory import estimate_trajectory, load_corridor
+from shared import available_tracks, current_track
 from shared import corpus as _corpus, laps as _laps, track_def as _track_def
 from shared import samples as _samples, session_hhmm, format_lap_time
 from shared import _SECTION_TIMES_VERSION
@@ -95,29 +98,48 @@ def _fix_dropdown_overflow() -> None:
 _fix_dropdown_overflow()
 
 
-# Bump _GLITCH_FILTER_VERSION whenever _drop_gps_glitches logic changes. It is
-# passed explicitly as filter_version= at the call site so it enters the cache
-# key: Streamlit hashes passed non-underscore args by value but EXCLUDES
-# underscore-prefixed args and unpassed defaults (cache_utils.py), so a bare
-# `_filter_version=` default never actually invalidated — only the process
-# restart that a code reload requires cleared the in-memory cache.
-_GLITCH_FILTER_VERSION = 6
+# Bump _GLITCH_FILTER_VERSION whenever the top-decile envelope build logic changes
+# (now: s_hat binning of trajectory-estimated laps). Passed explicitly as
+# filter_version= at the call site so it enters the cache key: Streamlit hashes
+# passed non-underscore args by value but EXCLUDES underscore-prefixed args and
+# unpassed defaults (cache_utils.py), so a bare `_filter_version=` default never
+# actually invalidated — only the process restart that a code reload requires
+# cleared the in-memory cache.
+# v7 (2026-07-12, gps-trust PR 3): envelope bins on trajectory s_hat (monotone by
+# construction), so drop_gps_glitches is retired here — glitch samples land at
+# their honest s_hat instead of needing to be dropped.
+_GLITCH_FILTER_VERSION = 7
+
+
+@st.cache_resource(show_spinner="loading trajectory corridor (one-time)")
+def _corridor_and_frame(track: str):
+    """The per-track corridor + TrackFrame the trajectory estimator needs, loaded
+    once. The visualizer has the track, so per design PR-3 it calls
+    estimate_trajectory itself (the fused_axis helper is corridor-less and stays a
+    legacy shim). cache_resource: these are shared read-only objects, not data."""
+    return load_corridor(track), TrackFrame.from_centerline(load_centerline(track))
 
 
 @st.cache_data(show_spinner="loading top-decile samples (one-time)")
 def _top_decile_traces(track: str, filter_version: int = _GLITCH_FILTER_VERSION) -> pd.DataFrame:
-    """Long-form: all top-decile lap samples concatenated, with per-lap GPS-glitch
-    samples removed so envelope bins aren't polluted by backward/forward teleports.
+    """Long-form: all top-decile lap samples concatenated, each carrying its
+    trajectory s_hat so the envelope bins on the same monotone ruler the focus lap
+    is drawn on. s_hat is monotone by construction, so glitch samples are placed at
+    their honest along-track position rather than dropped (retiring drop_gps_glitches).
     Per-channel envelope is derived on demand so adding a channel doesn't invalidate cache.
     """
     pool = top_decile_laps(_corpus(track))
+    corridor, frame = _corridor_and_frame(track)
     frames = []
     for sid, lp in pool:
         try:
-            s = _samples(track, sid, lp)
+            s = _samples(track, sid, lp).sort_values("t").reset_index(drop=True)
+            traj = estimate_trajectory(s, corridor, frame)
         except Exception:
             continue
-        s = _drop_gps_glitches(s)
+        # traj is time-sorted; s is already time-sorted with unique t, so s_hat
+        # aligns positionally (same alignment analysis relies on).
+        s = s.assign(s_hat=traj.s_hat)
         frames.append(s.assign(lap_key=f"{sid}-L{lp}"))
     if not frames:
         return pd.DataFrame()
@@ -132,16 +154,16 @@ def _envelope(track: str, channel: str, n_points: int = 400,
     # envelope, so busting only _top_decile_traces would leave it stale.
     traces = _top_decile_traces(track, filter_version=filter_version)
     if traces.empty or channel not in traces.columns:
-        return pd.DataFrame(columns=["track_dist_m", "p10", "p50", "p90"])
-    t = traces[["track_dist_m", channel]].dropna()
+        return pd.DataFrame(columns=["s_hat", "p10", "p50", "p90"])
+    t = traces[["s_hat", channel]].dropna()
     if t.empty:
-        return pd.DataFrame(columns=["track_dist_m", "p10", "p50", "p90"])
-    edges = np.linspace(t["track_dist_m"].min(), t["track_dist_m"].max(), n_points + 1)
+        return pd.DataFrame(columns=["s_hat", "p10", "p50", "p90"])
+    edges = np.linspace(t["s_hat"].min(), t["s_hat"].max(), n_points + 1)
     centers = 0.5 * (edges[:-1] + edges[1:])
-    cuts = pd.cut(t["track_dist_m"], edges, labels=False, include_lowest=True)
+    cuts = pd.cut(t["s_hat"], edges, labels=False, include_lowest=True)
     grp = t.groupby(cuts)[channel]
     return pd.DataFrame({
-        "track_dist_m": centers,
+        "s_hat": centers,
         "p10": grp.quantile(0.10).reindex(range(n_points)).to_numpy(),
         "p50": grp.median().reindex(range(n_points)).to_numpy(),
         "p90": grp.quantile(0.90).reindex(range(n_points)).to_numpy(),
@@ -616,9 +638,10 @@ if not is_full_lap:
 
 # --- channel envelope plot --------------------------------------------------
 
-# Three stacked panels sharing one numeric x-axis. Focus/best-lap traces are on
-# the fused distance axis; bands and corner shading are on track_dist_m. The two
-# coincide on clean data and diverge only where GPS glitched (shaded).
+# Three stacked panels sharing one numeric x-axis. Focus, best-lap AND the
+# top-decile envelope are all drawn on the trajectory ruler s_hat (monotone by
+# construction); corner shading uses the centerline distances (start_m/end_m),
+# which coincide with s_hat on clean data — the whole picture is one ruler now.
 PANELS: list[tuple[str, str]] = [
     ("speed_mph", "Speed (mph)"),
     ("throttle_norm", "Throttle"),
@@ -628,13 +651,20 @@ PANELS: list[tuple[str, str]] = [
 
 def _prepare_lap_trace(sid_: str, lap_: int) -> tuple[pd.DataFrame, int, list[tuple[float, float]]]:
     raw = _samples(track, sid_, lap_).sort_values("t").reset_index(drop=True)
-    fused = compute_fused_dist(raw)
+    corridor, frame = _corridor_and_frame(track)
+    traj = estimate_trajectory(raw, corridor, frame)
+    # traj is time-sorted; raw is already time-sorted with unique t, so s_hat
+    # aligns positionally (the same alignment analysis.section_times relies on).
+    s_hat = traj.s_hat
     td = raw["track_dist_m"].to_numpy()
     dl = raw["dist_lap_m"].to_numpy()
     n_glitched = int((np.abs(td - dl) >= GLITCH_OFFSET_M).sum())
-    spans = glitch_runs(td, dl, fused, merge_gap_m=100.0)
-    out = raw.assign(fused_dist_m=fused).sort_values("fused_dist_m")
-    out = _insert_gap_breaks(out, "fused_dist_m", gap_threshold=30.0)
+    # Glitch spans mapped into s_hat coordinates (the σ-span replacement lands in
+    # the next step; here the |track_dist − dist_lap| signal is simply re-plotted
+    # on the new axis so the axis switch is self-contained).
+    spans = glitch_runs(td, dl, s_hat, merge_gap_m=100.0)
+    out = raw.assign(s_hat=s_hat).sort_values("s_hat")
+    out = _insert_gap_breaks(out, "s_hat", gap_threshold=30.0)
     return out, n_glitched, spans
 
 lap_s, n_glitched, glitch_spans = _prepare_lap_trace(sid, lap)
@@ -657,11 +687,11 @@ DISPLAY_BUFFER_M = 200.0
 if not is_full_lap:
     display_a = max(0.0, section_lo - DISPLAY_BUFFER_M)
     display_b = section_hi + DISPLAY_BUFFER_M
-    lap_s = lap_s[(lap_s["fused_dist_m"] >= display_a)
-                  & (lap_s["fused_dist_m"] <= display_b)]
+    lap_s = lap_s[(lap_s["s_hat"] >= display_a)
+                  & (lap_s["s_hat"] <= display_b)]
     if best_lap_s is not None:
-        best_lap_s = best_lap_s[(best_lap_s["fused_dist_m"] >= display_a)
-                                & (best_lap_s["fused_dist_m"] <= display_b)]
+        best_lap_s = best_lap_s[(best_lap_s["s_hat"] >= display_a)
+                                & (best_lap_s["s_hat"] <= display_b)]
 
 visible_glitch_spans: list[tuple[float, float]] = []
 for glo, ghi in glitch_spans:
@@ -688,13 +718,14 @@ else:
 # This is the load-bearing diagnostic per the visualizer design doc — where exactly
 # you gained / lost time relative to the best lap, in seconds.
 #
-# The two laps are aligned on the fused distance axis (fused_axis.py), not raw
-# track_dist_m. Raw track_dist_m jitters sample-to-sample; its derivative drives
-# the Δt slope, so a few metres of GPS noise fabricated a phantom wobble (~0.1s
-# on a clean lap, far more on a glitched one). The fused axis is OBD-smooth and
-# monotonic, so the Δt slope tracks true speed-and-line. Note this does NOT flatten
-# genuine sign changes: a slower lap on a shorter line really does gain time on
-# that stretch, and the fused Δt still shows it.
+# The two laps are aligned on the trajectory ruler s_hat, not raw track_dist_m.
+# Raw track_dist_m jitters sample-to-sample; its derivative drives the Δt slope,
+# so a few metres of GPS noise fabricated a phantom wobble (~0.1s on a clean lap,
+# far more on a glitched one). s_hat is monotone by construction and its glitch
+# handling is inside the estimator, so the Δt slope tracks true speed-and-line
+# with no glitch pre-filtering. Note this does NOT flatten genuine sign changes:
+# a slower lap on a shorter line really does gain time on that stretch, and the
+# s_hat Δt still shows it.
 # delta_y is the total time gap at each track position. delta_speed_y is the
 # same gap with line-length removed — the laps aligned by distance travelled
 # instead of track position. The band between the two is what the selected lap's
@@ -704,17 +735,19 @@ delta_x = delta_y = delta_speed_y = None
 if best_ref is not None and (best_ref[0] != sid or best_ref[1] != lap):
     b_sid, b_lap, _ = best_ref
 
-    def _fused_lap(sid_: str, lap_: int):
-        """(fused_distance, t, obd_distance) for one lap, time-sorted. fused is
-        monotone, so np.interp maps track position -> elapsed time cleanly."""
-        s = _drop_gps_glitches(_samples(track, sid_, lap_)).sort_values("t")
+    def _traj_lap(sid_: str, lap_: int):
+        """(s_hat, t, obd_distance) for one lap, time-sorted. s_hat is monotone by
+        construction, so np.interp maps ruler position -> elapsed time cleanly; the
+        estimator handles bad GPS internally, so no glitch pre-filtering is needed."""
+        s = _samples(track, sid_, lap_).sort_values("t").reset_index(drop=True)
         if len(s) < 2:
             return None
-        return (compute_fused_dist(s), s["t"].to_numpy(),
-                s["dist_lap_m"].to_numpy())
+        corridor, frame = _corridor_and_frame(track)
+        traj = estimate_trajectory(s, corridor, frame)
+        return (traj.s_hat, traj.t, s["dist_lap_m"].to_numpy())
 
-    sel = _fused_lap(sid, lap)
-    bst = _fused_lap(b_sid, b_lap)
+    sel = _traj_lap(sid, lap)
+    bst = _traj_lap(b_sid, b_lap)
     if sel is not None and bst is not None:
         f_sel, t_sel, o_sel = sel
         f_bst, t_bst, o_bst = bst
@@ -724,7 +757,7 @@ if best_ref is not None and (best_ref[0] != sid or best_ref[1] != lap):
             # belongs to the channel traces for visual context, not to this metric.
             grid_a, grid_b = section_lo, section_hi
         else:
-            # Full lap: intersect both laps' fused ranges, anchor at lap start.
+            # Full lap: intersect both laps' s_hat ranges, anchor at lap start.
             grid_a = float(max(f_sel.min(), f_bst.min()))
             grid_b = float(min(f_sel.max(), f_bst.max()))
 
@@ -755,28 +788,28 @@ fig = make_subplots(rows=n_rows, cols=1, shared_xaxes=True, vertical_spacing=0.0
 for i, (ch, label) in enumerate(PANELS, start=1):
     env_i = _envelope(track, ch, filter_version=_GLITCH_FILTER_VERSION)
     if not is_full_lap:
-        env_i = env_i[(env_i["track_dist_m"] >= display_a)
-                      & (env_i["track_dist_m"] <= display_b)]
+        env_i = env_i[(env_i["s_hat"] >= display_a)
+                      & (env_i["s_hat"] <= display_b)]
     show_leg = (i == 1)  # only top panel contributes to legend
-    fig.add_trace(go.Scatter(x=env_i["track_dist_m"], y=env_i["p90"], mode="lines",
+    fig.add_trace(go.Scatter(x=env_i["s_hat"], y=env_i["p90"], mode="lines",
                              line=dict(width=0), showlegend=False),
                   row=i, col=1)
-    fig.add_trace(go.Scatter(x=env_i["track_dist_m"], y=env_i["p10"], mode="lines",
+    fig.add_trace(go.Scatter(x=env_i["s_hat"], y=env_i["p10"], mode="lines",
                              line=dict(width=0), fill="tonexty",
                              fillcolor="rgba(120,160,255,0.20)",
                              name="top-decile p10–p90", showlegend=show_leg),
                   row=i, col=1)
-    fig.add_trace(go.Scatter(x=env_i["track_dist_m"], y=env_i["p50"], mode="lines",
+    fig.add_trace(go.Scatter(x=env_i["s_hat"], y=env_i["p50"], mode="lines",
                              line=dict(color="rgba(120,160,255,0.9)", width=2, dash="dot"),
                              name="top-decile median", showlegend=show_leg),
                   row=i, col=1)
     if best_lap_s is not None and not best_lap_s.empty and ch in best_lap_s.columns:
-        fig.add_trace(go.Scatter(x=best_lap_s["fused_dist_m"], y=best_lap_s[ch],
+        fig.add_trace(go.Scatter(x=best_lap_s["s_hat"], y=best_lap_s[ch],
                                  mode="lines",
                                  line=dict(color="#2e8b57", width=2),
                                  name=best_label, showlegend=show_leg),
                       row=i, col=1)
-    fig.add_trace(go.Scatter(x=lap_s["fused_dist_m"], y=lap_s[ch], mode="lines",
+    fig.add_trace(go.Scatter(x=lap_s["s_hat"], y=lap_s[ch], mode="lines",
                              line=dict(color="crimson", width=2.5),
                              name=selected_label, showlegend=show_leg),
                   row=i, col=1)
