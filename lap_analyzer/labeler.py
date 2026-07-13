@@ -266,10 +266,10 @@ def _interp_at_dist(samples: pd.DataFrame, dist: float, col: str, dist_col: str 
 
 
 def _first_sustained_above(window: pd.DataFrame, col: str, threshold: float, duration_s: float) -> float | None:
-    """First track_dist_m where `col > threshold` is sustained for at least `duration_s`."""
+    """First s_hat where `col > threshold` is sustained for at least `duration_s`."""
     above = (window[col] > threshold).to_numpy()
     t = window["t"].to_numpy()
-    d = window["track_dist_m"].to_numpy()
+    d = window["s_hat"].to_numpy()
     n = len(window)
     i = 0
     while i < n:
@@ -288,9 +288,14 @@ def _first_sustained_above(window: pd.DataFrame, col: str, threshold: float, dur
 def build_corner_transit(lap_samples: pd.DataFrame, corner: Corner) -> dict | None:
     """Compute one transit row for a (lap × corner). Returns None if corner missing from lap.
 
-    All distance fields are in track_dist_m (canonical, cross-lap-comparable).
+    All along-track distance fields are on the trajectory ruler `s_hat` (the car's
+    monotone position on the canonical ruler, drift/glitch-corrected by the
+    trajectory layer), so a GPS-glitched lap's events land at their true track
+    position. `track_dist_offset_*` stay in the raw-projection frame — they are the
+    kd-tree diagnostic that the (still-dual-written) spatial reliability flag reads.
+    `traj_sigma_max_m` is the widest per-sample along-track σ inside the box.
     """
-    in_corner = lap_samples[(lap_samples["track_dist_m"] >= corner.start_m) & (lap_samples["track_dist_m"] <= corner.end_m)]
+    in_corner = lap_samples[(lap_samples["s_hat"] >= corner.start_m) & (lap_samples["s_hat"] <= corner.end_m)]
     if len(in_corner) < 3:
         return None
 
@@ -302,53 +307,58 @@ def build_corner_transit(lap_samples: pd.DataFrame, corner: Corner) -> dict | No
     has_throttle = bool(in_corner["throttle_norm"].notna().any())
 
     lookback = lap_samples[
-        (lap_samples["track_dist_m"] >= corner.start_m - LOOKBACK_M)
-        & (lap_samples["track_dist_m"] < corner.start_m)
+        (lap_samples["s_hat"] >= corner.start_m - LOOKBACK_M)
+        & (lap_samples["s_hat"] < corner.start_m)
     ]
-    after = lap_samples[lap_samples["track_dist_m"] > corner.end_m].head(1)
+    after = lap_samples[lap_samples["s_hat"] > corner.end_m].head(1)
     window = pd.concat([lookback, in_corner, after])
 
-    entry_speed = _interp_at_dist(window, corner.start_m, speed_col)
-    exit_speed = _interp_at_dist(window, corner.end_m, speed_col)
-    entry_dist = float(in_corner["track_dist_m"].iloc[0])
-    exit_dist = float(in_corner["track_dist_m"].iloc[-1])
+    entry_speed = _interp_at_dist(window, corner.start_m, speed_col, dist_col="s_hat")
+    exit_speed = _interp_at_dist(window, corner.end_m, speed_col, dist_col="s_hat")
+    entry_dist = float(in_corner["s_hat"].iloc[0])
+    exit_dist = float(in_corner["s_hat"].iloc[-1])
     time_in = float(in_corner["t"].iloc[-1] - in_corner["t"].iloc[0])
 
     min_idx = in_corner[speed_col].idxmin()
     max_idx = in_corner[speed_col].idxmax()
     min_speed = float(in_corner.loc[min_idx, speed_col])
-    min_speed_dist = float(in_corner.loc[min_idx, "track_dist_m"])
+    min_speed_dist = float(in_corner.loc[min_idx, "s_hat"])
     max_speed = float(in_corner.loc[max_idx, speed_col])
 
     latg_peak_idx = in_corner["lat_g"].abs().idxmax()
-    latg_peak_dist = float(in_corner.loc[latg_peak_idx, "track_dist_m"])
+    latg_peak_dist = float(in_corner.loc[latg_peak_idx, "s_hat"])
     latg_peak_value = float(in_corner.loc[latg_peak_idx, "lat_g"])
 
-    apex_speed = _interp_at_dist(in_corner, corner.apex_m, speed_col)
+    apex_speed = _interp_at_dist(in_corner, corner.apex_m, speed_col, dist_col="s_hat")
     secondary_apex_speed = (
-        _interp_at_dist(in_corner, corner.secondary_apex_m, speed_col)
+        _interp_at_dist(in_corner, corner.secondary_apex_m, speed_col, dist_col="s_hat")
         if corner.secondary_apex_m is not None else None
     )
 
-    # Track-dist mapping quality within this corner: how far did the kd-tree have
-    # to reach to map each sample? High values = samples are off the reference path,
-    # so this transit's spatial analysis is unreliable.
+    # Along-track confidence of the s_hat placement through this corner (the widest
+    # per-sample σ inside the box). High values → the transit's positions are a
+    # prior/gap-carried estimate; the σ-derived reliability flag reads this.
+    traj_sigma_max = float(in_corner["sigma_m"].max())
+
+    # Raw-projection mapping quality within this corner: how far did the kd-tree
+    # have to reach to map each sample? Kept in the track_dist frame because the
+    # dual-written spatial reliability flag (quality.py) still reads it.
     tdo_med = float(in_corner["track_dist_offset_m"].median())
     tdo_max = float(in_corner["track_dist_offset_m"].max())
 
     brake_in_window = window[window["brake"] == 1]
-    brake_on = float(brake_in_window["track_dist_m"].iloc[0]) if len(brake_in_window) else None
-    brake_off = float(brake_in_window["track_dist_m"].iloc[-1]) if len(brake_in_window) else None
+    brake_on = float(brake_in_window["s_hat"].iloc[0]) if len(brake_in_window) else None
+    brake_off = float(brake_in_window["s_hat"].iloc[-1]) if len(brake_in_window) else None
 
     lift_in_window = window[window["throttle_norm"] < THROTTLE_LIFT_THRESHOLD]
-    lift = float(lift_in_window["track_dist_m"].iloc[0]) if len(lift_in_window) else None
+    lift = float(lift_in_window["s_hat"].iloc[0]) if len(lift_in_window) else None
 
-    post_apex = in_corner[in_corner["track_dist_m"] >= min_speed_dist]
+    post_apex = in_corner[in_corner["s_hat"] >= min_speed_dist]
     throttle_return = _first_sustained_above(post_apex, "throttle_norm", THROTTLE_RETURN_THRESHOLD, THROTTLE_RETURN_SUSTAIN_S)
 
-    post_track_apex = in_corner[in_corner["track_dist_m"] >= corner.apex_m]
+    post_track_apex = in_corner[in_corner["s_hat"] >= corner.apex_m]
     wot_hits = post_track_apex[post_track_apex["throttle_norm"] >= WOT_THRESHOLD]
-    wot = float(wot_hits["track_dist_m"].iloc[0]) if len(wot_hits) else None
+    wot = float(wot_hits["s_hat"].iloc[0]) if len(wot_hits) else None
 
     def offset(x):
         return None if x is None else round(x - corner.start_m, 2)
@@ -388,6 +398,7 @@ def build_corner_transit(lap_samples: pd.DataFrame, corner: Corner) -> dict | No
         "speed_source": "obd" if obd_present else "gps",
         "track_dist_offset_med_m": round(tdo_med, 2),
         "track_dist_offset_max_m": round(tdo_max, 2),
+        "traj_sigma_max_m": round(traj_sigma_max, 2),
         "sample_idx_start": int(in_corner.index[0]),
         "sample_idx_end": int(in_corner.index[-1]),
     }
@@ -511,14 +522,38 @@ def compute_lap_drift(
     return median_lat, median_lon, n, disagreement
 
 
+def _attach_trajectory(lap_samples: pd.DataFrame, corridor, frame) -> pd.DataFrame:
+    """Return the lap's samples (time-sorted, original index preserved) with the
+    trajectory ruler `s_hat` and its per-sample σ attached. s_hat is monotone in t,
+    so t-order is track-order; the stable sort matches estimate_trajectory's own
+    internal stable t-sort, so s_hat/σ align positionally even on tied timestamps."""
+    from .trajectory import estimate_trajectory
+    g = lap_samples.sort_values("t", kind="stable")
+    traj = estimate_trajectory(g, corridor, frame)
+    return g.assign(s_hat=traj.s_hat, sigma_m=traj.sigma_m)
+
+
 def build_session_corners(
     samples: pd.DataFrame,
     laps: pd.DataFrame,
     track: Track,
     session_id: str,
     date: str,
+    corridor=None,
+    frame=None,
 ) -> pd.DataFrame:
-    """One row per (clean lap × corner)."""
+    """One row per (clean lap × corner), with every along-track position on the
+    trajectory ruler s_hat (design PR-4). The corridor + TrackFrame drive the
+    per-lap estimate; passed in by the CLI for the whole rebuild (built once), or
+    loaded on demand from the track here when omitted (single-session use / tests)."""
+    from .analysis import load_centerline
+    from .gates import TrackFrame
+    if corridor is None or frame is None:
+        from .analysis import _load_or_build_corridor
+        if corridor is None:
+            corridor = _load_or_build_corridor(track.track_id)
+        if frame is None:
+            frame = TrackFrame.from_centerline(load_centerline(track.track_id))
     rows: list[dict] = []
     clean_laps = laps[laps["is_clean"].astype(bool)]
     for _, lap in clean_laps.iterrows():
@@ -526,6 +561,7 @@ def build_session_corners(
         lap_samples = samples[samples["lap"] == lap_num]
         if len(lap_samples) < 50:
             continue
+        lap_samples = _attach_trajectory(lap_samples, corridor, frame)
         # Drift columns were already computed in label_samples and written to samples.parquet.
         # Pull the per-lap values from any sample in this lap.
         first = lap_samples.iloc[0]

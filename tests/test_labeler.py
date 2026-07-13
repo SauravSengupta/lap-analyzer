@@ -416,6 +416,39 @@ def test_build_corner_transit_apex_offset_signs(make_lap_samples):
     assert out["min_speed_dist_m"] == pytest.approx(180.0, abs=0.01)
 
 
+def test_build_corner_transit_positions_from_s_hat(make_lap_samples):
+    # PR4: the corner box and every along-track position come from the trajectory
+    # ruler s_hat, NOT raw track_dist_m. On a lap where track_dist_m disagrees with
+    # s_hat (a GPS glitch), positions must follow s_hat. Also emits traj_sigma_max_m
+    # = the widest per-sample sigma inside the corner box (the along-track confidence).
+    n = 41
+    s_hat = np.linspace(100.0, 300.0, n)      # corner box [100,300] lives on s_hat
+    track_dist = s_hat + 500.0                # raw GPS ruler is 500 m off (glitch)
+    apex_m = 220.0
+    min_idx = 16
+    assert s_hat[min_idx] == pytest.approx(180.0, abs=0.01)
+    speed = np.full(n, 100.0)
+    speed[min_idx] = 30.0                     # unambiguous speed minimum
+    peak_idx = 32
+    assert s_hat[peak_idx] == pytest.approx(260.0, abs=0.01)
+    lat_g = np.full(n, 0.1)
+    lat_g[peak_idx] = 1.3                     # unambiguous |lat_g| peak
+    sigma = np.full(n, 2.0)
+    sigma[min_idx] = 9.0                      # a wide-sigma sample inside the box
+    corner = _make_corner(start_m=100.0, end_m=300.0, apex_m=apex_m)
+    lap = make_lap_samples(n=n, s_hat=s_hat, track_dist_m=track_dist,
+                           speed_mph=speed, lat_g=lat_g, sigma_m=sigma)
+    out = build_corner_transit(lap, corner)
+    assert out is not None
+    # Positions follow s_hat (180 / 260), not track_dist_m (680 / 760).
+    assert out["min_speed_dist_m"] == pytest.approx(180.0, abs=0.01)
+    assert out["latg_peak_dist_m"] == pytest.approx(260.0, abs=0.01)
+    assert out["apex_dist_offset_m"] == pytest.approx(-40.0, abs=0.01)   # 180 - 220
+    assert out["latg_peak_offset_m"] == pytest.approx(40.0, abs=0.01)    # 260 - 220
+    # Along-track confidence: widest sigma inside the box.
+    assert out["traj_sigma_max_m"] == pytest.approx(9.0, abs=0.01)
+
+
 def test_build_corner_transit_latg_peak_uses_abs_magnitude(make_lap_samples):
     # SPEC: build_corner_transit — latg_peak_dist_m is the max |lat_g| sample;
     #       max_lat_g is the max of |lat_g| (sign-agnostic magnitude)

@@ -92,6 +92,12 @@ def make_lap_samples():
             "gps_accuracy_m": 3.0,
         }
         base.update(overrides)
+        # Trajectory-layer columns: s_hat is the canonical ruler the transit builder
+        # reads. On clean data it equals track_dist_m, so tests that only set
+        # track_dist_m keep their positions; tests exercising the trajectory rewire
+        # pass s_hat explicitly to make it disagree. sigma_m defaults tight (clean).
+        base.setdefault("s_hat", base["track_dist_m"])
+        base.setdefault("sigma_m", 1.0)
         data = {k: (np.asarray(v) if np.ndim(v) else np.full(n, v)) for k, v in base.items()}
         return pd.DataFrame(data)
     return _make
