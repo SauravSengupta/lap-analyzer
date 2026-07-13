@@ -374,12 +374,24 @@ Import: `from lap_analyzer.quality import compute_quality`. Signature:
   - `neighborhood_offset_max_m` = max of this corner's `track_dist_offset_max_m`
     and those of its two corner-sequence neighbors (wraps at start/finish).
   - **`transit_reliable == (gps_drift_disagreement_m ≤ 20) AND
-    (track_dist_offset_max_m ≤ 40) AND (neighborhood_offset_max_m ≤ 40)`** — assert
-    this boolean relationship holds row-wise on the returned frame.
+    (track_dist_offset_max_m ≤ 40) AND (neighborhood_offset_max_m ≤ 40)`** — the
+    SPATIAL STANDARD tier, kept for one release (it still gates the lateral
+    line-position metrics the trajectory layer does not yet certify). Assert this
+    boolean relationship holds row-wise on the returned frame.
   - **`lap_reliable`** is `True` iff **every** transit on that `(session_id, lap)`
     is `transit_reliable` (group-min). Assert: no row has `lap_reliable=True`
     while any sibling row on the same lap has `transit_reliable=False`.
-  - Reference sessions are excluded from the corpus-wide stats.
+  - **`transit_reliable_traj`** (design PR-4): the trajectory-σ reliability — equals
+    the labeler-emitted section A-tier verdict `rank_eligible` (`σ_t ≤ 0.10s AND
+    status ok`), dual-written alongside `transit_reliable`. `lap_reliable_traj` is
+    its per-lap group-min. NaN when the corpus predates the trajectory layer (no
+    `rank_eligible` column). The z-score baselines (`latg_peak_offset_z`,
+    `entry_speed_z`) are restricted to `rank_eligible` rows (in addition to the
+    OBD/non-reference restrictions); all rows are still scored.
+  - **Reference sessions** are SCORED (they appear in the frame with all quality
+    columns and `is_reference=True`) but never DEFINE a baseline: their
+    `lap_pace_decile` is NaN and their metric values are excluded from every
+    per-corner median/MAD and the pace `qcut`.
 - Thresholds live in `quality` as `DRIFT_DISAGREEMENT_LIMIT_M=20`,
   `TRANSIT_OFFSET_LIMIT_M=40`, `NEIGHBORHOOD_OFFSET_LIMIT_M=40` (importable).
 

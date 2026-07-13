@@ -522,15 +522,17 @@ def compute_lap_drift(
     return median_lat, median_lon, n, disagreement
 
 
-def _attach_trajectory(lap_samples: pd.DataFrame, corridor, frame) -> pd.DataFrame:
-    """Return the lap's samples (time-sorted, original index preserved) with the
-    trajectory ruler `s_hat` and its per-sample σ attached. s_hat is monotone in t,
-    so t-order is track-order; the stable sort matches estimate_trajectory's own
-    internal stable t-sort, so s_hat/σ align positionally even on tied timestamps."""
+def _attach_trajectory(lap_samples: pd.DataFrame, corridor, frame):
+    """Return (samples_with_s_hat, Trajectory) for one lap. Samples are time-sorted
+    with original index preserved and carry the trajectory ruler `s_hat` + per-sample
+    σ. s_hat is monotone in t, so t-order is track-order; the stable sort matches
+    estimate_trajectory's own internal stable t-sort, so s_hat/σ align positionally
+    even on tied timestamps. The Trajectory is returned so the caller can time the
+    per-corner sections without re-estimating."""
     from .trajectory import estimate_trajectory
     g = lap_samples.sort_values("t", kind="stable")
     traj = estimate_trajectory(g, corridor, frame)
-    return g.assign(s_hat=traj.s_hat, sigma_m=traj.sigma_m)
+    return g.assign(s_hat=traj.s_hat, sigma_m=traj.sigma_m), traj
 
 
 def build_session_corners(
@@ -546,14 +548,24 @@ def build_session_corners(
     trajectory ruler s_hat (design PR-4). The corridor + TrackFrame drive the
     per-lap estimate; passed in by the CLI for the whole rebuild (built once), or
     loaded on demand from the track here when omitted (single-session use / tests)."""
-    from .analysis import load_centerline
+    from .analysis import load_centerline, section_bounds
     from .gates import TrackFrame
+    from .trajectory import section_timing
     if corridor is None or frame is None:
         from .analysis import _load_or_build_corridor
         if corridor is None:
             corridor = _load_or_build_corridor(track.track_id)
         if frame is None:
             frame = TrackFrame.from_centerline(load_centerline(track.track_id))
+    # Per-corner ranking section bounds (braking → corner → exit), from the same
+    # section_bounds the section-times layer uses, so the transit's rank_eligible
+    # matches analysis.section_times exactly.
+    track_def_lite = {
+        "corners": [{"id": c.id, "start_m": c.start_m, "end_m": c.end_m}
+                    for c in track.corners],
+        "lap_length_internal_m": track.lap_length_m,
+    }
+    sec_bounds = section_bounds(track_def_lite)
     rows: list[dict] = []
     clean_laps = laps[laps["is_clean"].astype(bool)]
     for _, lap in clean_laps.iterrows():
@@ -561,7 +573,7 @@ def build_session_corners(
         lap_samples = samples[samples["lap"] == lap_num]
         if len(lap_samples) < 50:
             continue
-        lap_samples = _attach_trajectory(lap_samples, corridor, frame)
+        lap_samples, traj = _attach_trajectory(lap_samples, corridor, frame)
         # Drift columns were already computed in label_samples and written to samples.parquet.
         # Pull the per-lap values from any sample in this lap.
         first = lap_samples.iloc[0]
@@ -573,6 +585,13 @@ def build_session_corners(
             transit = build_corner_transit(lap_samples, corner)
             if transit is None:
                 continue
+            # Section-timing verdict for this corner from the SAME trajectory (R1):
+            # the A-tier rank_eligible quality.py reuses for transit_reliable_traj.
+            a, b = sec_bounds[corner.id]
+            st = section_timing(traj, a, b, corridor)
+            transit["section_sigma_t_s"] = round(st.sigma_s, 3) if np.isfinite(st.sigma_s) else np.nan
+            transit["section_status"] = st.status
+            transit["rank_eligible"] = bool(st.rank_eligible)
             transit["session_id"] = session_id
             transit["date"] = date
             transit["lap"] = lap_num

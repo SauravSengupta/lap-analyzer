@@ -10,10 +10,16 @@ Computes corpus-wide stats and joins back into each session's corners.parquet:
 - `gps_drift_mag_m`: convenience = sqrt(gps_drift_lat_m^2 + gps_drift_lon_m^2).
 - `neighborhood_offset_max_m`: max of this transit's track_dist_offset_max_m and
   its two corner-sequence neighbors. Catches glitch-in-adjacent-corner spillover.
-- `transit_reliable`: passes the STANDARD reliability filter (drift disagreement
-  <= 20m, transit offset <= 40m, neighborhood offset <= 40m).
-- `lap_reliable`: every corner on this lap is `transit_reliable`. Use this when
-  cross-corner consistency matters (e.g., time-delta across the lap).
+- `transit_reliable`: passes the spatial STANDARD reliability filter (drift
+  disagreement <= 20m, transit offset <= 40m, neighborhood offset <= 40m). Kept for
+  one release because it still gates the lateral line-position metrics the
+  trajectory layer does not yet certify.
+- `lap_reliable`: every corner on this lap is `transit_reliable`.
+- `transit_reliable_traj`: the trajectory-σ reliability — reuses the section-timing
+  A-tier verdict `rank_eligible` (σ_t <= 0.10s AND status ok) the labeler emits, so
+  value and confidence come from one pass. NaN on a pre-trajectory-layer corpus.
+- `lap_reliable_traj`: every corner on this lap is `transit_reliable_traj`. Use
+  these two when along-track (Mode-3/4) trust matters.
 
 Filters are signals for the analysis layer to apply (or override with custom
 thresholds via the raw metric columns), not exclusions baked into the data.
@@ -42,6 +48,7 @@ NEIGHBORHOOD_OFFSET_LIMIT_M = 40.0
 _COMPUTED_COLUMNS = [
     "lap_pace_decile", "latg_peak_offset_z", "entry_speed_z", "gps_drift_mag_m",
     "neighborhood_offset_max_m", "transit_reliable", "lap_reliable",
+    "transit_reliable_traj", "lap_reliable_traj", "is_reference",
 ]
 
 
@@ -49,25 +56,29 @@ def compute_quality(track: str) -> pd.DataFrame:
     """Read all session corners.parquet + laps.csv, compute per-transit quality columns,
     return a DataFrame keyed by (session_id, lap, corner_id)."""
     root = sessions_dir(track)
-    # Reference sessions are fully labeled but excluded from every corpus-wide
-    # stat here (pace deciles, per-corner z-score medians).
+    # Reference sessions (instructor laps) are fully labeled and now SCORED against
+    # the corpus baseline — they get the same quality columns — but they never
+    # DEFINE that baseline (pace deciles, per-corner z medians, σ-tier baselines),
+    # so a reference lap can't shift the percentiles the real corpus is judged by.
     ref = reference_session_ids(track)
     transits = pd.concat(
-        [pd.read_parquet(p) for p in sorted(root.rglob("corners.parquet"))
-         if p.parent.name not in ref],
+        [pd.read_parquet(p) for p in sorted(root.rglob("corners.parquet"))],
         ignore_index=True,
     )
     laps = pd.concat(
-        [pd.read_csv(p) for p in sorted(root.rglob("laps.csv"))
-         if p.parent.name not in ref],
+        [pd.read_csv(p) for p in sorted(root.rglob("laps.csv"))],
         ignore_index=True,
     )
 
     # Idempotency: strip any columns we are about to recompute, so re-running on
     # already-flagged corners.parquet doesn't collide on the merge below.
     transits = transits.drop(columns=[c for c in _COMPUTED_COLUMNS if c in transits.columns])
+    transits["is_reference"] = transits["session_id"].isin(ref)
 
-    clean = laps[laps["is_clean"].astype(bool)][["session_id", "lap", "lap_time_s"]].copy()
+    # Pace decile: baseline = non-reference clean laps; reference laps are scored
+    # NaN (they are not part of the corpus pace ranking).
+    clean = laps[(laps["is_clean"].astype(bool)) & (~laps["session_id"].isin(ref))][
+        ["session_id", "lap", "lap_time_s"]].copy()
     clean["lap_pace_decile"] = pd.qcut(
         clean["lap_time_s"], 10, labels=False, duplicates="drop"
     ).astype("int8")
@@ -89,12 +100,18 @@ def compute_quality(track: str) -> pd.DataFrame:
         mad_safe = mad.where(mad > 0.1, np.nan)  # avoid divide-by-zero on degenerate corners
         out[name] = ((out[col] - med) / mad_safe).round(2)
 
-    # lat-G is present regardless of OBD -> all sessions define its baseline.
-    add_corner_z("latg_peak_offset_m", "latg_peak_offset_z")
-    # entry_speed baseline = OBD sessions only (default True if the column is absent,
-    # e.g. a corpus labeled before obd_present existed).
+    # Restrict every z-score baseline to non-reference, rank-eligible (low-σ) transits
+    # so a corner's reference median/MAD is defined only by real, trajectory-trusted
+    # rows (design PR-4); all rows (including reference) are still scored. Falls back
+    # to all-rows for the σ term when rank_eligible is absent (a pre-trajectory corpus).
+    rank_mask = (out["rank_eligible"].astype(bool) if "rank_eligible" in out.columns
+                 else pd.Series(True, index=out.index))
+    base_mask = (~out["is_reference"]) & rank_mask
+    # lat-G is present regardless of OBD -> all non-ref rank-eligible rows define its baseline.
+    add_corner_z("latg_peak_offset_m", "latg_peak_offset_z", baseline=base_mask)
+    # entry_speed baseline = OBD sessions only (GPS speed reads low), AND non-ref rank-eligible.
     obd_mask = out["obd_present"] if "obd_present" in out.columns else pd.Series(True, index=out.index)
-    add_corner_z("entry_speed_mph", "entry_speed_z", baseline=obd_mask.astype(bool))
+    add_corner_z("entry_speed_mph", "entry_speed_z", baseline=(obd_mask.astype(bool) & base_mask))
 
     out["gps_drift_mag_m"] = np.sqrt(
         out["gps_drift_lat_m"] ** 2 + out["gps_drift_lon_m"] ** 2
@@ -120,6 +137,9 @@ def compute_quality(track: str) -> pd.DataFrame:
 
     out["neighborhood_offset_max_m"] = out.apply(neighborhood_offset, axis=1).round(2)
 
+    # Spatial STANDARD tier (kept for one release — the LATERAL line-position metrics
+    # e.g. apex offsets are not yet certified by the trajectory layer, which certifies
+    # only the along-track axis, so these drift/kd-tree flags still gate those).
     out["transit_reliable"] = (
         (out["gps_drift_disagreement_m"] <= DRIFT_DISAGREEMENT_LIMIT_M)
         & (out["track_dist_offset_max_m"] <= TRANSIT_OFFSET_LIMIT_M)
@@ -127,6 +147,18 @@ def compute_quality(track: str) -> pd.DataFrame:
     )
     # lap_reliable: every transit on this (session, lap) is transit_reliable
     out["lap_reliable"] = out.groupby(["session_id", "lap"])["transit_reliable"].transform("min").astype(bool)
+
+    # Trajectory σ tier (design PR-4): transit_reliable_traj reuses the section-timing
+    # A-tier verdict rank_eligible (σ_t ≤ 0.10 s AND status ok) the labeler emits from
+    # the SAME estimation pass as the value — one σ, one flag. NaN when a corpus
+    # predates the trajectory layer (no rank_eligible column).
+    if "rank_eligible" in out.columns:
+        out["transit_reliable_traj"] = out["rank_eligible"].astype(bool)
+        out["lap_reliable_traj"] = out.groupby(["session_id", "lap"])[
+            "transit_reliable_traj"].transform("min").astype(bool)
+    else:
+        out["transit_reliable_traj"] = np.nan
+        out["lap_reliable_traj"] = np.nan
 
     return out
 

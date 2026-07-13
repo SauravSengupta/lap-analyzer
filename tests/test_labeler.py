@@ -721,6 +721,23 @@ def test_build_session_corners_corner_ids_are_track_corners(ridge_session_corner
     assert emitted.issubset(corner_ids)
 
 
+def test_build_session_corners_emits_section_rank_eligible(ridge_session_corners):
+    # SPEC (PR4): each transit carries the section-timing verdict for its corner —
+    # rank_eligible (bool, the A-tier flag quality.py reuses for transit_reliable_traj)
+    # and section_sigma_t_s (the section-time σ in seconds it derives from). Computed
+    # from the SAME estimate_trajectory + section_timing the section-times layer uses,
+    # so corners.parquet and section_times agree.
+    _track, corners = ridge_session_corners
+    assert "rank_eligible" in corners.columns
+    assert "section_sigma_t_s" in corners.columns
+    assert corners["rank_eligible"].dropna().isin([True, False]).all()
+    sig = corners["section_sigma_t_s"].dropna()
+    assert (sig >= 0).all()
+    # A-tier is exactly σ_t ≤ 0.10 s AND section status ok — a rank-eligible row can
+    # never carry a σ wider than the tier-A bound.
+    assert (corners.loc[corners["rank_eligible"] == True, "section_sigma_t_s"] <= 0.10 + 1e-9).all()  # noqa: E712
+
+
 # ---------------------------------------------------------------------------
 # label_session split (PR4): phase-1 sample labeling and phase-2 corner building
 # are separable so the rebuild can slot the corridor build between them.
