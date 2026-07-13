@@ -275,6 +275,43 @@ def _section_time_help(sid_: str, lap_: int, corner: str) -> str | None:
     return None
 
 
+# Friendly names for the R12 net checks, for the lap-level banner summary (the
+# per-corner tooltip in _section_time_help keeps the raw name = value form).
+_CHECK_LABELS = {
+    "driven_band_dev_m": "odometer drift",
+    "consistency_resid_m": "line-length",
+    "speed_consistency_s": "speed-time",
+}
+
+
+def _lap_audit(sid_: str, lap_: int, lo: float | None, hi: float | None, full: bool):
+    """Per-lap GPS-trust summary read from the section-timing layer's OWN emitted
+    records (sec_t `status` + `checks_json`), never a re-derivation — same source as
+    _section_time_help, so the banner can't contradict the per-corner tooltips.
+    Returns (whole_lap_rescale_invalid, [(corner_id, [reason, ...]), ...]) for the
+    in-view corners the drift/consistency nets flagged (and left non-rank-eligible)."""
+    rows = sec_t[(sec_t["session_id"] == sid_) & (sec_t["lap"] == lap_)]
+    if rows.empty:
+        return False, []
+    if (rows["status"] == "rescale_invalid").all():
+        return True, []
+    flagged: list[tuple[str, list[str]]] = []
+    for r in rows.itertuples(index=False):
+        a, b = sec_bounds_all[r.corner_id]
+        if not full and (b < lo or a > hi):
+            continue
+        if r.status != "ok" or bool(r.rank_eligible):
+            continue
+        try:
+            names = {c["name"] for c in json.loads(r.checks_json or "[]")
+                     if not c.get("pass", True) and c["name"] != "coverage"}
+        except (ValueError, TypeError):
+            names = set()
+        if names:
+            flagged.append((r.corner_id, sorted({_CHECK_LABELS.get(n, n) for n in names})))
+    return False, flagged
+
+
 # --- sidebar: Track picker --------------------------------------------------
 # Must run BEFORE any data load that depends on current_track(). Writing to
 # st.session_state["track"] via the `key=` arg means current_track() (read just
@@ -738,14 +775,39 @@ for glo, ghi in wide_spans:
     if ghi > glo:
         visible_wide_spans.append((glo, ghi))
 
-if visible_wide_spans:
+# Banner: per-lap GPS-trust summary. Whole-lap rescale-invalid trumps everything;
+# otherwise, when a wide-σ stretch is actually shaded in view, explain it and
+# enrich it with the corners the section-timing audit flagged (read from the same
+# emitted status + checks_json as _section_time_help). Clean laps have no shaded
+# stretch and no rescale, so they show no banner — unchanged from before.
+_rescale, _flagged = _lap_audit(
+    sid, lap,
+    display_a if not is_full_lap else None,
+    display_b if not is_full_lap else None,
+    is_full_lap,
+)
+if _rescale:
     st.caption(
+        "⚠️ This is a session first/last lap — its odometer rescale is invalid, so every "
+        "along-track position is a prior-only estimate and no section time on this lap can "
+        "be trusted (all corners status: rescale_invalid)."
+    )
+elif visible_wide_spans:
+    _msg = (
         "⚠ Along-track placement is a wide estimate in the shaded stretch(es): the "
         "trajectory layer's σ is large there because GPS evidence was sparse or "
         "rejected, so the car's position on the ruler is carried by the OBD prior, "
         "not measured. The channel *values* (speed, throttle, G) are unaffected — "
         "only their position along the x-axis is approximate."
     )
+    if _flagged:
+        _corners = ", ".join(f"{cid} ({'/'.join(rs)})" for cid, rs in _flagged)
+        _msg += (
+            f" The section-timing audit flags {_corners} on this lap — those times are "
+            "shown as estimates ± σ and excluded from the ‘fastest’ ranking; hover a row "
+            "in the per-corner section-time table for the exact check."
+        )
+    st.caption(_msg)
 
 # Selected-lap label: match the reference's units — section time in a section
 # view, full lap time in a full-lap view — so the legend compares like with like.
