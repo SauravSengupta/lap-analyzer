@@ -413,7 +413,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     evidence extraction → corridor weighting → robust knot fit → slope-bound
     projection → δ=0 prior blend → σ terms → s_hat = maximum.accumulate(dl + δ̂).
     """
-    g = lap_samples.sort_values("t")
+    g = lap_samples.sort_values("t", kind="stable")
     t = g["t"].to_numpy(dtype=float)
     dl = g["dist_lap_m"].to_numpy(dtype=float)
     td = g["track_dist_m"].to_numpy(dtype=float)

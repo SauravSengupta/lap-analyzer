@@ -132,12 +132,12 @@ def _top_decile_traces(track: str, filter_version: int = _GLITCH_FILTER_VERSION)
     frames = []
     for sid, lp in pool:
         try:
-            s = _samples(track, sid, lp).sort_values("t").reset_index(drop=True)
+            s = _samples(track, sid, lp).sort_values("t", kind="stable").reset_index(drop=True)
             traj = estimate_trajectory(s, corridor, frame)
         except Exception:
             continue
-        # traj is time-sorted; s is already time-sorted with unique t, so s_hat
-        # aligns positionally (same alignment analysis relies on).
+        # traj is time-sorted; s is stably time-sorted and estimate_trajectory sorts
+        # by t with the same stable kind, so s_hat aligns positionally (even on tied t).
         s = s.assign(s_hat=traj.s_hat)
         frames.append(s.assign(lap_key=f"{sid}-L{lp}"))
     if not frames:
@@ -731,11 +731,12 @@ def _sigma_wide_spans(s_hat: np.ndarray, sigma_m: np.ndarray) -> list[tuple[floa
 
 
 def _prepare_lap_trace(sid_: str, lap_: int) -> tuple[pd.DataFrame, list[tuple[float, float]]]:
-    raw = _samples(track, sid_, lap_).sort_values("t").reset_index(drop=True)
+    raw = _samples(track, sid_, lap_).sort_values("t", kind="stable").reset_index(drop=True)
     corridor, frame = _corridor_and_frame(track)
     traj = estimate_trajectory(raw, corridor, frame)
-    # traj is time-sorted; raw is already time-sorted with unique t, so s_hat / σ_m
-    # align positionally (the same alignment analysis.section_times relies on).
+    # traj is time-sorted; raw is stably time-sorted and estimate_trajectory sorts
+    # by t with the same stable kind, so s_hat / σ_m align positionally even when
+    # timestamps tie (the same alignment analysis.section_times relies on).
     spans = _sigma_wide_spans(traj.s_hat, traj.sigma_m)
     out = raw.assign(s_hat=traj.s_hat, sigma_m=traj.sigma_m).sort_values("s_hat")
     out = _insert_gap_breaks(out, "s_hat", gap_threshold=30.0)
@@ -841,7 +842,7 @@ if best_ref is not None and (best_ref[0] != sid or best_ref[1] != lap):
         """(s_hat, t, obd_distance) for one lap, time-sorted. s_hat is monotone by
         construction, so np.interp maps ruler position -> elapsed time cleanly; the
         estimator handles bad GPS internally, so no glitch pre-filtering is needed."""
-        s = _samples(track, sid_, lap_).sort_values("t").reset_index(drop=True)
+        s = _samples(track, sid_, lap_).sort_values("t", kind="stable").reset_index(drop=True)
         if len(s) < 2:
             return None
         corridor, frame = _corridor_and_frame(track)
