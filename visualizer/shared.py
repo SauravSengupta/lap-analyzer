@@ -70,15 +70,25 @@ def samples(track: str, session_id: str, lap: int) -> pd.DataFrame:
     """One lap's samples (long_g is already canonical: + = accel, − = brake).
 
     `rpm` is included so the downshift page can derive gear; app.py ignores it.
-    `track_dist_m`/`dist_lap_m` feed the fused distance axis (see fused_axis.py).
+    `track_dist_m`/`dist_lap_m` + `lat_g`/`speed_mph_gps` + the drift-correction
+    columns feed the trajectory estimator (estimate_trajectory), which the
+    visualizer runs directly for the along-track axis and σ shading. The drift
+    columns are load-bearing: estimate_trajectory drift-corrects lat/long (design
+    R5) only when they are present, so omitting them here would make the plotted
+    s_hat/σ disagree with the section-times table (both come from the same
+    estimator, and analysis loads these columns via _read_traj_samples).
     `lat`/`long` are the raw GPS path — every gate-crossing consumer of this
     loader (analysis.span_time on the downshift page, app.py's section-time
     tooltip) reads them, so they must be here or those callers KeyError.
     """
-    s = load_samples(track, session_id, lap)[
-        ["t", "lap", "track_dist_m", "dist_lap_m", "speed_mph", "speed_mph_gps",
-         "throttle_norm", "long_g", "lat_g", "rpm", "lat", "long"]
-    ].copy()
+    df = load_samples(track, session_id, lap)
+    cols = ["t", "lap", "track_dist_m", "dist_lap_m", "speed_mph", "speed_mph_gps",
+            "throttle_norm", "long_g", "lat_g", "rpm", "lat", "long"]
+    s = df[cols].copy()
+    # Drift-correction offsets (design R5). Present on every real session; default
+    # to 0.0 (no correction) when a session lacks them, matching _read_traj_samples.
+    for c in ("gps_drift_lat_m", "gps_drift_lon_m"):
+        s[c] = df[c].to_numpy() if c in df.columns else 0.0
     return s
 
 
