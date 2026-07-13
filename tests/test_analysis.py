@@ -481,19 +481,39 @@ def test_span_time_immune_to_lateral_line_offset(make_lap_samples):
     assert off.time_s == pytest.approx(on.time_s, abs=0.05)
 
 
-def test_range_section_times_emits_confidence_columns(sample_data_root):
-    # SPEC: gate-crossing section times run end-to-end on the committed ridge
-    # bundle and carry a GPS-timing-confidence flag. A transit is emitted whenever
-    # both gates are crossed; timing_reliable says whether the crossing time is
-    # trustworthy (else section_time_s is the OBD-anchored fallback).
+_SECTION_SCHEMA = [
+    "session_id", "lap", "corner_id", "section_time_s", "sigma_t_s", "status",
+    "driven_m", "rank_eligible", "timing_gap_s", "timing_reliable", "checks_json"]
+_RANGE_SCHEMA = [c for c in _SECTION_SCHEMA if c != "corner_id"]
+
+
+def test_section_times_new_schema_always_emits(sample_data_root):
+    # SPEC (v11): section_times emits one row per (session, lap, corner) — ALWAYS
+    # (R10) — value+confidence from the trajectory layer; timing_reliable is a compat
+    # alias of rank_eligible; every corner in the track appears.
+    from lap_analyzer.analysis import section_times
+    td = _ridge_track_def()
+    df = section_times("ridge", td)
+    assert list(df.columns) == _SECTION_SCHEMA
+    assert set(df["status"]) <= {"ok", "no_coverage", "rescale_invalid"}
+    assert df["rank_eligible"].dtype == bool
+    assert (df["timing_reliable"] == df["rank_eligible"]).all()   # compat alias
+    assert set(df["corner_id"]) == {c["id"] for c in td["corners"]}
+    ok = df[df["status"] == "ok"]
+    assert ok["section_time_s"].notna().all() and (ok["sigma_t_s"] >= 0).all()
+    json.loads(df["checks_json"].iloc[0])                          # parseable audit records
+
+
+def test_range_section_times_new_schema(sample_data_root):
+    # SPEC (v11): range_section_times shares the schema minus corner_id; always emits.
     from lap_analyzer.analysis import range_section_times
     td = _ridge_track_def()
     df = range_section_times("ridge", td, "T6", "T6")
-    assert list(df.columns) == [
-        "session_id", "lap", "section_time_s", "timing_gap_s", "timing_reliable"]
-    assert df["timing_reliable"].dtype == bool
-    assert (df["section_time_s"] > 0).all()
-    assert len(df) > 10                      # many laps emit across the bundle
+    assert list(df.columns) == _RANGE_SCHEMA
+    assert df["rank_eligible"].dtype == bool
+    assert (df["timing_reliable"] == df["rank_eligible"]).all()
+    assert set(df["status"]) <= {"ok", "no_coverage", "rescale_invalid"}
+    assert (df[df["status"] == "ok"]["section_time_s"] > 0).all()
     assert df["session_id"].nunique() >= 2
 
 
