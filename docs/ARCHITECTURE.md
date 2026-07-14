@@ -138,9 +138,10 @@ to the centerline.
   unbiased.
 - Pure data pipeline — adding a track just needs Maps pins, no further curation.
 
-A passive centerline-based drift estimate is computed alongside (median of
-per-sample offsets to the centerline) and stored as a diagnostic, but it is
-**not** used for correction — see the rejected approaches.
+A passive centerline-based drift estimate (median of per-sample offsets to the
+centerline) was once computed alongside as a diagnostic; it was never consumed and
+was removed in the GPS-trust cleanup (PR 5). Only the anchor-based correction is
+computed — see the rejected approaches for why centerline-based drift lost.
 
 **Approaches we rejected:**
 

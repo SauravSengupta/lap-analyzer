@@ -83,18 +83,17 @@ Selecting `From`/`To` focuses the whole page on that stretch:
 - **full lap** compares whole laps.
 
 Section times come from `lap_analyzer.analysis.section_times` /
-`range_section_times`, which time each lap between two **gates** — line segments
-laid across the track (perpendicular to the centerline, ±40 m wide) at the section
-bounds — measured where the lap's GPS path crosses them. Each transit carries a
-**GPS-timing-confidence** flag (`timing_reliable`): a gate crossing can only be
-timed as finely as the GPS sampled, so `crossing_gap_s` measures the elapsed time
-between the good GPS fixes bracketing a gate. When that gap is below
-`CONFIDENCE_GAP_S` (0.4 s) the gate-crossing time is used (line-length preserved);
-when GPS was too coarse (≈1 Hz) or a teleport punctured the bracket, the time falls
-back to an OBD-anchored estimate, is flagged, and is **excluded from the "fastest
-through" ranking** — surfaced with a warning rather than dropped. See
-[GPS_TRUST.md](GPS_TRUST.md). The channel chart adds ±200 m of context on each side
-so the adjacent brake zones are visible.
+`range_section_times`, which are thin shells over the **trajectory layer**
+(`trajectory.estimate_trajectory` once per lap, then `section_timing` per corner).
+The section is timed where the lap's monotone along-track estimate `s_hat` crosses
+the two section-bound ruler positions — value and confidence from one pass, so they
+can never disagree, and a scalar position crosses `s_hat` exactly once (ghost
+crossings are impossible). Each transit carries its `sigma_t_s` and a
+`rank_eligible` flag: only tier-A (σ_t ≤ 0.10 s) transits win the "fastest through"
+ranking. A coarse-GPS or Mode-4-drift transit gets a wide σ, is shown as an
+"estimate ± σ" and **excluded from ranking** — surfaced with a warning rather than
+dropped. See [GPS_TRUST.md](GPS_TRUST.md). The channel chart adds ±200 m of context
+on each side so the adjacent brake zones are visible.
 
 ## The Δt panel
 
@@ -111,12 +110,13 @@ runs **below** speed-only, a shorter line is buying back time despite lower
 speed; where it runs above, your line is longer than the best lap's. This answers
 "am I down because I'm slow, or because my line is longer?"
 
-The two laps are aligned on a **fused distance axis** (`lap_analyzer.fused_axis`),
-not raw `track_dist_m`. Raw `track_dist_m` jitters sample-to-sample, and its
-derivative drives the Δt slope, so a few metres of GPS noise would fabricate
-phantom wobble. The fused axis is OBD-smooth and monotonic but still bends onto
-the centerline at corner scale, so the slope tracks real speed-and-line without
-flattening genuine line-length differences.
+The two laps are aligned on the **trajectory ruler `s_hat`**
+(`trajectory.estimate_trajectory`), not raw `track_dist_m`. Raw `track_dist_m`
+jitters sample-to-sample, and its derivative drives the Δt slope, so a few metres
+of GPS noise would fabricate phantom wobble. `s_hat` is OBD-smooth and monotone by
+construction but still bends onto the centerline at corner scale (the estimator
+handles bad GPS internally), so the slope tracks real speed-and-line without
+flattening genuine line-length differences and without any glitch pre-filtering.
 
 ## Three apex definitions
 
@@ -140,11 +140,14 @@ The app honors the split described in [PIPELINE.md](PIPELINE.md) and
 
 - **Kinematic channels** (speed, throttle, long-G) are trusted on *every* lap —
   OBD data is unaffected by GPS issues — so they always draw.
-- **Spatial alignment** (how a lap plots against `track_dist_m`, and which laps
-  are eligible as the reference) drops GPS-glitched samples per lap
-  (`shared.drop_gps_glitches`) and gates reference eligibility on
-  `transit_reliable` / `lap_reliable`. When samples are dropped from a lap's line,
-  a caption says so.
+- **Spatial alignment** (how a lap plots along the track, and which laps are
+  eligible as the reference): every trace is drawn on the trajectory ruler `s_hat`,
+  which is monotone by construction and places GPS-glitched samples at their honest
+  along-track position — no per-lap sample dropping. Stretches where the estimate is
+  wide (σ large — sparse or rejected GPS evidence) are shaded and explained in a
+  banner. Reference eligibility still gates on the spatial `transit_reliable` /
+  `lap_reliable` flags, which certify a lap's **lateral** line position (see
+  [GPS_TRUST.md](GPS_TRUST.md)).
 
 ## Track-specific pages
 
