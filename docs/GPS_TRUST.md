@@ -184,4 +184,5 @@ flag from a *separate* pass over masked GPS, alongside independent silos
 Those silos each saw one shadow of the underlying problem and were retired in the
 2026-07 migration (PRs 0–5): value and confidence now come from one pass, and
 `grep` finds exactly one place — the trajectory layer — that decides whether GPS is
-trustworthy.
+trustworthy. The full story of that redesign — why the silos accumulated, the dead
+ends, and what generalises — is in [DESIGN-JOURNEY.md](DESIGN-JOURNEY.md).

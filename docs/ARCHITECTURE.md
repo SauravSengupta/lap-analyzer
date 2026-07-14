@@ -306,12 +306,13 @@ driven-distance band, a line-length consistency residual) that only ever **infla
 result: six silos collapsed into one module and the codebase got *smaller*, while
 `grep` now finds exactly one place that decides whether GPS is trustworthy.
 
-This design was not guessed at: it came from a four-design panel scored by three
-adversarial judges (unanimous winner), a working prototype validated on real laps,
-and a corpus audit over ~6,900 transits — which is where the twelve non-negotiable
-rules and every provenance-stamped constant in `trajectory.py` come from. The trust
-model, the four modes with real numbers, and the honest limits are all in
-[GPS_TRUST.md](GPS_TRUST.md).
+This design was not guessed at: it came from a panel of competing approaches scored
+by independent adversarial review, a working prototype validated on real laps, and a
+corpus audit over ~6,900 transits — which is where the provenance-stamped constants
+in `trajectory.py` come from. The trust model with its real numbers is in
+[GPS_TRUST.md](GPS_TRUST.md); the full narrative of the redesign — the dead ends, the
+39.79 s ghost, and the generalisable lessons — is in
+[DESIGN-JOURNEY.md](DESIGN-JOURNEY.md).
 
 ---
 

@@ -97,7 +97,7 @@ visualizer/          # Streamlit app + track-specific analysis pages
 tests/               # pytest suite + tests/SPEC.md (intent-first behavioral spec)
 scripts/             # bootstrap & diagnostic tools (e.g. seed_pir_corners.py)
 tracks/              # per-track JSON definitions (ridge.json, pir.json)
-docs/                # ARCHITECTURE · PIPELINE · GPS_TRUST · VISUALIZER · NEW-TRACK
+docs/                # ARCHITECTURE · PIPELINE · GPS_TRUST · DESIGN-JOURNEY · VISUALIZER · NEW-TRACK
 data/
   samples/           # committed demo bundle (3 sessions/track + sample corpus)
   raw/ sessions/ corpus/ notes/   # your data — gitignored, not shipped
@@ -111,6 +111,7 @@ local.
 - [docs/PIPELINE.md](docs/PIPELINE.md) — CLI runbook, CSV column contract, output schema.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — design rationale and the approaches that were rejected.
 - [docs/GPS_TRUST.md](docs/GPS_TRUST.md) — the GPS-vs-OBD trust model: what to trust for which question, the four GPS failure modes, and the one trajectory layer (`s_hat` + σ) that decides it.
+- [docs/DESIGN-JOURNEY.md](docs/DESIGN-JOURNEY.md) — how the GPS-trust layer was rebuilt from six detectors into one estimate, the dead ends, and the generalisable lessons.
 - [docs/VISUALIZER.md](docs/VISUALIZER.md) — what the Streamlit app shows and how to read it.
 - [docs/NEW-TRACK.md](docs/NEW-TRACK.md) — bootstrap a new track end-to-end.
 - [tests/SPEC.md](tests/SPEC.md) — the intent-first behavioral spec the test suite is derived from.
