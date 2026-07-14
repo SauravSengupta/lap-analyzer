@@ -153,12 +153,15 @@ def compute_quality(track: str) -> pd.DataFrame:
     # the SAME estimation pass as the value — one σ, one flag. NaN when a corpus
     # predates the trajectory layer (no rank_eligible column).
     if "rank_eligible" in out.columns:
-        out["transit_reliable_traj"] = out["rank_eligible"].astype(bool)
+        out["transit_reliable_traj"] = out["rank_eligible"].astype("boolean")
         out["lap_reliable_traj"] = out.groupby(["session_id", "lap"])[
-            "transit_reliable_traj"].transform("min").astype(bool)
+            "rank_eligible"].transform("min").astype("boolean")
     else:
-        out["transit_reliable_traj"] = np.nan
-        out["lap_reliable_traj"] = np.nan
+        # Pre-trajectory corpus: the σ tier is UNKNOWN, not False. Use the nullable
+        # boolean dtype (pd.NA) so a downstream `.astype(bool)` raises loudly instead
+        # of silently reading a float NaN as True.
+        out["transit_reliable_traj"] = pd.Series(pd.NA, index=out.index, dtype="boolean")
+        out["lap_reliable_traj"] = pd.Series(pd.NA, index=out.index, dtype="boolean")
 
     return out
 
