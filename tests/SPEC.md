@@ -430,20 +430,6 @@ small hand-built dict `{"corners": [{"id","start_m","end_m"}...],
 - **Invariant:** the window always contains the corner box; `start ≥ 0`; `end`
   never spills past the next corner's start.
 
-## analysis._first_crossing_t
-
-Import: `from lap_analyzer.analysis import _first_crossing_t`. Signature:
-`(xs: np.ndarray, ts: np.ndarray, target: float, after_t: float | None = None) -> float | None`.
-
-- **Contract:** time of the first **upward** crossing of `target`
-  (`xs[i] < target ≤ xs[i+1]`), linearly interpolated between samples.
-- **Invariants:**
-  - no upward crossing → `None`.
-  - `after_t` restricts to crossings at/after that time.
-  - exact crossing on a sample / zero-width step (`xs[i+1] == xs[i]`) → returns
-    `ts[i]` (no division by zero).
-  - For `xs=[0,10]`, `ts=[0,1]`, `target=5` → `0.5`.
-
 ## analysis.find_gear_bands
 
 Import: `from lap_analyzer.analysis import find_gear_bands`. Signature:
@@ -517,11 +503,12 @@ and confidence come from ONE evidence pass (design R1). See `docs/GPS_TRUST.md`.
     `rank_eligible`.
   - coarse GPS (Mode 3) → value still ≈ the true elapsed time (the estimator
     reverts toward the OBD backbone) but `sigma_s` widens; never silently dropped.
-  - zero GPS evidence → `time_s` equals the legacy `_obd_anchored_time` to 1e-6.
+  - zero GPS evidence → `time_s` equals the OBD-anchored fallback limit to 1e-6:
+    with `δ̂ ≡ 0`, `s_hat ≡ dist_lap_m` so the crossing time is just `t`
+    interpolated at the OBD-distance bounds.
 
 `section_times` / `range_section_times` emit `section_time_s, sigma_t_s, status,
-driven_m, rank_eligible, checks_json` plus compat columns `timing_gap_s` and
-`timing_reliable` (alias of `rank_eligible`).
+driven_m, rank_eligible, checks_json` (one row per section, always — design R10).
 
 ## analysis.section_range_bounds
 
@@ -706,9 +693,9 @@ on one lap's estimate, and reports honest per-section σ with three physical σ-
   are the times where the monotone `s_hat` crosses `dist_a`, `dist_b`;
   `time_s = t_b - t_a`. A scalar ruler position crosses a monotone `s_hat` exactly
   once, so ghost crossings are structurally impossible.
-- **R6 exact-equality:** when the lap has no accepted GPS evidence (δ̂≡0), the emitted
-  `time_s` equals the legacy `analysis._obd_anchored_time(t, dist_lap_m, a, b)` to
-  within 1e-6 s — the zero-evidence limit reproduces the OBD-anchored fallback.
+- **R6 exact-equality:** when the lap has no accepted GPS evidence (δ̂≡0), `s_hat ≡
+  dist_lap_m`, so the emitted `time_s` equals the OBD-anchored fallback limit —
+  `t` interpolated at the OBD-distance bounds `a`/`b` — to within 1e-6 s.
 - **σ is correlation-aware** (judge-mandated; independence is wrong-signed for
   Mode 4): `Var(T) = [σ_A² + σ_B² − 2ρσ_Aσ_B] / (v_A·v_B)` with `σ_A`/`σ_B` the
   posterior σ at the two crossings and `ρ = RHO_SECTION` a corpus-fitted constant.

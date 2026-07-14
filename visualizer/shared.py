@@ -25,8 +25,10 @@ from lap_analyzer.config import tracks_dir
 # v11 (2026-07-12, gps-trust PR 2): section_times / span_time / range_section_times
 # now read the trajectory layer (estimate_trajectory + section_timing) — value AND
 # confidence from one pass, always-emit rows, new sigma_t_s/status/rank_eligible/
-# checks_json columns; timing_reliable is a compat alias of rank_eligible.
-_SECTION_TIMES_VERSION = 11
+# checks_json columns.
+# v12 (2026-07-13, gps-trust PR 5): dropped the v11 compat columns timing_gap_s and
+# timing_reliable (crossing_gap_s retired); rank_eligible is the rankability flag.
+_SECTION_TIMES_VERSION = 12
 
 
 def current_track() -> str:

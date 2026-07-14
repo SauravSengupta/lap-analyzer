@@ -307,8 +307,9 @@ def test_section_timing_sigma_is_correlation_aware():
 
 def test_section_timing_r6_zero_gps_equals_obd_anchored(make_lap_samples):
     # SPEC R6: a lap with no accepted GPS evidence (δ̂≡0) → emitted time equals the
-    # legacy analysis._obd_anchored_time to 1e-6 — the OBD-anchored fallback limit.
-    from lap_analyzer.analysis import _obd_anchored_time
+    # OBD-anchored fallback limit to 1e-6. With δ̂≡0, s_hat ≡ dist_lap_m, so the
+    # crossing time reduces to interpolating t at the OBD-distance bounds (this is
+    # exactly what the retired analysis._obd_anchored_time computed).
     from lap_analyzer.gates import TrackFrame
     from lap_analyzer.trajectory import estimate_trajectory, section_timing
     corr = _straight_corridor(n=300)
@@ -316,14 +317,16 @@ def test_section_timing_r6_zero_gps_equals_obd_anchored(make_lap_samples):
         {"lat": [45.0, 45.0], "long": [-122.0, -121.99]}))
     n = 200
     dl = np.linspace(0.0, 2500.0, n)
+    t = np.arange(n) * 0.1
     # constant track_dist_m → no fresh fixes → zero GPS evidence (δ̂≡0 prior only)
-    lap = make_lap_samples(n=n, t=np.arange(n) * 0.1, dist_lap_m=dl,
+    lap = make_lap_samples(n=n, t=t, dist_lap_m=dl,
                            track_dist_m=np.full(n, 1250.0), lat_g=np.zeros(n))
     traj = estimate_trajectory(lap, corr, frame)
     assert not traj.evidence.any()
     a, b = 500.0, 1500.0
     st = section_timing(traj, a, b, corr)
-    expected = _obd_anchored_time(lap["t"].to_numpy(), dl, a, b)
+    # OBD-anchored oracle: elapsed t between the OBD-distance crossings of a and b.
+    expected = float(np.interp(b, dl, t) - np.interp(a, dl, t))
     assert st.time_s == pytest.approx(expected, abs=1e-6)
 
 
