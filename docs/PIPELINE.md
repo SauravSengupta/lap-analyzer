@@ -271,7 +271,6 @@ After `label_corners`, each `samples.parquet` gains:
 | `gps_drift_lat_m`, `gps_drift_lon_m` | per-lap anchor-based drift correction applied (meters) |
 | `gps_drift_n_anchors` | how many calibration anchors were found for this lap |
 | `gps_drift_disagreement_m` | spread of per-anchor offsets (low = trustworthy drift estimate) |
-| `gps_drift_*_centerline`, `gps_drift_region_disagreement_m`, `gps_drift_outliers_filtered` | passive centerline-based drift diagnostics (not used for correction) |
 
 > **`dist_lap_m` vs `dist_m` — important.** `dist_lap_m` is rescaled per lap to
 > the configured `lap_length_internal_m`, so for any complete lap its maximum is
