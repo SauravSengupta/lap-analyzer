@@ -735,42 +735,6 @@ real δ), not shrunk toward the OBD backbone.
 
 ---
 
-## fused_axis.compute_fused_dist
-
-Import: `from lap_analyzer.fused_axis import compute_fused_dist`. Signature:
-`(samples: pd.DataFrame, smooth_window=25) -> np.ndarray`. Needs `t, dist_lap_m,
-track_dist_m`.
-
-- **Contract:** `fused = dist_lap_m + lowpass(track_dist_m − dist_lap_m)` — OBD
-  distance supplies the smooth monotone base; the low-frequency part of the GPS−OBD
-  offset bends it onto the centerline.
-- **Invariants:**
-  - `< 2` rows → a copy of `dist_lap_m`.
-  - **output is monotonic non-decreasing** by construction (cumulative max),
-    even when `track_dist_m` jitters or steps backward.
-  - output is aligned to the input row order (rows may be unsorted by `t`).
-  - a sample whose `|track_dist_m − dist_lap_m| ≥ 50 m` (a teleport) does not drag
-    the low-pass — its offset is interpolated over from good neighbors.
-  - on clean data where `track_dist_m ≈ dist_lap_m`, fused ≈ `dist_lap_m`.
-
-## fused_axis.glitch_runs
-
-Import: `from lap_analyzer.fused_axis import glitch_runs, GLITCH_OFFSET_M`.
-Signature: `(track_dist_m, dist_lap_m, fused, threshold_m=GLITCH_OFFSET_M,
-merge_gap_m=0.0) -> list[tuple[float, float]]`. Parallel arrays in one
-time-sorted order; `fused` is `compute_fused_dist` for those samples.
-
-- **Contract:** one `(fused_lo, fused_hi)` span per contiguous run of samples with
-  `|track_dist_m - dist_lap_m| >= threshold_m`, in fused coordinates.
-- **Invariants:**
-  - `[]` when no sample exceeds the threshold.
-  - separate glitched runs -> separate spans; a single contiguous run -> one span.
-  - `GLITCH_OFFSET_M == 50.0` (shared with compute_fused_dist's teleport mask).
-  - runs whose fused gap is <= `merge_gap_m` coalesce into one span;
-    `merge_gap_m=0` (default) never merges.
-
----
-
 ## centerline.build_centerline
 
 Import: `from lap_analyzer.centerline import build_centerline`. Signature:

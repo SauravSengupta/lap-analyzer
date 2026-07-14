@@ -113,9 +113,9 @@ _GLITCH_FILTER_VERSION = 7
 @st.cache_resource(show_spinner="loading trajectory corridor (one-time)")
 def _corridor_and_frame(track: str):
     """The per-track corridor + TrackFrame the trajectory estimator needs, loaded
-    once. The visualizer has the track, so per design PR-3 it calls
-    estimate_trajectory itself (the fused_axis helper is corridor-less and stays a
-    legacy shim). cache_resource: these are shared read-only objects, not data."""
+    once. The visualizer has the track, so (per design PR-3) it calls
+    estimate_trajectory itself for the along-track axis. cache_resource: these are
+    shared read-only objects, not data."""
     return load_corridor(track), TrackFrame.from_centerline(load_centerline(track))
 
 
