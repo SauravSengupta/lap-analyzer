@@ -268,42 +268,108 @@ def test_no_lap_reliable_row_has_unreliable_sibling(ridge_quality):
 # reference-session exclusion
 # ---------------------------------------------------------------------------
 
-def test_reference_sessions_excluded_from_corpus_stats(sample_data_root, ridge_quality):
-    # SPEC: quality.compute_quality — reference sessions are excluded from the
-    #       corpus-wide stats. The Ridge sample notes mark 20260516-114331 as a
-    #       reference session; it must not appear in the corpus-stat frame.
-    # (We assert exclusion from the returned corpus-stat frame; the sample bundle
-    #  has no on-disk corners.parquet for that reference id, so absence is the
-    #  observable contract.)
-    df = ridge_quality
-    assert "20260516-114331" not in set(df["session_id"].astype(str))
+def test_reference_session_scored_but_not_in_baseline(monkeypatch, tmp_path):
+    # SPEC (PR4): a reference session is SCORED (gets quality columns and appears in
+    # the frame) but never DEFINES the corpus baseline — its pace decile is NaN and
+    # its extreme metric values do not shift the real sessions' z-scores.
+    import json
+    root = tmp_path / "sessions" / "ridge"
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    (tmp_path / "notes").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "notes" / "ridge.json").write_text(
+        json.dumps({"20260101-090000": {"reference": True, "reason": "instructor"}}))
+
+    _write_session(root, "20260101-100000", entry_speeds=[50.0, 52.0, 54.0, 56.0, 58.0],
+                   obd_present=True, rank_eligible=[True] * 5,
+                   latg_offsets=[1.0, 2.0, 3.0, 4.0, 5.0])
+    z_without = compute_quality("ridge").set_index(
+        ["session_id", "lap"])["latg_peak_offset_z"]
+
+    # Add the reference session with wildly extreme values.
+    _write_session(root, "20260101-090000", entry_speeds=[999.0], obd_present=True,
+                   rank_eligible=[True], latg_offsets=[999.0])
+    out = compute_quality("ridge")
+
+    ref_rows = out[out["session_id"] == "20260101-090000"]
+    assert len(ref_rows) == 1                                   # scored, present in frame
+    assert bool(ref_rows["is_reference"].iloc[0]) is True
+    assert "latg_peak_offset_z" in ref_rows.columns            # got the quality columns
+    assert ref_rows["lap_pace_decile"].isna().all()           # not in the pace ranking
+    # The real session's z-scores are unmoved by the reference's extreme offset.
+    z_with = out.set_index(["session_id", "lap"])["latg_peak_offset_z"]
+    for lap in range(5):
+        assert z_with[("20260101-100000", lap)] == pytest.approx(
+            z_without[("20260101-100000", lap)], abs=1e-9)
 
 
 # ---------------------------------------------------------------------------
 # GPS-only sessions do not move the OBD entry_speed_z baseline
 # ---------------------------------------------------------------------------
 
-def _write_session(root, sid, *, entry_speeds, obd_present):
+def _write_session(root, sid, *, entry_speeds, obd_present,
+                   rank_eligible=None, latg_offsets=None):
     """Write a minimal corners.parquet + laps.csv for a synthetic session.
 
     One corner (T1), one clean lap per entry speed. Only the columns
-    compute_quality consumes are populated.
+    compute_quality consumes are populated. `rank_eligible` (per-lap bool list)
+    adds the trajectory A-tier column; `latg_offsets` overrides the per-lap
+    latg_peak_offset_m (defaults 0.0).
     """
     sdir = root / sid
     sdir.mkdir(parents=True, exist_ok=True)
     rows, laps = [], []
     for i, es in enumerate(entry_speeds):
-        rows.append({
+        row = {
             "session_id": sid, "date": "2026-01-01", "lap": i, "corner_id": "T1",
-            "entry_speed_mph": float(es), "latg_peak_offset_m": 0.0,
+            "entry_speed_mph": float(es),
+            "latg_peak_offset_m": float(latg_offsets[i]) if latg_offsets else 0.0,
             "track_dist_offset_max_m": 1.0, "gps_drift_lat_m": 0.0,
             "gps_drift_lon_m": 0.0, "gps_drift_disagreement_m": 0.0,
             "obd_present": obd_present,
-        })
+        }
+        if rank_eligible is not None:
+            row["rank_eligible"] = bool(rank_eligible[i])
+        rows.append(row)
         laps.append({"session_id": sid, "lap": i, "lap_time_s": 100.0 + i,
                      "is_clean": True})
     pd.DataFrame(rows).to_parquet(sdir / "corners.parquet", index=False)
     pd.DataFrame(laps).to_csv(sdir / "laps.csv", index=False)
+
+
+def test_transit_reliable_traj_mirrors_rank_eligible(monkeypatch, tmp_path):
+    # SPEC (PR4): transit_reliable_traj reuses the labeler's section A-tier
+    # rank_eligible verdict; the spatial transit_reliable is still dual-written.
+    root = tmp_path / "sessions" / "ridge"
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    _write_session(root, "20260101-100000", entry_speeds=[50.0, 52.0, 54.0],
+                   obd_present=True, rank_eligible=[True, False, True])
+    out = compute_quality("ridge").sort_values("lap").reset_index(drop=True)
+    assert "transit_reliable" in out.columns          # spatial flag still present
+    assert "transit_reliable_traj" in out.columns
+    assert list(out["transit_reliable_traj"].astype(bool)) == [True, False, True]
+    # lap_reliable_traj is the per-lap min; each synthetic lap has one corner, so
+    # it equals transit_reliable_traj here.
+    assert list(out["lap_reliable_traj"].astype(bool)) == [True, False, True]
+
+
+def test_z_baseline_excludes_rank_ineligible(monkeypatch, tmp_path):
+    # SPEC (PR4): per-corner z baselines (median/MAD) are defined by rank-eligible
+    # rows only. A rank-INELIGIBLE transit with an extreme latg_peak_offset must not
+    # shift the eligible rows' z-scores.
+    root = tmp_path / "sessions" / "ridge"
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    offsets = [1.0, 3.0, 5.0, 7.0, 9.0]
+    _write_session(root, "s_a", entry_speeds=[50.0] * 5, obd_present=True,
+                   rank_eligible=[True] * 5, latg_offsets=offsets)
+    z_without = compute_quality("ridge").set_index(["session_id", "lap"])["latg_peak_offset_z"]
+
+    # Add a rank-ineligible session with an extreme offset that WOULD move a naive median.
+    _write_session(root, "s_b", entry_speeds=[50.0], obd_present=True,
+                   rank_eligible=[False], latg_offsets=[999.0])
+    z_with = compute_quality("ridge").set_index(["session_id", "lap"])["latg_peak_offset_z"]
+
+    for lap in range(5):
+        assert z_with[("s_a", lap)] == pytest.approx(z_without[("s_a", lap)], abs=1e-9)
 
 
 # SPEC: quality.compute_quality — entry_speed_z baseline excludes GPS-only sessions.

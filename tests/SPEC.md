@@ -287,12 +287,24 @@ via `make_lap_samples`, overriding `track_dist_m`, `speed_mph`, `lat_g`, etc.
 `id, name, start_m, end_m, apex_m, secondary_apex_m, type, notes`** — pass them
 all (`name`/`notes` may be `None`, `secondary_apex_m` `None` or a float).
 
-- **Edge case:** fewer than 3 samples inside `[start_m, end_m]` → returns `None`.
+- **Along-track ruler (design PR-4):** every along-track position field is read
+  from the trajectory ruler **`s_hat`** (a column the caller attaches — the car's
+  monotone, drift/glitch-corrected position on the canonical ruler), NOT raw
+  `track_dist_m`. The corner box `[start_m, end_m]`, `min_speed_dist_m`,
+  `latg_peak_dist_m`, entry/exit positions, interpolated speeds, and input-timing
+  positions are all in `s_hat`. On clean data `s_hat == track_dist_m` (so tests
+  that only set `track_dist_m` are unaffected — `make_lap_samples` defaults
+  `s_hat` to `track_dist_m`); on a glitched lap the two disagree and positions
+  follow `s_hat`. `track_dist_offset_*` stay in the raw-projection frame (they are
+  the kd-tree diagnostic the dual-written spatial reliability flag reads).
+- **`traj_sigma_max_m`:** the widest per-sample `sigma_m` inside the corner box —
+  the along-track confidence of the transit's placement (high → prior/gap-carried).
+- **Edge case:** fewer than 3 samples inside `[start_m, end_m]` (on `s_hat`) → `None`.
 - **Invariants (apex metrics — ARCHITECTURE §4):**
   - `apex_dist_offset_m == round(min_speed_dist_m − corner.apex_m, 2)`.
   - `latg_peak_offset_m == round(latg_peak_dist_m − corner.apex_m, 2)`.
-  - `latg_peak_dist_m` is the `track_dist_m` of the **max |lat_g|** sample inside
-    the corner; `min_speed_dist_m` is the `track_dist_m` of the min-speed sample.
+  - `latg_peak_dist_m` is the `s_hat` of the **max |lat_g|** sample inside the
+    corner; `min_speed_dist_m` is the `s_hat` of the min-speed sample.
   - input-timing offsets (`brake_on_dist_m`, `throttle_lift_dist_m`,
     `wot_dist_m`, …) are **offsets from `corner.start_m`** (value − start_m), or
     `None` when the event never occurs in the window.
@@ -316,13 +328,20 @@ all (`name`/`notes` may be `None`, `secondary_apex_m` `None` or a float).
 ## labeler.build_session_corners
 
 Import: `from lap_analyzer.labeler import build_session_corners`. Signature:
-`build_session_corners(samples, laps, track, session_id, date) -> pd.DataFrame`.
+`build_session_corners(samples, laps, track, session_id, date, corridor=None,
+frame=None) -> pd.DataFrame`.
 **It operates on already-labeled `samples` (a DataFrame carrying `track_dist_m`,
 `corner`, and `gps_drift_*` columns) plus the `laps` DataFrame — it does NOT read
 a session directory or take a `ReferenceIndex`.** Drive it from a
 `sample_data_root` session, whose `samples.parquet` is already labeled:
 `build_session_corners(pd.read_parquet(.../samples.parquet),
 pd.read_csv(.../laps.csv), track, "<sid>", "<YYYY-MM-DD>")`.
+
+- **Trajectory ruler (design PR-4):** per clean lap it runs `estimate_trajectory`
+  and attaches `s_hat`/`sigma_m` before building transits, so positions are on the
+  corrected ruler. The `corridor`/`frame` are passed by the CLI (built once for the
+  whole rebuild); when omitted they are loaded/built on demand from `track.track_id`
+  (single-session use / tests), so the documented call above still works.
 
 - **Contract:** emits one row per (clean lap × corner). Only laps with
   `is_clean == True` are processed; laps with < 50 samples are skipped; the
@@ -355,12 +374,24 @@ Import: `from lap_analyzer.quality import compute_quality`. Signature:
   - `neighborhood_offset_max_m` = max of this corner's `track_dist_offset_max_m`
     and those of its two corner-sequence neighbors (wraps at start/finish).
   - **`transit_reliable == (gps_drift_disagreement_m ≤ 20) AND
-    (track_dist_offset_max_m ≤ 40) AND (neighborhood_offset_max_m ≤ 40)`** — assert
-    this boolean relationship holds row-wise on the returned frame.
+    (track_dist_offset_max_m ≤ 40) AND (neighborhood_offset_max_m ≤ 40)`** — the
+    SPATIAL STANDARD tier, kept for one release (it still gates the lateral
+    line-position metrics the trajectory layer does not yet certify). Assert this
+    boolean relationship holds row-wise on the returned frame.
   - **`lap_reliable`** is `True` iff **every** transit on that `(session_id, lap)`
     is `transit_reliable` (group-min). Assert: no row has `lap_reliable=True`
     while any sibling row on the same lap has `transit_reliable=False`.
-  - Reference sessions are excluded from the corpus-wide stats.
+  - **`transit_reliable_traj`** (design PR-4): the trajectory-σ reliability — equals
+    the labeler-emitted section A-tier verdict `rank_eligible` (`σ_t ≤ 0.10s AND
+    status ok`), dual-written alongside `transit_reliable`. `lap_reliable_traj` is
+    its per-lap group-min. NaN when the corpus predates the trajectory layer (no
+    `rank_eligible` column). The z-score baselines (`latg_peak_offset_z`,
+    `entry_speed_z`) are restricted to `rank_eligible` rows (in addition to the
+    OBD/non-reference restrictions); all rows are still scored.
+  - **Reference sessions** are SCORED (they appear in the frame with all quality
+    columns and `is_reference=True`) but never DEFINE a baseline: their
+    `lap_pace_decile` is NaN and their metric values are excluded from every
+    per-corner median/MAD and the pace `qcut`.
 - Thresholds live in `quality` as `DRIFT_DISAGREEMENT_LIMIT_M=20`,
   `TRANSIT_OFFSET_LIMIT_M=40`, `NEIGHBORHOOD_OFFSET_LIMIT_M=40` (importable).
 

@@ -416,6 +416,39 @@ def test_build_corner_transit_apex_offset_signs(make_lap_samples):
     assert out["min_speed_dist_m"] == pytest.approx(180.0, abs=0.01)
 
 
+def test_build_corner_transit_positions_from_s_hat(make_lap_samples):
+    # PR4: the corner box and every along-track position come from the trajectory
+    # ruler s_hat, NOT raw track_dist_m. On a lap where track_dist_m disagrees with
+    # s_hat (a GPS glitch), positions must follow s_hat. Also emits traj_sigma_max_m
+    # = the widest per-sample sigma inside the corner box (the along-track confidence).
+    n = 41
+    s_hat = np.linspace(100.0, 300.0, n)      # corner box [100,300] lives on s_hat
+    track_dist = s_hat + 500.0                # raw GPS ruler is 500 m off (glitch)
+    apex_m = 220.0
+    min_idx = 16
+    assert s_hat[min_idx] == pytest.approx(180.0, abs=0.01)
+    speed = np.full(n, 100.0)
+    speed[min_idx] = 30.0                     # unambiguous speed minimum
+    peak_idx = 32
+    assert s_hat[peak_idx] == pytest.approx(260.0, abs=0.01)
+    lat_g = np.full(n, 0.1)
+    lat_g[peak_idx] = 1.3                     # unambiguous |lat_g| peak
+    sigma = np.full(n, 2.0)
+    sigma[min_idx] = 9.0                      # a wide-sigma sample inside the box
+    corner = _make_corner(start_m=100.0, end_m=300.0, apex_m=apex_m)
+    lap = make_lap_samples(n=n, s_hat=s_hat, track_dist_m=track_dist,
+                           speed_mph=speed, lat_g=lat_g, sigma_m=sigma)
+    out = build_corner_transit(lap, corner)
+    assert out is not None
+    # Positions follow s_hat (180 / 260), not track_dist_m (680 / 760).
+    assert out["min_speed_dist_m"] == pytest.approx(180.0, abs=0.01)
+    assert out["latg_peak_dist_m"] == pytest.approx(260.0, abs=0.01)
+    assert out["apex_dist_offset_m"] == pytest.approx(-40.0, abs=0.01)   # 180 - 220
+    assert out["latg_peak_offset_m"] == pytest.approx(40.0, abs=0.01)    # 260 - 220
+    # Along-track confidence: widest sigma inside the box.
+    assert out["traj_sigma_max_m"] == pytest.approx(9.0, abs=0.01)
+
+
 def test_build_corner_transit_latg_peak_uses_abs_magnitude(make_lap_samples):
     # SPEC: build_corner_transit — latg_peak_dist_m is the max |lat_g| sample;
     #       max_lat_g is the max of |lat_g| (sign-agnostic magnitude)
@@ -686,3 +719,55 @@ def test_build_session_corners_corner_ids_are_track_corners(ridge_session_corner
     corner_ids = {c.id for c in track.corners}
     emitted = set(corners["corner_id"].unique())
     assert emitted.issubset(corner_ids)
+
+
+def test_build_session_corners_emits_section_rank_eligible(ridge_session_corners):
+    # SPEC (PR4): each transit carries the section-timing verdict for its corner —
+    # rank_eligible (bool, the A-tier flag quality.py reuses for transit_reliable_traj)
+    # and section_sigma_t_s (the section-time σ in seconds it derives from). Computed
+    # from the SAME estimate_trajectory + section_timing the section-times layer uses,
+    # so corners.parquet and section_times agree.
+    _track, corners = ridge_session_corners
+    assert "rank_eligible" in corners.columns
+    assert "section_sigma_t_s" in corners.columns
+    assert corners["rank_eligible"].dropna().isin([True, False]).all()
+    sig = corners["section_sigma_t_s"].dropna()
+    assert (sig >= 0).all()
+    # A-tier is exactly σ_t ≤ 0.10 s AND section status ok — a rank-eligible row can
+    # never carry a σ wider than the tier-A bound.
+    assert (corners.loc[corners["rank_eligible"] == True, "section_sigma_t_s"] <= 0.10 + 1e-9).all()  # noqa: E712
+
+
+# ---------------------------------------------------------------------------
+# label_session split (PR4): phase-1 sample labeling and phase-2 corner building
+# are separable so the rebuild can slot the corridor build between them.
+# ---------------------------------------------------------------------------
+
+def test_build_session_corners_file_writes_traj_sigma(sample_data_root, tmp_path):
+    # SPEC: build_session_corners_file(session_dir, track, corridor, frame) reads a
+    # labeled samples.parquet + laps.csv from the dir and writes corners.parquet
+    # carrying the trajectory column traj_sigma_max_m. Given an explicit corridor,
+    # it does not rebuild one. Run on a writable COPY of a bundle session.
+    import shutil
+
+    from lap_analyzer.analysis import _load_or_build_corridor, load_centerline
+    from lap_analyzer.gates import TrackFrame
+    from lap_analyzer.labeler import build_session_corners_file
+
+    track = load_track("ridge")
+    src = sample_data_root / "sessions" / "ridge" / "20260517-100304"
+    dst = tmp_path / "20260517-100304"
+    dst.mkdir()
+    for name in ("samples.parquet", "laps.csv"):
+        shutil.copy(src / name, dst / name)
+
+    corridor = _load_or_build_corridor("ridge")
+    frame = TrackFrame.from_centerline(load_centerline("ridge"))
+    n_transits = build_session_corners_file(dst, track, corridor=corridor, frame=frame)
+
+    assert n_transits > 0
+    corners = pd.read_parquet(dst / "corners.parquet")
+    assert len(corners) == n_transits
+    assert "traj_sigma_max_m" in corners.columns
+    # σ is a non-negative distance (metres) on every emitted transit.
+    assert (corners["traj_sigma_max_m"] >= 0).all()
