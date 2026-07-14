@@ -92,23 +92,6 @@ def samples(track: str, session_id: str, lap: int) -> pd.DataFrame:
     return s
 
 
-def drop_gps_glitches(s: pd.DataFrame) -> pd.DataFrame:
-    """Drop samples whose GPS projection disagrees with OBD-integrated distance.
-
-    Primary signal: |track_dist_m - dist_lap_m|. On clean data these track
-    within ~20-30m; on a TrackAddict inner-loop glitch they diverge by hundreds.
-    The cummax pass mops up residual non-monotonic samples.
-    """
-    s = s.sort_values("t").reset_index(drop=True)
-    small = s["track_dist_m"] < 500
-    if small.any():
-        s = s.iloc[small.idxmax():].reset_index(drop=True)
-    diff = (s["track_dist_m"] - s["dist_lap_m"]).abs()
-    s = s[diff < 50].reset_index(drop=True)
-    rmax = s["track_dist_m"].cummax()
-    return s[s["track_dist_m"] >= rmax - 1.0]
-
-
 def session_hhmm(sid: str) -> str:
     return f"{sid[9:11]}:{sid[11:13]}"
 
