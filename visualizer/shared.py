@@ -25,8 +25,10 @@ from lap_analyzer.config import tracks_dir
 # v11 (2026-07-12, gps-trust PR 2): section_times / span_time / range_section_times
 # now read the trajectory layer (estimate_trajectory + section_timing) — value AND
 # confidence from one pass, always-emit rows, new sigma_t_s/status/rank_eligible/
-# checks_json columns; timing_reliable is a compat alias of rank_eligible.
-_SECTION_TIMES_VERSION = 11
+# checks_json columns.
+# v12 (2026-07-13, gps-trust PR 5): dropped the v11 compat columns timing_gap_s and
+# timing_reliable (crossing_gap_s retired); rank_eligible is the rankability flag.
+_SECTION_TIMES_VERSION = 12
 
 
 def current_track() -> str:
@@ -90,23 +92,6 @@ def samples(track: str, session_id: str, lap: int) -> pd.DataFrame:
     for c in ("gps_drift_lat_m", "gps_drift_lon_m"):
         s[c] = df[c].to_numpy() if c in df.columns else 0.0
     return s
-
-
-def drop_gps_glitches(s: pd.DataFrame) -> pd.DataFrame:
-    """Drop samples whose GPS projection disagrees with OBD-integrated distance.
-
-    Primary signal: |track_dist_m - dist_lap_m|. On clean data these track
-    within ~20-30m; on a TrackAddict inner-loop glitch they diverge by hundreds.
-    The cummax pass mops up residual non-monotonic samples.
-    """
-    s = s.sort_values("t").reset_index(drop=True)
-    small = s["track_dist_m"] < 500
-    if small.any():
-        s = s.iloc[small.idxmax():].reset_index(drop=True)
-    diff = (s["track_dist_m"] - s["dist_lap_m"]).abs()
-    s = s[diff < 50].reset_index(drop=True)
-    rmax = s["track_dist_m"].cummax()
-    return s[s["track_dist_m"] >= rmax - 1.0]
 
 
 def session_hhmm(sid: str) -> str:

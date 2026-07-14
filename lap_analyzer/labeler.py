@@ -122,8 +122,6 @@ class ReferenceIndex:
     """
     tree: cKDTree
     ref_dist: np.ndarray  # parallel to tree points; ref_dist[i] = dist_lap_m of ref sample i
-    ref_lat: np.ndarray   # parallel to tree points; ref_lat[i] = lat of ref sample i
-    ref_lon: np.ndarray   # parallel to tree points; ref_lon[i] = long of ref sample i
     center_lat: float
     center_lon: float
     m_per_deg_lat: float
@@ -140,12 +138,6 @@ class ReferenceIndex:
         xy = self.project(lat, lon)
         dists, idxs = self.tree.query(xy, k=1)
         return self.ref_dist[idxs], dists
-
-    def lookup_full(self, lat: np.ndarray, lon: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """For each (lat, lon), return (track_dist_m, ref_lat, ref_lon, dist_to_ref_m)."""
-        xy = self.project(lat, lon)
-        dists, idxs = self.tree.query(xy, k=1)
-        return self.ref_dist[idxs], self.ref_lat[idxs], self.ref_lon[idxs], dists
 
 
 def build_reference_index(track: Track) -> ReferenceIndex:
@@ -167,8 +159,6 @@ def build_reference_index(track: Track) -> ReferenceIndex:
     return ReferenceIndex(
         tree=cKDTree(pts),
         ref_dist=ref["dist_lap_m"].to_numpy(),
-        ref_lat=ref["lat"].to_numpy(),
-        ref_lon=ref["long"].to_numpy(),
         center_lat=center_lat,
         center_lon=center_lon,
         m_per_deg_lat=m_per_deg_lat,
@@ -188,28 +178,15 @@ def label_samples(samples: pd.DataFrame, track: Track, ref: ReferenceIndex | Non
     if ref is None:
         ref = build_reference_index(track)
 
-    # Pass 1: per-lap drift estimate. ACTIVE correction is anchor-based (median of
-    # 17 Maps-pin anchor offsets); centerline-based is computed alongside as a
-    # passive sanity-check diagnostic. See lines 221-228 for the active assignment.
-    drift_lat_cl: dict = {}
-    drift_lon_cl: dict = {}
-    drift_n_cl: dict = {}
-    drift_region_disagree: dict = {}
-    drift_n_filtered: dict = {}
+    # Pass 1: per-lap drift estimate — anchor-based (median of 17 Maps-pin anchor
+    # offsets). Written to gps_drift_{lat,lon}_m below and used as the ACTIVE
+    # correction for the Pass-2 kd-tree lookup.
     drift_lat_anchor: dict = {}
     drift_lon_anchor: dict = {}
     drift_n_anchor: dict = {}
     drift_anchor_disagree: dict = {}
     for lap_num in out["lap"].unique():
         lap_s = out[out["lap"] == lap_num]
-        # Centerline-based (passive diagnostic)
-        cl_lat, cl_lon, cl_n, cl_region, cl_filt = compute_lap_drift_centerline(lap_s, ref)
-        drift_lat_cl[lap_num] = cl_lat
-        drift_lon_cl[lap_num] = cl_lon
-        drift_n_cl[lap_num] = cl_n
-        drift_region_disagree[lap_num] = cl_region
-        drift_n_filtered[lap_num] = cl_filt
-        # Anchor-based (ACTIVE; written to gps_drift_{lat,lon}_m below)
         d_lat, d_lon, n, disagree = compute_lap_drift(
             lap_s, track.calibration_anchors, ref.m_per_deg_lat, ref.m_per_deg_lon
         )
@@ -224,12 +201,6 @@ def label_samples(samples: pd.DataFrame, track: Track, ref: ReferenceIndex | Non
     out["gps_drift_lon_m"] = out["lap"].map(drift_lon_anchor).astype(float)
     out["gps_drift_n_anchors"] = out["lap"].map(drift_n_anchor).astype(int)
     out["gps_drift_disagreement_m"] = out["lap"].map(drift_anchor_disagree).astype(float)
-    # Centerline-based estimate (passive; sanity-check diagnostic only).
-    out["gps_drift_lat_m_centerline"] = out["lap"].map(drift_lat_cl).astype(float)
-    out["gps_drift_lon_m_centerline"] = out["lap"].map(drift_lon_cl).astype(float)
-    out["gps_drift_n_samples_centerline"] = out["lap"].map(drift_n_cl).astype(int)
-    out["gps_drift_region_disagreement_m"] = out["lap"].map(drift_region_disagree).astype(float)
-    out["gps_drift_outliers_filtered"] = out["lap"].map(drift_n_filtered).astype(int)
     lat_corr = out["lat"].to_numpy() - out["gps_drift_lat_m"].to_numpy() / ref.m_per_deg_lat
     lon_corr = out["long"].to_numpy() - out["gps_drift_lon_m"].to_numpy() / ref.m_per_deg_lon
 
@@ -402,76 +373,6 @@ def build_corner_transit(lap_samples: pd.DataFrame, corner: Corner) -> dict | No
         "sample_idx_start": int(in_corner.index[0]),
         "sample_idx_end": int(in_corner.index[-1]),
     }
-
-
-def compute_lap_drift_centerline(
-    lap_samples: pd.DataFrame,
-    ref: ReferenceIndex,
-    mad_threshold: float = 3.0,
-    n_regions: int = 4,
-) -> tuple[float, float, int, float, int]:
-    """Per-lap GPS drift via aggregation against the synthetic centerline.
-
-    For each sample in the lap, find the nearest centerline point and compute
-    the (lat, lon) offset. Apply a MAD-based outlier filter, then take the
-    median across remaining samples.
-
-    Steps:
-      1. KD-tree project each sample → matched centerline (lat, lon, track_dist_m).
-      2. Per-sample offset = sample_latlon - matched_latlon (in meters).
-      3. MAD filter: drop samples whose offset magnitude exceeds mad_threshold * MAD.
-      4. Median of remaining samples is the drift.
-      5. Compute per-region (lap split into n_regions by track_dist_m) median offsets;
-         spread of region medians around the lap drift is the "region disagreement"
-         diagnostic — replaces the old anchor-disagreement signal.
-
-    Returns (drift_lat_m, drift_lon_m, n_used, region_disagreement_m, n_filtered_outliers).
-    """
-    sample_lat = lap_samples["lat"].to_numpy()
-    sample_lon = lap_samples["long"].to_numpy()
-    if len(sample_lat) == 0:
-        return 0.0, 0.0, 0, 0.0, 0
-
-    track_dist, ref_lat, ref_lon, _ = ref.lookup_full(sample_lat, sample_lon)
-    off_lat_m = (sample_lat - ref_lat) * ref.m_per_deg_lat
-    off_lon_m = (sample_lon - ref_lon) * ref.m_per_deg_lon
-
-    # MAD-based outlier filter
-    med_lat = float(np.median(off_lat_m))
-    med_lon = float(np.median(off_lon_m))
-    abs_dev = np.sqrt((off_lat_m - med_lat) ** 2 + (off_lon_m - med_lon) ** 2)
-    mad = float(np.median(abs_dev))
-    threshold = mad * mad_threshold if mad > 0 else float("inf")
-    keep = abs_dev <= threshold
-    n_filtered = int((~keep).sum())
-
-    drift_lat_m = float(np.median(off_lat_m[keep])) if keep.any() else 0.0
-    drift_lon_m = float(np.median(off_lon_m[keep])) if keep.any() else 0.0
-    n_used = int(keep.sum())
-
-    # Per-region disagreement: split by track_dist_m, compute per-region median offset,
-    # measure spread of region medians vs the lap-wide drift.
-    region_disagree = 0.0
-    if n_used >= 100:
-        td_kept = track_dist[keep]
-        ol_kept = off_lat_m[keep]
-        on_kept = off_lon_m[keep]
-        edges = np.linspace(td_kept.min(), td_kept.max(), n_regions + 1)
-        region_lat_offs, region_lon_offs = [], []
-        for i in range(n_regions):
-            mask = (td_kept >= edges[i]) & (td_kept < edges[i + 1])
-            if mask.sum() < 10:
-                continue
-            region_lat_offs.append(float(np.median(ol_kept[mask])))
-            region_lon_offs.append(float(np.median(on_kept[mask])))
-        if len(region_lat_offs) >= 2:
-            rl = np.array(region_lat_offs)
-            rn = np.array(region_lon_offs)
-            region_disagree = float(np.sqrt(
-                np.mean((rl - drift_lat_m) ** 2) + np.mean((rn - drift_lon_m) ** 2)
-            ))
-
-    return drift_lat_m, drift_lon_m, n_used, region_disagree, n_filtered
 
 
 def compute_lap_drift(

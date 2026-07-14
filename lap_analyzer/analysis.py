@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 
 from .config import corpus_dir, sessions_dir
-from .fused_axis import GLITCH_OFFSET_M
 from .gates import TrackFrame
 
 
@@ -107,71 +106,13 @@ def section_bounds(track_def: dict, pre_m: float = 50.0, post_cap_m: float = 250
     return out
 
 
-def _first_crossing_t(xs: np.ndarray, ts: np.ndarray, target: float, after_t: float | None = None) -> float | None:
-    """Linear-interp time at which xs first crosses target (going up). xs, ts must be sorted by time."""
-    crossings = (xs[:-1] < target) & (xs[1:] >= target)
-    idxs = np.where(crossings)[0]
-    if len(idxs) == 0:
-        return None
-    if after_t is not None:
-        idxs = idxs[ts[idxs] >= after_t]
-        if len(idxs) == 0:
-            return None
-    i = int(idxs[0])
-    dx = xs[i + 1] - xs[i]
-    if dx == 0:
-        return float(ts[i])
-    return float(ts[i] + (target - xs[i]) / dx * (ts[i + 1] - ts[i]))
-
-
-# A section time is only trustworthy where GPS sampled finely enough to time the
-# gate crossings. crossing_gap_s measures that: the elapsed time between the good
-# GPS fixes bracketing a gate — the window in which the car physically crossed but
-# we have no trustworthy fix. Wide gap = coarse GPS (Mode 3) or a teleport-punctured
-# bracket (Mode 2). A transit is reliable when its max gate gap is below
-# CONFIDENCE_GAP_S. See docs/GPS_TRUST.md.
-CONFIDENCE_GAP_S: float = 0.4
-
-
-def crossing_gap_s(
-    t, track_dist_m, dist_lap_m, dist: float, glitch_m: float = GLITCH_OFFSET_M,
-) -> float:
-    """Elapsed seconds between the good GPS fixes bracketing centerline `dist`.
-
-    A good fix is a *fresh* sample (track_dist_m changed from the previous one,
-    not a frozen repeat) that is not a *teleport* (|track_dist_m - dist_lap_m| <
-    glitch_m). Returns inf if `dist` is not bracketed by good fixes below and
-    above. Large gap = the gate crossing time cannot be trusted.
-    """
-    t = np.asarray(t, dtype=float)
-    td = np.asarray(track_dist_m, dtype=float)
-    dl = np.asarray(dist_lap_m, dtype=float)
-    if len(td) < 2:
-        return float("inf")
-    fresh = np.ones(len(td), dtype=bool)
-    fresh[1:] = np.abs(np.diff(td)) > 0.01
-    good = fresh & (np.abs(td - dl) < glitch_m)
-    gi = np.where(good)[0]
-    if len(gi) < 2:
-        return float("inf")
-    gtd = td[gi]
-    below = np.where(gtd <= dist)[0]
-    above = np.where(gtd > dist)[0]
-    if len(below) == 0 or len(above) == 0:
-        return float("inf")
-    i_lo = gi[below[-1]]
-    i_hi = gi[above[0]]
-    return abs(float(t[i_hi]) - float(t[i_lo]))
-
-
 # The trajectory layer needs these per-sample channels; missing ones default so
 # OBD-dropout / drift-less sessions still estimate (design R5/R6). session_id, lap
 # come from the row context.
 _TRAJ_SAMPLE_COLS = ["lap", "t", "track_dist_m", "dist_lap_m", "lat", "long", "lat_g",
                      "speed_mph", "speed_mph_gps", "gps_drift_lat_m", "gps_drift_lon_m"]
 _SECTION_TIME_COLS = ["session_id", "lap", "corner_id", "section_time_s", "sigma_t_s",
-                      "status", "driven_m", "rank_eligible", "timing_gap_s",
-                      "timing_reliable", "checks_json"]
+                      "status", "driven_m", "rank_eligible", "checks_json"]
 _RANGE_TIME_COLS = [c for c in _SECTION_TIME_COLS if c != "corner_id"]
 
 
@@ -235,19 +176,15 @@ def _corpus_trajectories(track: str):
             yield sid_dir.name, int(lap_n), g, corridor, traj
 
 
-def _section_row(traj, g, corridor, a: float, b: float):
-    """(section_time_s, sigma_t_s, status, driven_m, rank_eligible, timing_gap_s,
-    checks_json) for one (lap, section) — ALWAYS a row (design R10)."""
+def _section_row(traj, corridor, a: float, b: float):
+    """(section_time_s, sigma_t_s, status, driven_m, rank_eligible, checks_json)
+    for one (lap, section) — ALWAYS a row (design R10)."""
     from .trajectory import section_timing
-    tt = g["t"].to_numpy()
-    td = g["track_dist_m"].to_numpy()
-    dl = g["dist_lap_m"].to_numpy()
-    gap = max(crossing_gap_s(tt, td, dl, a), crossing_gap_s(tt, td, dl, b))
     if traj is None:
-        return (np.nan, np.nan, "no_coverage", np.nan, False, gap, "[]")
+        return (np.nan, np.nan, "no_coverage", np.nan, False, "[]")
     st = section_timing(traj, a, b, corridor)
     return (st.time_s, st.sigma_s, st.status, st.driven_m, bool(st.rank_eligible),
-            gap, json.dumps(st.checks))
+            json.dumps(st.checks))
 
 
 def section_times(
@@ -263,15 +200,14 @@ def section_times(
     a row is ALWAYS emitted (R10) with `status ∈ {ok, no_coverage, rescale_invalid}`
     and NaN value where uncomputable. Long-form columns:
     session_id, lap, corner_id, section_time_s, sigma_t_s, status, driven_m,
-    rank_eligible, timing_gap_s (compat GPS-fix gap), timing_reliable (compat alias
-    of rank_eligible), checks_json (structured audit records, R12).
+    rank_eligible, checks_json (structured audit records, R12).
     """
     bounds = section_bounds(track_def, pre_m=pre_m, post_cap_m=post_cap_m)
     rows: list[tuple] = []
     for sid, lap_n, g, corridor, traj in _corpus_trajectories(track):
         for cid, (a, b) in bounds.items():
-            val, sig, status, driven, rank, gap, checks = _section_row(traj, g, corridor, a, b)
-            rows.append((sid, lap_n, cid, val, sig, status, driven, rank, gap, rank, checks))
+            val, sig, status, driven, rank, checks = _section_row(traj, corridor, a, b)
+            rows.append((sid, lap_n, cid, val, sig, status, driven, rank, checks))
     return pd.DataFrame(rows, columns=_SECTION_TIME_COLS)
 
 
@@ -388,18 +324,6 @@ def derive_gear(
     return gear.reindex(samples.index)
 
 
-def _obd_anchored_time(t, dist_lap_m, dist_a: float, dist_b: float) -> float | None:
-    """Elapsed time between the OBD-distance crossings of dist_a and dist_b — the
-    robust fallback when GPS is too coarse to time the gate crossings. Immune to
-    GPS rate; assumes the (small) GPS-vs-OBD offset is ~0, which is the right prior
-    when the true offset is unrecoverable. None if a distance is outside OBD range."""
-    dl = np.asarray(dist_lap_m, dtype=float)
-    tt = np.asarray(t, dtype=float)
-    if dist_a < dl.min() or dist_b > dl.max():
-        return None
-    return float(np.interp(dist_b, dl, tt) - np.interp(dist_a, dl, tt))
-
-
 def span_time(
     lap_samples: pd.DataFrame,
     dist_a: float,
@@ -468,13 +392,13 @@ def range_section_times(
     `section_timing`; a row is ALWAYS emitted (R10). For from_id == to_id this
     matches `section_times()` for that corner. Long-form columns match
     `section_times` minus `corner_id`: session_id, lap, section_time_s, sigma_t_s,
-    status, driven_m, rank_eligible, timing_gap_s, timing_reliable, checks_json.
+    status, driven_m, rank_eligible, checks_json.
     """
     a, b = section_range_bounds(track_def, from_id, to_id, pre_m, post_cap_m)
     rows: list[tuple] = []
     for sid, lap_n, g, corridor, traj in _corpus_trajectories(track):
-        val, sig, status, driven, rank, gap, checks = _section_row(traj, g, corridor, a, b)
-        rows.append((sid, lap_n, val, sig, status, driven, rank, gap, rank, checks))
+        val, sig, status, driven, rank, checks = _section_row(traj, corridor, a, b)
+        rows.append((sid, lap_n, val, sig, status, driven, rank, checks))
     return pd.DataFrame(rows, columns=_RANGE_TIME_COLS)
 
 

@@ -75,13 +75,15 @@ component under `lap_analyzer/cli/`:
 | 2.5. Corner candidate scan | `lap_analyzer.corners` | lat-G peak detection (bootstrap-time seeding only) |
 | 3. Corner labeler | `lap_analyzer.labeler` | Maps-pin drift correction + centerline projection + transit table |
 | — Centerline builder | `lap_analyzer.centerline` | the synthetic `track_dist_m` ruler |
-| 3.5. Quality flags | `lap_analyzer.quality` | corpus-wide reliability flags |
+| — Trajectory layer | `lap_analyzer.trajectory` | the per-lap `s_hat` + `σ` GPS-trust estimator every consumer reads (decision 6) |
+| 3.5. Quality flags | `lap_analyzer.quality` | corpus-wide reliability flags (spatial + σ tiers) |
 | 4. Corpus builder | `lap_analyzer.corpus` | concat sessions → one queryable parquet |
 | 5. Analysis library | `lap_analyzer.analysis` | pure functions over the corpus |
 | 6. Visualizer | `visualizer/` | Streamlit app + track-specific pages |
 
-- GPS trust model & failure taxonomy (what OBD vs GPS can be trusted for, and how
-  section timing handles coarse/glitched GPS): see [GPS_TRUST.md](GPS_TRUST.md).
+- GPS trust model & failure taxonomy (what OBD vs GPS can be trusted for, the four
+  failure modes, and the one trajectory layer that decides it with a σ instead of a
+  boolean): see [GPS_TRUST.md](GPS_TRUST.md) and decision 6.
 
 ---
 
@@ -138,9 +140,10 @@ to the centerline.
   unbiased.
 - Pure data pipeline — adding a track just needs Maps pins, no further curation.
 
-A passive centerline-based drift estimate is computed alongside (median of
-per-sample offsets to the centerline) and stored as a diagnostic, but it is
-**not** used for correction — see the rejected approaches.
+A passive centerline-based drift estimate (median of per-sample offsets to the
+centerline) was once computed alongside as a diagnostic; it was never consumed and
+was removed in the GPS-trust cleanup (PR 5). Only the anchor-based correction is
+computed — see the rejected approaches for why centerline-based drift lost.
 
 **Approaches we rejected:**
 
@@ -268,28 +271,92 @@ range, so its samples were labeled T8); and data-derived lat-G-threshold ranges
 (cleaner in principle but adds hysteresis/threshold complexity — deferred until a
 use case demands it).
 
+### 6. Section timing & GPS trust: from six detector silos to one trajectory estimate
+
+**What we do.** One module, `lap_analyzer/trajectory.py`, estimates per lap the
+car's monotone position on the canonical ruler, `s_hat(t) = dist_lap_m +
+delta_hat`, together with an honest per-point uncertainty `σ` — from the *same*
+evidence pass. Every consumer that used to decide GPS trust for itself (section
+times, "fastest through" rankings, the plotting axis, `corners.parquet` positions,
+quality tiers, the warning banner) now reads that one `(s_hat, σ)`. Section times
+are read where `s_hat` crosses a section bound; a transit is rankable only when its
+`σ_t` is tight (tier A). A fake-fast lap is not dropped — it is shown as an honest
+"estimate ± σ" and excluded from ranking. The full model is in
+[GPS_TRUST.md](GPS_TRUST.md).
+
+**Why (the whack-a-mole postmortem).** This replaced *six independent* GPS-glitch
+detectors, each bolted onto one consumer with its own signal and threshold — a
+gate-crossing gap check, a sample-dropping mask, a fused-axis mask, a spatial
+offset gate, and more. Every new GPS failure mode needed a new detector, because
+**the value and its confidence were computed by different code from different
+evidence.** The clearest symptom: a teleporting GPS path clipped a distant gate and
+timed one corner at **39.79 s stamped `timing_reliable=True`** (honest ≈5.2 s) —
+the confidence check had independently validated a pass the value never used. And
+no scalar threshold could fix it: a genuine tight racing line and a Mode-4 GPS
+drift produce overlapping driven-distance magnitudes, so a magnitude-band rejector
+was reverted twice after it threw out real fast laps (65% of its rejects).
+
+**The reframe:** *OBD is the backbone, GPS is evidence, and every number carries
+its σ.* Because value and confidence now come from one pass they can never
+disagree, and a monotone `s_hat` crosses a scalar gate exactly once, so ghost
+crossings are structurally impossible. Discrimination that a threshold couldn't do
+is handled by three *physical* nets (a corpus lateral "asphalt-ribbon" envelope, a
+driven-distance band, a line-length consistency residual) that only ever **inflate
+σ, never reject** — so an honest wide estimate replaces a silent wrong number. Net
+result: six silos collapsed into one module and the codebase got *smaller*, while
+`grep` now finds exactly one place that decides whether GPS is trustworthy.
+
+This design was not guessed at: it came from a panel of competing approaches scored
+by independent adversarial review, a working prototype validated on real laps, and a
+corpus audit over ~6,900 transits — which is where the provenance-stamped constants
+in `trajectory.py` come from. The trust model with its real numbers is in
+[GPS_TRUST.md](GPS_TRUST.md); the full narrative of the redesign — the dead ends, the
+39.79 s ghost, and the generalisable lessons — is in
+[DESIGN-JOURNEY.md](DESIGN-JOURNEY.md).
+
 ---
 
 ## Quality flags
 
-The pipeline computes a STANDARD reliability tier and bakes it into each transit
-row. Most analyses should just filter by it; the underlying raw metrics are kept
-for cases that need custom thresholds.
+The pipeline bakes **two** reliability tiers into each transit row, because they
+answer different questions (see decision 6 and [GPS_TRUST.md](GPS_TRUST.md)). Most
+analyses just filter by whichever fits; the underlying raw metrics are kept for
+custom thresholds.
+
+**Spatial tier** — is the lap's raw GPS projection clean enough to trust its
+*lateral* line/apex position?
 
 | Flag (in `corners.parquet`) | Meaning |
 |---|---|
 | `transit_reliable` (bool) | This (session, lap, corner) passes STANDARD: `gps_drift_disagreement_m ≤ 20 m` AND `track_dist_offset_max_m ≤ 40 m` AND `neighborhood_offset_max_m ≤ 40 m` (the last catches glitch spillover from adjacent corners). |
 | `lap_reliable` (bool) | Every transit on this (session, lap) is `transit_reliable`. Use when cross-corner consistency matters (whole-lap time-delta, etc.). |
-| Session-level flags in `data/notes/<track>.json` | Hard `exclude` (wet, misfire, single-lap, off-pace) — dropped at normalize time; soft `flag: gps_unreliable` — kept in the data but excluded from the centerline and typically filtered out of spatial analysis; `reference: true` — kept on disk but out of the corpus and all corpus-wide stats. |
+
+**σ tier** — does the trajectory layer trust this corner's *along-track* section
+time? (derived from `σ`, the flag the timing/ranking consumers read)
+
+| Flag (in `corners.parquet`) | Meaning |
+|---|---|
+| `transit_reliable_traj` (nullable bool) | The section-timing A-tier verdict `rank_eligible` (`section_sigma_t_s ≤ 0.10 s` AND `section_status == ok`) for this transit. NA on a pre-trajectory corpus. |
+| `lap_reliable_traj` (nullable bool) | Every corner on this (session, lap) is `transit_reliable_traj`. |
+
+Session-level flags live in `data/notes/<track>.json`: hard `exclude` (wet,
+misfire, single-lap, off-pace) dropped at normalize time; soft `flag:
+gps_unreliable` kept in the data but excluded from the centerline and spatial
+analysis; `reference: true` kept on disk but out of the corpus and all corpus-wide
+stats.
 
 Reliability is **per-lap, not per-corner** — it tracks specific glitched
-recordings, not a "this corner is broken" hot spot. The per-corner reliability
-rate is essentially uniform across all corners. At the time of writing, Ridge
-runs ~92% of transits / ~84% of clean laps reliable; PIR runs ~97.8% / ~95.5%.
+recordings, not a "this corner is broken" hot spot. At the time of writing the
+spatial tier runs ~93% of Ridge transits / ~84% of clean laps reliable (PIR ~97.8%
+/ ~95.5%); the σ tier is stricter, ~76% of Ridge transits, **by design** — it
+demotes the coarse-GPS and along-track-drift transits the spatial flag structurally
+cannot see. That gap is expected, not a regression (GPS_TRUST.md explains why).
 
 **How to use them:**
 - **Spatial / line / apex analysis** (GPS map, apex offsets): filter by
   `transit_reliable` (or `lap_reliable` for whole-lap views).
+- **Section time / "fastest through" ranking**: filter by `transit_reliable_traj`
+  / `rank_eligible`; a wide-σ transit is an honest estimate ± σ, not a measurement.
 - **Kinematic / time analysis** (throttle, brake, speed, lat-G): trust the data
   *even on unreliable laps* — OBD channels are unaffected by GPS issues. A
   glitched lap's speed and throttle traces are still correct.

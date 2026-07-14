@@ -34,16 +34,16 @@ ENV_PAD_M = 2.0               # 2026-07-11, ±2m antenna asymmetry pad (right-mo
 ENV_CAP_M = 20.0             # 2026-07-11, hard ±20m envelope cap (design §2 R4.1)
 ENV_MIN_LAPS = 30            # 2026-07-11, min clean-lap votes/bin before trusting p2/p98 (prototype)
 KAPPA_MIN_LAPS = 20         # 2026-07-11, min votes/bin for a corpus κ median (consistency_check.py)
-KAPPA_DEFAULT = 0.0         # sparse-bin κ fallback (straight)
+KAPPA_DEFAULT = 0.0         # sparse-bin κ fallback = straight (no sweep — a sparse bin has no curvature signal)
 ENV_DEFAULT_LO = -15.0      # 2026-07-11, cold-bin envelope fallback (prototype)
-ENV_DEFAULT_HI = 15.0
+ENV_DEFAULT_HI = 15.0       # 2026-07-11, cold-bin envelope fallback, pairs with ENV_DEFAULT_LO
 SMOOTH_SIGMA_M = 10.0        # 2026-07-11, σ=10m position/tangent smoothing (design R3)
 SMOOTH_HALF_WINDOW_M = 20.0  # 2026-07-11, ±20m smoothing window (>2 snake wavelengths, R3)
 CLEAN_MEDIAN_DELTA_M = 100.0  # 2026-07-11, |median(track_dist−dist_lap)| clean-lap gate (prototype)
 CLEAN_MAX_DELTA_M = 40.0     # 2026-07-11, max |offset| clean-lap gate (prototype/quality STANDARD)
 MIN_LAP_SAMPLES = 100       # 2026-07-11, min samples for a usable lap (prototype)
 MIN_SPEED_MPS = 8.0         # 2026-07-11, floor for κ = lat_g·g/v² (avoid v→0 blowup)
-MPH_TO_MPS = 0.44704
+MPH_TO_MPS = 0.44704        # exact unit conversion (1 mph = 0.44704 m/s)
 CALIB_VERSION = "corridor-v1"  # bump when the corridor schema/algorithm changes
 
 

@@ -113,9 +113,9 @@ _GLITCH_FILTER_VERSION = 7
 @st.cache_resource(show_spinner="loading trajectory corridor (one-time)")
 def _corridor_and_frame(track: str):
     """The per-track corridor + TrackFrame the trajectory estimator needs, loaded
-    once. The visualizer has the track, so per design PR-3 it calls
-    estimate_trajectory itself (the fused_axis helper is corridor-less and stays a
-    legacy shim). cache_resource: these are shared read-only objects, not data."""
+    once. The visualizer has the track, so (per design PR-3) it calls
+    estimate_trajectory itself for the along-track axis. cache_resource: these are
+    shared read-only objects, not data."""
     return load_corridor(track), TrackFrame.from_centerline(load_centerline(track))
 
 
@@ -382,11 +382,9 @@ def find_best_lap(range_corners: list[str], is_full_lap: bool,
     ]
     # Only rank_eligible (tier-A σ) transits win the "fastest through" benchmark —
     # a fake-fast Mode-4/coarse-GPS lap has wide σ and is excluded (design R2: σ
-    # decides rankability). rank_eligible is the canonical column; timing_reliable
-    # is its v11 compat alias.
-    rank_col = "rank_eligible" if "rank_eligible" in eligible.columns else "timing_reliable"
-    if rank_col in eligible.columns:
-        eligible = eligible[eligible[rank_col].fillna(False).astype(bool)]
+    # decides rankability). rank_eligible is the trajectory layer's rankability flag.
+    if "rank_eligible" in eligible.columns:
+        eligible = eligible[eligible["rank_eligible"].fillna(False).astype(bool)]
     # NOTE: an `obd_discrepancy_m` gate used to live here to reject "GPS-glitched"
     # laps. It was removed 2026-05-19 — it gated on the *magnitude* of the
     # OBD-vs-centerline distance divergence, which cannot distinguish a GPS glitch
@@ -583,10 +581,9 @@ def _range_rank_eligible(sid_: str, lap_: int) -> bool:
     estimate is wide (Mode-4 / coarse GPS) — the value is an honest estimate ±σ,
     not a measurement, and is excluded from the 'fastest' benchmark (design R11)."""
     r = _range_row(sid_, lap_)
-    col = "rank_eligible" if "rank_eligible" in range_sec_t.columns else "timing_reliable"
-    if r is None or col not in range_sec_t.columns:
+    if r is None or "rank_eligible" not in range_sec_t.columns:
         return True
-    return bool(r[col])
+    return bool(r["rank_eligible"])
 
 
 # Header metric row. Full-lap view shows no metric row. Single corner keeps the

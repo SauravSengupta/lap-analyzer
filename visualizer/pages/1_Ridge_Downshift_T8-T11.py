@@ -12,10 +12,12 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from shared import (_SECTION_TIMES_VERSION, current_track, drop_gps_glitches,
-                    format_lap_time, laps, samples, session_hhmm, track_def)
+from shared import (_SECTION_TIMES_VERSION, current_track, format_lap_time,
+                    laps, samples, session_hhmm, track_def)
 from lap_analyzer.analysis import (classify_t8_section, derive_gear, gear_bands,
                                    load_centerline, section_times, span_time)
+from lap_analyzer.gates import TrackFrame
+from lap_analyzer.trajectory import estimate_trajectory, load_corridor
 
 st.set_page_config(page_title="Ridge — T8-T11 Downshift", layout="wide")
 st.title("Ridge — T8-T11 Downshift Comparison")
@@ -57,6 +59,30 @@ bands = np.array(_bands(track))
 if bands.size == 0:
     st.error("No gear bands could be derived — OBD rpm/speed data is missing.")
     st.stop()
+
+
+@st.cache_resource(show_spinner="loading trajectory corridor (one-time)")
+def _corridor_and_frame(track: str):
+    """The per-track corridor + TrackFrame the trajectory estimator needs, loaded
+    once (same pattern as app.py). cache_resource: shared read-only objects."""
+    return load_corridor(track), TrackFrame.from_centerline(load_centerline(track))
+
+
+def _lap_shat(track: str, sid: str, lap: int) -> pd.DataFrame:
+    """One lap's samples with a monotone trajectory `s_hat` column, time-sorted.
+
+    Replaces drop_gps_glitches for this page's along-track axis: s_hat is monotone
+    by construction and the estimator places GPS-glitched samples at their honest
+    along-track position (it drift-corrects and bridges internally), so no sample
+    dropping is needed and the page rides the same ruler as the rest of the app.
+    """
+    s = samples(track, sid, int(lap)).sort_values("t", kind="stable").reset_index(drop=True)
+    corridor, frame = _corridor_and_frame(track)
+    traj = estimate_trajectory(s, corridor, frame)
+    # traj is time-sorted; s is stably time-sorted and estimate_trajectory sorts by
+    # t with the same stable kind, so s_hat aligns positionally even on tied t.
+    return s.assign(s_hat=traj.s_hat)
+
 
 # --- controls ---------------------------------------------------------------
 
@@ -111,10 +137,11 @@ def _classify_all(track: str, endpoint: float, bands_key: tuple,
 
 cls = _classify_all(track, endpoint_m, tuple(bands.tolist()), version=_SECTION_TIMES_VERSION)
 
-# Drop GPS-unreliable laps. This page positions everything by track_dist_m, and
-# a lap_reliable=False lap has track_dist_m off by tens of metres (or more) — its
-# kinematic data is fine but can't be placed on the track. See README: filter
-# spatial analysis by reliability.
+# Drop GPS-unreliable laps. This page positions everything on the trajectory ruler
+# s_hat, whose placement is only as good as the lap's GPS: a lap_reliable=False lap
+# is drifted tens of metres and s_hat can't reliably place it on the track — its
+# kinematic data is fine but it's unsafe for a distance-based comparison. The
+# spatial lap_reliable flag is kept as this coarse placeability gate; see README.
 n_glitched = int((~cls["lap_reliable"]).sum())
 cls = cls[cls["lap_reliable"]].reset_index(drop=True)
 
@@ -143,7 +170,7 @@ if len(exc):
 
 if n_glitched:
     st.caption(f"{n_glitched} GPS-unreliable laps (lap_reliable=False) dropped before "
-               "classification — unreliable track_dist_m makes them unsafe for a "
+               "classification — too drifted to place on the along-track ruler for a "
                "distance-based comparison.")
 
 st.markdown("**Pace mix** — lap count per pace decile (0 = fastest). "
@@ -168,34 +195,35 @@ ND_COLOR = "#2e8b57"
 @st.cache_data(show_spinner="pooling group traces")
 def _group_traces(track: str, keys: tuple, bands_key: tuple,
                   lo: float, hi: float) -> pd.DataFrame:
-    """Pool samples for a set of (session_id, lap) keys across [lo, hi], with a
-    derived `gear` column and GPS glitches removed."""
+    """Pool samples for a set of (session_id, lap) keys across [lo, hi] of the
+    trajectory ruler `s_hat`, with a derived `gear` column. Each lap is placed on
+    s_hat (monotone, glitch-corrected) rather than raw track_dist_m."""
     b = np.array(bands_key)
     frames = []
     for sid, lap in keys:
         try:
-            s = drop_gps_glitches(samples(track, sid, int(lap)))
+            s = _lap_shat(track, sid, int(lap))
         except Exception:
             continue
-        s = s[(s["track_dist_m"] >= lo) & (s["track_dist_m"] <= hi)].copy()
+        s = s[(s["s_hat"] >= lo) & (s["s_hat"] <= hi)].copy()
         if s.empty:
             continue
         s["gear"] = derive_gear(s, b)
-        frames.append(s[["track_dist_m", "speed_mph", "throttle_norm", "gear"]])
+        frames.append(s[["s_hat", "speed_mph", "throttle_norm", "gear"]])
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def _envelope(traces: pd.DataFrame, channel: str,
               lo: float, hi: float, n: int = 160) -> pd.DataFrame:
-    """Bin a pooled trace into p10/p50/p90 over track_dist_m."""
+    """Bin a pooled trace into p10/p50/p90 over s_hat."""
     if traces.empty:
         return pd.DataFrame(columns=["x", "p10", "p50", "p90"])
-    t = traces[["track_dist_m", channel]].dropna()
+    t = traces[["s_hat", channel]].dropna()
     if t.empty:
         return pd.DataFrame(columns=["x", "p10", "p50", "p90"])
     edges = np.linspace(lo, hi, n + 1)
     centers = 0.5 * (edges[:-1] + edges[1:])
-    cuts = pd.cut(t["track_dist_m"], edges, labels=False, include_lowest=True)
+    cuts = pd.cut(t["s_hat"], edges, labels=False, include_lowest=True)
     grp = t.groupby(cuts)[channel]
     return pd.DataFrame({
         "x": centers,
@@ -210,18 +238,18 @@ def _keys(group: pd.DataFrame) -> tuple:
 
 
 def _median_time_curve(track: str, keys: tuple, grid: np.ndarray) -> np.ndarray | None:
-    """Median (over laps) of cumulative time vs track_dist_m, anchored at grid[0]."""
+    """Median (over laps) of cumulative time vs s_hat, anchored at grid[0]."""
     rows = []
     for sid, lap in keys:
         try:
-            s = drop_gps_glitches(samples(track, sid, int(lap)))
+            s = _lap_shat(track, sid, int(lap))
         except Exception:
             continue
-        s = s.sort_values("track_dist_m").drop_duplicates(
-            subset="track_dist_m", keep="first")
+        s = s.sort_values("s_hat").drop_duplicates(
+            subset="s_hat", keep="first")
         if len(s) < 2:
             continue
-        ts = np.interp(grid, s["track_dist_m"].to_numpy(), s["t"].to_numpy())
+        ts = np.interp(grid, s["s_hat"].to_numpy(), s["t"].to_numpy())
         rows.append(ts - ts[0])
     if not rows:
         return None
@@ -295,7 +323,7 @@ if show_delta:
     fig.update_yaxes(title_text="Δt: no-downshift − downshift (s)",
                      row=delta_row, col=1)
 
-fig.update_xaxes(title_text="track_dist_m", row=n_rows, col=1)
+fig.update_xaxes(title_text="distance along track (m)", row=n_rows, col=1)
 fig.update_layout(height=240 * n_rows, margin=dict(l=20, r=20, t=30, b=30),
                   legend=dict(orientation="h", y=1.06, x=0))
 st.plotly_chart(fig, use_container_width=True)
@@ -389,17 +417,17 @@ if ds_pick is not None or nd_pick is not None:
             if pick is None:
                 continue
             sid, lap = pick
-            s = drop_gps_glitches(samples(track, sid, int(lap)))
-            s = s[(s["track_dist_m"] >= DISPLAY_LO)
-                  & (s["track_dist_m"] <= DISPLAY_HI)].copy()
+            s = _lap_shat(track, sid, int(lap))
+            s = s[(s["s_hat"] >= DISPLAY_LO)
+                  & (s["s_hat"] <= DISPLAY_HI)].copy()
             s["gear"] = derive_gear(s, bands)
-            s = s.sort_values("track_dist_m")
-            ofig.add_trace(go.Scatter(x=s["track_dist_m"], y=s[ch], mode="lines",
+            s = s.sort_values("s_hat")
+            ofig.add_trace(go.Scatter(x=s["s_hat"], y=s[ch], mode="lines",
                                       line=dict(color=color, width=2, dash="dot"),
                                       name=name, showlegend=(i == 1)),
                            row=i, col=1)
         ofig.update_yaxes(title_text=label, row=i, col=1)
-    ofig.update_xaxes(title_text="track_dist_m", row=len(PANELS), col=1)
+    ofig.update_xaxes(title_text="distance along track (m)", row=len(PANELS), col=1)
     ofig.update_layout(height=240 * len(PANELS), margin=dict(l=20, r=20, t=30, b=30),
                        legend=dict(orientation="h", y=1.08, x=0))
     st.plotly_chart(ofig, use_container_width=True)

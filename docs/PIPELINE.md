@@ -271,7 +271,6 @@ After `label_corners`, each `samples.parquet` gains:
 | `gps_drift_lat_m`, `gps_drift_lon_m` | per-lap anchor-based drift correction applied (meters) |
 | `gps_drift_n_anchors` | how many calibration anchors were found for this lap |
 | `gps_drift_disagreement_m` | spread of per-anchor offsets (low = trustworthy drift estimate) |
-| `gps_drift_*_centerline`, `gps_drift_region_disagreement_m`, `gps_drift_outliers_filtered` | passive centerline-based drift diagnostics (not used for correction) |
 
 > **`dist_lap_m` vs `dist_m` — important.** `dist_lap_m` is rescaled per lap to
 > the configured `lap_length_internal_m`, so for any complete lap its maximum is
@@ -311,8 +310,13 @@ raw_csv_path`.
 
 ### `corners.parquet` — the analytical workhorse
 
-One row per (clean lap × corner). All distance fields are in `track_dist_m`.
-Identity and core metrics (written by `label_corners`):
+One row per (clean lap × corner). Along-track **position** fields (`*_dist_m`,
+apex offsets, `time_in_corner_s`, interpolated speeds) are on the trajectory ruler
+`s_hat` — the car's monotone, GPS-drift/glitch-corrected position from the
+trajectory layer (see ARCHITECTURE.md decision 6). The `track_dist_offset_*`
+mapping-quality columns stay in the raw kd-tree projection frame, because the
+spatial reliability flag reads them. Identity and core metrics (written by
+`label_corners`):
 
 | Group | Columns |
 |---|---|
@@ -322,7 +326,8 @@ Identity and core metrics (written by `label_corners`):
 | Apex | `apex_speed_mph, apex_dist_offset_m` (= `min_speed_dist_m − apex_m`), `latg_peak_dist_m, latg_peak_offset_m` (= `latg_peak_dist_m − apex_m`), `latg_peak_g, secondary_apex_speed_mph` |
 | Input timing (offset from corner start) | `throttle_lift_dist_m, brake_on_dist_m, brake_off_dist_m, throttle_return_dist_m, wot_dist_m` |
 | Aggregate inputs | `mean_throttle_norm, pct_wot, mean_lat_g, pct_braking` |
-| Mapping quality | `track_dist_offset_med_m, track_dist_offset_max_m` |
+| Mapping quality (raw-projection frame) | `track_dist_offset_med_m, track_dist_offset_max_m` |
+| Trajectory σ | `traj_sigma_max_m` (widest per-sample `s_hat` σ inside the box; high → prior/gap-carried placement), `section_sigma_t_s` (section-timing σ_t for this corner's ranking window), `section_status` (`ok` / `no_coverage` / `rescale_invalid`), `rank_eligible` (A-tier: `section_sigma_t_s ≤ 0.10 s` AND `section_status == ok`) |
 | Per-lap drift | `gps_drift_lat_m, gps_drift_lon_m, gps_drift_n_anchors, gps_drift_disagreement_m` |
 | Sample refs | `sample_idx_start, sample_idx_end` (into the session's `samples.parquet`) |
 
@@ -331,15 +336,19 @@ Identity and core metrics (written by `label_corners`):
 | Column | Meaning |
 |---|---|
 | `lap_pace_decile` | 0–9, where 0 = fastest 10% of clean laps for the track |
-| `latg_peak_offset_z` | per-corner robust z-score of `latg_peak_offset_m` (line-position outlier) |
+| `latg_peak_offset_z` | per-corner robust z-score of `latg_peak_offset_m` (line-position outlier; baseline drawn from rank-eligible, non-reference rows) |
 | `entry_speed_z` | per-corner robust z-score of `entry_speed_mph` |
 | `gps_drift_mag_m` | `sqrt(drift_lat² + drift_lon²)` |
 | `neighborhood_offset_max_m` | max `track_dist_offset_max_m` over this corner + its two neighbors (catches glitch spillover) |
-| `transit_reliable` | bool — passes STANDARD: drift disagreement ≤ 20 m AND transit offset ≤ 40 m AND neighborhood offset ≤ 40 m |
+| `transit_reliable` | **spatial** tier — bool, passes STANDARD: drift disagreement ≤ 20 m AND transit offset ≤ 40 m AND neighborhood offset ≤ 40 m (certifies *lateral* line/apex position) |
 | `lap_reliable` | bool — every transit on this (session, lap) is `transit_reliable` |
+| `transit_reliable_traj` | **σ** tier — nullable bool, = `rank_eligible` (certifies *along-track* section time); NA on a pre-trajectory corpus |
+| `lap_reliable_traj` | nullable bool — every corner on this (session, lap) is `transit_reliable_traj` |
+| `is_reference` | bool — session is marked `reference` in notes (scored but excluded from the pace/z-score baselines) |
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) "Quality flags" for how to use these:
-**filter spatial/line/apex analysis by `transit_reliable`; trust kinematic
+See [ARCHITECTURE.md](ARCHITECTURE.md) "Quality flags" for the two tiers and how to
+use them: **filter spatial/line/apex analysis by `transit_reliable`; filter section
+time / rankings by `transit_reliable_traj` (`rank_eligible`); trust kinematic
 channels (speed/throttle/brake/lat-G) even on unreliable laps** — OBD data is
 unaffected by GPS issues.
 

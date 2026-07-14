@@ -7,7 +7,6 @@ sample values.
 
 Coverage:
   - section_bounds          (per-corner window math + box-containment invariant)
-  - _first_crossing_t       (upward crossing + linear interp + edge cases)
   - find_gear_bands         (ratio clustering → ascending band centers)
   - _confirm_runs           (sub-dwell run suppression to NaN)
   - derive_gear             (THE key contract: gear index 0 = shortest/lowest gear)
@@ -32,9 +31,7 @@ import pytest
 
 from lap_analyzer.analysis import (
     _confirm_runs,
-    _first_crossing_t,
     classify_t8_section,
-    crossing_gap_s,
     derive_gear,
     find_gear_bands,
     section_bounds,
@@ -144,61 +141,6 @@ def test_section_bounds_window_always_contains_corner_box():
         if i + 1 < len(starts_sorted):
             next_start = starts_sorted[i + 1][0]
             assert win_end <= next_start + 1e-6
-
-
-# ---------------------------------------------------------------------------
-# _first_crossing_t
-# ---------------------------------------------------------------------------
-
-def test_first_crossing_linear_interp_midpoint():
-    # SPEC: analysis._first_crossing_t — xs=[0,10], ts=[0,1], target=5 → 0.5
-    xs = np.array([0.0, 10.0])
-    ts = np.array([0.0, 1.0])
-    assert _first_crossing_t(xs, ts, 5.0) == pytest.approx(0.5, abs=1e-9)
-
-
-def test_first_crossing_no_upward_crossing_returns_none():
-    # SPEC: analysis._first_crossing_t — no upward crossing → None
-    # Strictly decreasing series never crosses 5 upward.
-    xs = np.array([10.0, 8.0, 6.0, 4.0])
-    ts = np.array([0.0, 1.0, 2.0, 3.0])
-    assert _first_crossing_t(xs, ts, 5.0) is None
-
-
-def test_first_crossing_is_upward_only():
-    # SPEC: analysis._first_crossing_t — first UPWARD crossing (xs[i] < target <= xs[i+1])
-    # The series dips below then rises above the target; the downward pass at the
-    # start must be ignored; the upward pass is what's reported.
-    xs = np.array([6.0, 2.0, 8.0])  # down through 5, then up through 5
-    ts = np.array([0.0, 1.0, 2.0])
-    t = _first_crossing_t(xs, ts, 5.0)
-    # Upward crossing between t=1 (x=2) and t=2 (x=8): 2 + (5-2)/(8-2) = 1.5.
-    assert t == pytest.approx(1.5, abs=1e-9)
-
-
-def test_first_crossing_after_t_restricts_window():
-    # SPEC: analysis._first_crossing_t — after_t restricts to crossings at/after that time
-    # Two upward crossings of 5: near t=0.5 and near t=2.5.
-    xs = np.array([0.0, 10.0, 0.0, 10.0])
-    ts = np.array([0.0, 1.0, 2.0, 3.0])
-    # No restriction → first crossing (0.5).
-    assert _first_crossing_t(xs, ts, 5.0) == pytest.approx(0.5, abs=1e-9)
-    # Restricted to >= 1.5 → the second crossing (2.5).
-    assert _first_crossing_t(xs, ts, 5.0, after_t=1.5) == pytest.approx(2.5, abs=1e-9)
-
-
-def test_first_crossing_zero_width_step_returns_ts_i_no_div_zero():
-    # SPEC: analysis._first_crossing_t — exact crossing / zero-width step
-    #       (xs[i+1] == xs[i]) → returns ts[i] (no division by zero)
-    # target lands exactly on the flat step value at the upward transition.
-    xs = np.array([0.0, 5.0, 5.0])
-    ts = np.array([0.0, 1.0, 2.0])
-    t = _first_crossing_t(xs, ts, 5.0)
-    assert t is not None
-    assert np.isfinite(t)
-    # The first sample reaching the target is index 1 (ts=1.0); interpolation of
-    # the prior 0->5 rise gives 1.0 and the zero-width step does not blow up.
-    assert t == pytest.approx(1.0, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -366,47 +308,6 @@ def test_derive_gear_nonqualifying_samples_not_freshly_assigned(make_lap_samples
 
 
 # ---------------------------------------------------------------------------
-# crossing_gap_s — GPS-timing-confidence primitive
-# ---------------------------------------------------------------------------
-
-def test_crossing_gap_small_when_gps_dense():
-    # SPEC: crossing_gap_s — dense fresh fixes → tiny bracket gap at the gate.
-    n = 200
-    t = np.arange(n) * 0.05
-    track = np.linspace(0.0, 2000.0, n)      # fresh every sample
-    dl = track.copy()                         # clean: GPS == OBD
-    gap = crossing_gap_s(t, track, dl, 1000.0)
-    assert gap < 0.1
-
-
-def test_crossing_gap_large_when_gps_coarse():
-    # SPEC: crossing_gap_s — GPS frozen for long runs (≈1 Hz) → ~1 s gap.
-    n = 400
-    t = np.arange(n) * 0.05                    # 20 Hz sampling
-    true = np.linspace(0.0, 2000.0, n)
-    hold = 20                                  # GPS updates every 20 samples = 1 s
-    track = true[(np.arange(n) // hold) * hold]   # frozen then jumps
-    dl = true.copy()                           # OBD stays smooth/true
-    gap = crossing_gap_s(t, track, dl, 1000.0)
-    assert gap == pytest.approx(1.0, abs=0.1)
-
-
-def test_crossing_gap_excludes_teleport_fix():
-    # SPEC: crossing_gap_s — a teleport fix at the gate is excluded, widening the
-    # bracket to the neighboring good fixes.
-    n = 200
-    t = np.arange(n) * 0.05
-    track = np.linspace(0.0, 2000.0, n)
-    i = int(np.argmin(np.abs(track - 1000.0)))    # sample nearest the gate
-    track[i] += 120.0                              # teleport: |track-dl| = 120 ≥ 50
-    dl_teleport = track.copy()
-    dl_teleport[i] -= 120.0                         # OBD unaffected at i
-    gap = crossing_gap_s(t, track, dl_teleport, 1000.0)
-    # bracket spans 2 sample-intervals (the excluded teleport), not 1 (0.05 s)
-    assert gap == pytest.approx(0.10, abs=1e-6)
-
-
-# ---------------------------------------------------------------------------
 # span_time
 # ---------------------------------------------------------------------------
 
@@ -483,21 +384,20 @@ def test_span_time_immune_to_lateral_line_offset(make_lap_samples):
 
 _SECTION_SCHEMA = [
     "session_id", "lap", "corner_id", "section_time_s", "sigma_t_s", "status",
-    "driven_m", "rank_eligible", "timing_gap_s", "timing_reliable", "checks_json"]
+    "driven_m", "rank_eligible", "checks_json"]
 _RANGE_SCHEMA = [c for c in _SECTION_SCHEMA if c != "corner_id"]
 
 
 def test_section_times_new_schema_always_emits(sample_data_root):
-    # SPEC (v11): section_times emits one row per (session, lap, corner) — ALWAYS
-    # (R10) — value+confidence from the trajectory layer; timing_reliable is a compat
-    # alias of rank_eligible; every corner in the track appears.
+    # SPEC (v12): section_times emits one row per (session, lap, corner) — ALWAYS
+    # (R10) — value+confidence from the trajectory layer; rank_eligible is the
+    # rankability flag; every corner in the track appears.
     from lap_analyzer.analysis import section_times
     td = _ridge_track_def()
     df = section_times("ridge", td)
     assert list(df.columns) == _SECTION_SCHEMA
     assert set(df["status"]) <= {"ok", "no_coverage", "rescale_invalid"}
     assert df["rank_eligible"].dtype == bool
-    assert (df["timing_reliable"] == df["rank_eligible"]).all()   # compat alias
     assert set(df["corner_id"]) == {c["id"] for c in td["corners"]}
     ok = df[df["status"] == "ok"]
     assert ok["section_time_s"].notna().all() and (ok["sigma_t_s"] >= 0).all()
@@ -505,13 +405,12 @@ def test_section_times_new_schema_always_emits(sample_data_root):
 
 
 def test_range_section_times_new_schema(sample_data_root):
-    # SPEC (v11): range_section_times shares the schema minus corner_id; always emits.
+    # SPEC (v12): range_section_times shares the schema minus corner_id; always emits.
     from lap_analyzer.analysis import range_section_times
     td = _ridge_track_def()
     df = range_section_times("ridge", td, "T6", "T6")
     assert list(df.columns) == _RANGE_SCHEMA
     assert df["rank_eligible"].dtype == bool
-    assert (df["timing_reliable"] == df["rank_eligible"]).all()
     assert set(df["status"]) <= {"ok", "no_coverage", "rescale_invalid"}
     assert (df[df["status"] == "ok"]["section_time_s"] > 0).all()
     assert df["session_id"].nunique() >= 2
