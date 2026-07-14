@@ -9,8 +9,8 @@ GPS-derived value is trustworthy**: `lap_analyzer/trajectory.py`. Every consumer
 section times, "fastest through" rankings, the visualizer axis and σ-shading,
 `corners.parquet` positions, quality tiers, the warning banner — reads the same
 per-lap trajectory estimate `(s_hat, σ)` from that module. This file is the
-reference it points back to. (For the full design rationale see
-`docs/superpowers/specs/2026-07-11-unified-gps-trust-trajectory-design.md`.)
+reference it points back to; [ARCHITECTURE.md](ARCHITECTURE.md) decision 6 covers
+why it replaced the earlier six-detector approach.
 
 ## The reframe: OBD is the backbone, GPS is evidence, every number carries its σ
 

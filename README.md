@@ -75,6 +75,15 @@ TrackAddict CSV ─► normalize ─► label corners ─► flag quality ─►
    trustworthy spatial data from GPS-glitched laps.
 4. **build corpus** — concatenate every session into one queryable table.
 
+GPS misbehaves in four distinct ways (lateral drift, teleports, coarse ~1 Hz
+fixes, and smooth local drift that silently compresses a corner's time). Rather
+than a pile of per-symptom detectors, one **trajectory layer** estimates each
+lap's position on the track ruler with an honest ±σ, and every consumer — section
+times, "fastest through" rankings, the plotting axis — reads that one estimate; a
+value and its confidence can never disagree. A fake-fast lap shows up as an honest
+estimate ± σ, excluded from ranking, not silently trusted. See
+[docs/GPS_TRUST.md](docs/GPS_TRUST.md).
+
 All geometric truth derives from a handful of Google Maps satellite-pinned
 corner apexes per track — the only hand-curated input. The reasoning behind that
 and every other design choice is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -88,7 +97,7 @@ visualizer/          # Streamlit app + track-specific analysis pages
 tests/               # pytest suite + tests/SPEC.md (intent-first behavioral spec)
 scripts/             # bootstrap & diagnostic tools (e.g. seed_pir_corners.py)
 tracks/              # per-track JSON definitions (ridge.json, pir.json)
-docs/                # ARCHITECTURE · PIPELINE · NEW-TRACK
+docs/                # ARCHITECTURE · PIPELINE · GPS_TRUST · VISUALIZER · NEW-TRACK
 data/
   samples/           # committed demo bundle (3 sessions/track + sample corpus)
   raw/ sessions/ corpus/ notes/   # your data — gitignored, not shipped
