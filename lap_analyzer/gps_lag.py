@@ -10,6 +10,7 @@ Design: docs/superpowers/specs/2026-09-18-gps-lag-correction-design.md. Pure, no
 """
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 
 import numpy as np
@@ -128,3 +129,62 @@ def estimate_gps_lag(t, v_obd, v_gps, long_g) -> LagEstimate:
     if not np.isfinite(corr) or corr < LAG_MIN_CORR_ACCEL:
         return _NONE
     return LagEstimate(tau, corr, "accel")
+
+
+def resolve_session_lags(per_lap: dict[int, LagEstimate],
+                         edge_laps: set[int]) -> dict[int, LagEstimate]:
+    """Apply the fallback ladder: accepted non-edge laps keep their own τ; every other lap
+    gets the session median of those; with none accepted, LAG_DEFAULT_S (flagged)."""
+    accepted = {k: e for k, e in per_lap.items()
+                if e.source in ("lap", "accel") and k not in edge_laps}
+    if not accepted:
+        return {k: LagEstimate(LAG_DEFAULT_S, float("nan"), "default") for k in per_lap}
+    median = float(np.median([e.tau_s for e in accepted.values()]))
+    return {k: accepted.get(k, LagEstimate(median, float("nan"), "session")) for k in per_lap}
+
+
+def estimate_session_gps_lag(df: pd.DataFrame, enabled: bool = True) -> dict[int, LagEstimate]:
+    """Per-lap τ for one session, keyed by the lap number as logged (pre-shift)."""
+    laps = sorted(int(k) for k in df["lap"].unique())
+    if not enabled:
+        return {k: LagEstimate(0.0, float("nan"), "disabled") for k in laps}
+    per_lap = {}
+    for k, g in df.groupby("lap", sort=True):
+        per_lap[int(k)] = estimate_gps_lag(g["t"], g["speed_mph"], g["speed_mph_gps"], g["long_g"])
+    # Warmup/cooldown (pit-lane crawl, partial laps) never set their own τ.
+    edge = {laps[0], laps[-1]} if len(laps) >= 3 else set()
+    return resolve_session_lags(per_lap, edge)
+
+
+def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float]) -> pd.DataFrame:
+    """Re-attach GPS-derived columns to the row clock by SAMPLE-AND-HOLD (never interpolate:
+    the trajectory layer detects fresh fixes by |Δtrack_dist| > FRESH_FIX_M).
+
+    Row i takes col[j], j = last index with t[j] <= t[i] + τ(original lap of row i).
+    Rows within τ of the log end hold the last fix.
+    """
+    out = df.copy()
+    t = df["t"].to_numpy(dtype=float)
+    tau = df["lap"].map(tau_by_lap).fillna(0.0).to_numpy(dtype=float)
+    j = np.searchsorted(t, t + tau, side="right") - 1
+    j = np.clip(j, 0, len(t) - 1)
+    for col in GPS_COLUMNS:
+        if col in df.columns:
+            out[col] = df[col].to_numpy()[j]
+    out["gps_lag_s"] = tau.astype(np.float32)
+    return out
+
+
+def summarize_lags(lags: dict[int, LagEstimate]) -> dict:
+    """The meta.json `gps_lag` block (method_version is the staleness marker)."""
+    counts = Counter(e.source for e in lags.values())
+    taus = [e.tau_s for e in lags.values() if np.isfinite(e.tau_s)]
+    block = {
+        "method_version": METHOD_VERSION,
+        "session_median_s": round(float(np.median(taus)), 3) if taus else None,
+        "n_lap": counts["lap"], "n_session": counts["session"],
+        "n_accel": counts["accel"], "n_default": counts["default"],
+    }
+    if counts["disabled"]:
+        block["n_disabled"] = counts["disabled"]
+    return block
