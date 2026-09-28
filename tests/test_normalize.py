@@ -455,12 +455,11 @@ def test_normalize_gps_lag_leaves_lap_boundaries_and_position():
     raw = _lagged_raw(0.5)
     out, _ = normalize_dataframe(raw, "S")
     disabled, _ = normalize_dataframe(raw, "S", gps_lag=False)
-    for lp in sorted(raw["lap"].unique()):
-        out_lap = out[out["lap"] == lp]
-        base_lap = disabled[disabled["lap"] == lp]
-        assert out_lap["t"].iloc[0] == pytest.approx(base_lap["t"].iloc[0])
-        assert out_lap["lat"].iloc[0] == pytest.approx(base_lap["lat"].iloc[0])
-        assert out_lap["dist_lap_m"].iloc[0] == pytest.approx(base_lap["dist_lap_m"].iloc[0])
+    np.testing.assert_array_equal(out["lat"].to_numpy(), disabled["lat"].to_numpy())
+    np.testing.assert_array_equal(out["long"].to_numpy(), disabled["long"].to_numpy())
+    np.testing.assert_array_equal(out["lap"].to_numpy(), disabled["lap"].to_numpy())
+    np.testing.assert_allclose(out["dist_m"].to_numpy(), disabled["dist_m"].to_numpy())
+    np.testing.assert_allclose(out["dist_lap_m"].to_numpy(), disabled["dist_lap_m"].to_numpy())
 
 
 # ---------------------------------------------------------------------------

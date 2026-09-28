@@ -38,13 +38,17 @@ Before any of the above runs, `normalize` re-times `speed_mph_gps` (only) to
 correct a per-lap GPS speed lag against OBD speed (typically ~0.45 s; see
 [PIPELINE.md](PIPELINE.md) and ARCHITECTURE.md decision 7). GPS **position**
 was measured to be ~on time against OBD and is left unshifted — shifting it
-was tried and cost T1 rank-eligibility (80% → 22%) at PIR. So the trajectory
-layer's inputs are unchanged for OBD sessions: `dist_lap_m` (OBD) and
-`track_dist_m` (built from position) are exactly as before, and every
-downstream trust decision in this file applies unmodified. `speed_mph_gps` is
-a cross-check channel only and isn't consumed by `trajectory.py`. A session's
-`meta.gps_lag` block being absent means it was normalized before this
-correction existed.
+was tried and cost T1 rank-eligibility (80% → 22%) at PIR.
+
+For **OBD sessions** the trajectory layer's inputs are unchanged: `dist_lap_m`
+(OBD-integrated) and `track_dist_m` (built from position) are exactly as
+before, so every downstream trust decision in this file applies unmodified;
+`speed_mph_gps` there is a cross-check channel only. For **GPS-only**
+sessions (~12% of sessions, no OBD), `speed_mph_gps` *is* the speed backbone —
+`dist_m`/`dist_lap_m` integrate it, and `trajectory.py` and the corner labeler
+use it directly — so the re-timing now puts that backbone on the same clock
+as GPS position instead of ~0.45 s behind it. A session's `meta.gps_lag` block
+being absent means it was normalized before this correction existed.
 
 ## Always trustworthy: OBD
 

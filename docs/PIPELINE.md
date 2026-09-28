@@ -84,15 +84,20 @@ python -m lap_analyzer.cli.normalize --track ridge --all --force
 ~0.45 s (position is not affected — see below). `normalize` estimates a
 per-lap τ by cross-correlating GPS speed against OBD speed and re-times
 `speed_mph_gps` only, by sample-and-hold with the τ blended across lap seams
-so values never replay backward. Falls back per-lap: `lap` (own
-cross-correlation, corr ≥ 0.97) → `session` (median of the session's accepted
-laps; always used for warmup/cooldown) → `accel` (GPS-only sessions: GPS
-speed derivative vs `long_g`) → `default` (0.45 s). `--no-gps-lag` disables
+so values never replay backward. Fallback order is each lap's own estimate
+first — `lap` (own OBD cross-correlation, corr ≥ 0.97) when OBD is present, or
+`accel` (GPS-only sessions: GPS speed derivative vs `long_g`, corr ≥ 0.6) when
+it isn't — then `session` (median of the session's accepted laps; always used
+for warmup/cooldown), then `default` (0.45 s). `--no-gps-lag` disables
 it (τ = 0, source `disabled`). Provenance is written to `gps_lag_s` /
 `gps_lag_corr` / `gps_lag_source` in `laps.csv`, per-row `gps_lag_s` in
 `samples.parquet`, and a `gps_lag` summary block in `meta.json` (absent means
 the session predates this feature). See
-[ARCHITECTURE.md](ARCHITECTURE.md) decision 7 for why only speed is re-timed.
+[ARCHITECTURE.md](ARCHITECTURE.md) decision 7 for why only speed is re-timed;
+for OBD sessions the trajectory layer's inputs are unchanged, while for
+GPS-only sessions `speed_mph_gps` is the speed backbone (`dist_m`/
+`dist_lap_m`, `trajectory.py`, corner labeler) and is now on the same clock as
+GPS position.
 
 ### `label_corners` — corner labels + per-corner-transit table
 
@@ -331,7 +336,10 @@ raw_csv_path`.
 
 A `gps_lag` block summarizes the session's GPS speed lag correction:
 `method_version, session_median_s, n_lap, n_session, n_accel, n_default` (lap
-counts per fallback tier). Absent means the session was normalized before this
+counts per fallback tier). `session_median_s` is the median of the *applied* τ
+over every lap in the session — including laps that fell back to the session
+median or an edge-lap default — not just the laps whose own estimate was
+accepted. Absent means the session was normalized before this
 feature and predates the correction.
 
 ### `corners.parquet` — the analytical workhorse

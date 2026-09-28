@@ -321,11 +321,12 @@ in `trajectory.py` come from. The trust model with its real numbers is in
 at `normalize` time by cross-correlating `speed_mph_gps` against `speed_mph`
 (OBD) on a 0.05 s grid over −0.3…1.5 s, parabola-refined, with
 `τ = peak_lag − OBD_HOLD_LEAD_S` (0.075 s, correcting for OBD's own
-sample-and-hold lead). A lap's own estimate is accepted at corr ≥ 0.97 with
-≥ 30 s of >20 mph data; otherwise it falls back to the session median of
-accepted laps (also always used for warmup/cooldown), then to an
-accelerometer-based estimate for GPS-only sessions (`d(speed_mph_gps)/dt` vs
-`long_g`, corr ≥ 0.6), then to a fixed default of 0.45 s. `--no-gps-lag` sets
+sample-and-hold lead). The fallback order is: each lap's own estimate first —
+the OBD cross-correlation above (accepted at corr ≥ 0.97 with ≥ 30 s of
+>20 mph data) when OBD is present, or an accelerometer-based estimate for
+GPS-only sessions (`d(speed_mph_gps)/dt` vs `long_g`, corr ≥ 0.6) when it
+isn't — then the session median of accepted laps (also always used for
+warmup/cooldown), then a fixed default of 0.45 s. `--no-gps-lag` sets
 τ = 0 everywhere (source `disabled`), reproducing pre-feature output exactly.
 Only `speed_mph_gps` is re-timed, by sample-and-hold, with τ blended linearly
 across each lap-time midpoint so re-timed values never replay backward at lap
@@ -341,7 +342,13 @@ over-corrected it: position started running 0.2–0.4 s ahead of where it
 should be, opening a 10–15 m gap at PIR T1 and collapsing its rank-eligible
 rate from 80% to 22%. Narrowing the fix to speed-only (user decision,
 2026-09-27) removed that regression; heading lags ~0.16 s more than speed but
-nothing downstream reads heading, so it's left alone too.
+nothing downstream reads heading, so it's left alone too. For OBD sessions
+this means the trajectory layer's inputs are unchanged (it reads `dist_lap_m`
+and position, not `speed_mph_gps`); for GPS-only sessions (~12%, no OBD)
+`speed_mph_gps` is the speed backbone (integrated into `dist_m`/`dist_lap_m`,
+read directly by `trajectory.py` and the corner labeler), so re-timing it puts
+that backbone on the same clock as GPS position. See
+[GPS_TRUST.md](GPS_TRUST.md#input-calibration-gps-speed-is-re-timed-upstream).
 
 **Why sample-and-hold + seam-blended τ.** OBD itself arrives sample-and-held
 (hence `OBD_HOLD_LEAD_S`), so re-timing GPS speed the same way keeps the two

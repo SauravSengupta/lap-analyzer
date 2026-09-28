@@ -55,9 +55,10 @@ _NONE = LagEstimate(float("nan"), float("nan"), "none")
 def xcorr_lag(t, ref, sig, mask=None) -> tuple[float, float]:
     """τ maximising Pearson corr(ref(t), sig(t+τ)) over [LAG_SEARCH_MIN_S, LAG_SEARCH_MAX_S].
 
-    Both series are linearly resampled onto a LAG_GRID_S grid; grid points where `mask`
-    (per input row, nearest) is False do not participate. The peak is refined with a
-    parabola through it and its two neighbours. Returns (nan, nan) if nothing is usable.
+    Both series are linearly resampled onto a LAG_GRID_S grid; `mask` is likewise
+    linearly interpolated onto the grid and thresholded at 0.5, and grid points where
+    that falls False do not participate. The peak is refined with a parabola through it
+    and its two neighbours. Returns (nan, nan) if nothing is usable.
     """
     t = np.asarray(t, dtype=float)
     ref = np.asarray(ref, dtype=float)
@@ -131,7 +132,10 @@ def estimate_gps_lag(t, v_obd, v_gps, long_g) -> LagEstimate:
     fast = np.nan_to_num(v_gps, nan=0.0) > LAG_MIN_SPEED_MPH
     if len(t) < 3 or fast.sum() < 3:
         return _NONE
-    dvdt = np.gradient(np.nan_to_num(v_gps) * MPH_TO_MPS, t) / G
+    # Duplicate timestamps give np.gradient a zero denominator (inf/NaN); xcorr_lag's
+    # isfinite filter drops those grid points, so the warning is noise here.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dvdt = np.gradient(np.nan_to_num(v_gps) * MPH_TO_MPS, t) / G
     tau, corr = xcorr_lag(t, _smooth(t, long_g), _smooth(t, dvdt), mask=fast)
     if not np.isfinite(corr) or corr < LAG_MIN_CORR_ACCEL:
         return _NONE
@@ -151,7 +155,7 @@ def resolve_session_lags(per_lap: dict[int, LagEstimate],
 
 
 def estimate_session_gps_lag(df: pd.DataFrame, enabled: bool = True) -> dict[int, LagEstimate]:
-    """Per-lap τ for one session, keyed by the lap number as logged (pre-shift)."""
+    """Per-lap τ for one session, keyed by the lap number as logged."""
     laps = sorted(int(k) for k in df["lap"].unique())
     if not enabled:
         return {k: LagEstimate(0.0, float("nan"), "disabled") for k in laps}
@@ -219,7 +223,12 @@ def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float]) -> pd.DataFram
 
 
 def summarize_lags(lags: dict[int, LagEstimate]) -> dict:
-    """The meta.json `gps_lag` block (method_version is the staleness marker)."""
+    """The meta.json `gps_lag` block (method_version is the staleness marker).
+
+    `session_median_s` is the median of the applied τ (`tau_s`) across ALL laps in the
+    session — including laps that fell back to the session median or an edge-lap
+    default — not just the laps that set their own estimate.
+    """
     counts = Counter(e.source for e in lags.values())
     taus = [e.tau_s for e in lags.values() if np.isfinite(e.tau_s)]
     block = {

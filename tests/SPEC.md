@@ -131,7 +131,7 @@ required on input even though it is dropped from the output.**
   the row's applied τ. `gps_lag=False` → τ = 0 everywhere, `speed_mph_gps` passes
   through unchanged, and every lap's estimate has `source == "disabled"`. The
   derived dict's `"gps_lag"` key carries the raw `dict[int, LagEstimate]` keyed
-  by the **original (pre-shift) lap number**.
+  by lap number.
 - **Invariants (ARCHITECTURE / axis note):**
   - **`lat_g` is negated:** canonical `lat_g == -raw["lat_g"]`. A raw left-turn
     (raw > 0) becomes negative; **positive `lat_g` = right turn.**
@@ -848,7 +848,7 @@ xcorr_lag, OBD_HOLD_LEAD_S)`. Pure, no I/O.
   value, else the accelerometer path (`d(v_gps)/dt` vs `long_g`, both smoothed,
   min corr `0.6`). Returns `source="none"` (τ `NaN`) when nothing qualifies.
 - **`estimate_session_gps_lag(df, enabled=True) -> dict[int, LagEstimate]`:**
-  per-lap τ keyed by the lap number **as logged (pre-shift)**. `enabled=False`
+  per-lap τ keyed by lap number. `enabled=False`
   → every lap gets `LagEstimate(0.0, NaN, "disabled")`. Otherwise every lap is
   estimated independently, then `resolve_session_lags` applies the fallback
   ladder with the first and last lap (when ≥3 laps) always treated as edge laps
@@ -859,7 +859,7 @@ xcorr_lag, OBD_HOLD_LEAD_S)`. Pure, no I/O.
   accepted, every lap gets `LAG_DEFAULT_S` (0.45 s) with `source="default"`.
 - **`apply_gps_lag(df, tau_by_lap) -> pd.DataFrame`:** re-times only the column in
   `RETIMED_COLUMNS` (`speed_mph_gps`) by **sample-and-hold** (never interpolated —
-  the trajectory layer detects fresh fixes by `|Δtrack_dist| > FRESH_FIX_M`).
+  the output only ever holds values the receiver actually reported).
   Position (`lat, long, altitude_m, gps_accuracy_m`), `heading`, `sector`, and the
   `lap` counter are measured on time vs OBD (2026-09-27) and pass through
   unchanged. τ is **not** a step function of lap: it is
@@ -871,6 +871,8 @@ xcorr_lag, OBD_HOLD_LEAD_S)`. Pure, no I/O.
   stepped per-lap τ can make it go backward and replay fixes. Adds `gps_lag_s`
   (float32) = the row's applied τ.
 - **`summarize_lags(lags) -> dict`:** the `meta.json` `gps_lag` block —
-  `method_version` ("gps-lag-v1"), `session_median_s` (median finite τ, or
-  `None`), `n_lap`, `n_session`, `n_accel`, `n_default` (source counts), plus
-  `n_disabled` only when any lap's source is `"disabled"`.
+  `method_version` ("gps-lag-v1"), `session_median_s` (the median of the
+  *applied* τ over every lap, including session-filled and edge laps — not
+  just laps whose own estimate was accepted — or `None` if no lap has a
+  finite τ), `n_lap`, `n_session`, `n_accel`, `n_default` (source counts),
+  plus `n_disabled` only when any lap's source is `"disabled"`.
