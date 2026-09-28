@@ -161,6 +161,7 @@ OUTPUT_COLUMNS = [
     "session_id", "t", "lap", "dist_m", "dist_lap_m", "speed_mph",
     "speed_mph_gps", "throttle_norm", "brake", "rpm", "lat_g", "long_g",
     "coolant_f", "iat_f", "lat", "long", "altitude_m", "gps_accuracy_m",
+    "gps_lag_s",
 ]
 
 
@@ -399,6 +400,63 @@ def test_normalize_dtypes():
     assert out["lap"].dtype == np.int32
     assert out["brake"].dtype == np.int8
     assert out["rpm"].dtype == np.int32
+
+
+# ---------------------------------------------------------------------------
+# normalize_dataframe — GPS lag correction (spec 2026-09-18)
+# ---------------------------------------------------------------------------
+
+
+def _lagged_raw(delay_s, n_laps=4, lap_s=60.0, rate=27.0):
+    """Raw frame whose GPS channels lag OBD by delay_s (plus the OBD hold lead)."""
+    from lap_analyzer.gps_lag import OBD_HOLD_LEAD_S
+    t = np.arange(0, n_laps * lap_s, 1 / rate)
+    v = lambda x: 70 + 30 * np.sin(2 * np.pi * x / 23.0) + 12 * np.sin(2 * np.pi * x / 6.7)  # noqa: E731
+    d = delay_s + OBD_HOLD_LEAD_S
+    n = len(t)
+    return _raw_frame(
+        n=n, t=t, lap=(t // lap_s).astype(int) + 1,
+        speed_mph=v(t), speed_mph_gps=v(t - d),
+        lat=45.0 + np.floor((t - d) * 8) * 1e-6,   # ~8 Hz held fixes, moving
+        long=np.full(n, -122.0),
+    )
+
+
+# SPEC: normalize.normalize_dataframe — GPS channels re-timed by the estimated per-lap lag
+def test_normalize_gps_lag_realigns_gps_speed():
+    out, derived = normalize_dataframe(_lagged_raw(0.5), "S")
+    inner = out[(out["lap"] > 1) & (out["lap"] < 4)]
+    # after correction GPS speed tracks OBD speed on the row clock
+    err = (inner["speed_mph_gps"] - inner["speed_mph"]).abs().median()
+    raw_err = (_lagged_raw(0.5)["speed_mph_gps"] - _lagged_raw(0.5)["speed_mph"]).abs().median()
+    assert err < raw_err / 3
+    assert {e.source for e in derived["gps_lag"].values()} <= {"lap", "session"}
+
+
+# SPEC: normalize.normalize_dataframe — gps_lag_s column carries each row's applied τ
+def test_normalize_gps_lag_s_column():
+    out, _ = normalize_dataframe(_lagged_raw(0.5), "S")
+    assert out["gps_lag_s"].dtype == np.float32
+    assert out["gps_lag_s"].between(0.4, 0.6).all()
+
+
+# SPEC: normalize.normalize_dataframe — gps_lag=False writes τ = 0 / source "disabled"
+def test_normalize_gps_lag_disabled():
+    raw = _lagged_raw(0.5)
+    out, derived = normalize_dataframe(raw, "S", gps_lag=False)
+    assert (out["gps_lag_s"] == 0).all()
+    assert all(e.source == "disabled" for e in derived["gps_lag"].values())
+    np.testing.assert_array_equal(out["speed_mph_gps"].to_numpy(), raw["speed_mph_gps"].to_numpy())
+
+
+# SPEC: normalize.normalize_dataframe — shifted lap counter: laps start earlier, dist_lap_m resets there
+def test_normalize_gps_lag_moves_lap_boundaries_earlier():
+    raw = _lagged_raw(0.5)
+    out, _ = normalize_dataframe(raw, "S")
+    first_t = out.groupby("lap")["t"].first()
+    raw_first_t = raw.groupby("lap")["t"].first()
+    assert (first_t.loc[2:] < raw_first_t.loc[2:]).all()
+    assert (out.groupby("lap")["dist_lap_m"].first() == 0).all()
 
 
 # ---------------------------------------------------------------------------
@@ -697,3 +755,17 @@ def test_normalize_session_with_obd_has_obd_true(make_trackaddict_csv, monkeypat
     assert meta.has_obd is True
     assert meta.rpm_max is not None
     assert meta.speed_max_obd_mph is not None
+
+
+# SPEC: normalize.normalize_session — laps.csv + meta.json carry GPS-lag provenance
+def test_normalize_session_writes_gps_lag_provenance(make_trackaddict_csv, monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path / "data"))
+    csv = make_trackaddict_csv(_with_obd(_multi_lap_base()))
+    meta = normalize_session(csv, "ridge", tmp_path / "out")
+    sdir = tmp_path / "out" / meta.session_id
+    laps = pd.read_csv(sdir / "laps.csv")
+    assert {"gps_lag_s", "gps_lag_corr", "gps_lag_source"} <= set(laps.columns)
+    assert laps["gps_lag_source"].isin(["lap", "session", "accel", "default"]).all()
+    assert meta.gps_lag["method_version"] == "gps-lag-v1"
+    samples = pd.read_parquet(sdir / "samples.parquet")
+    assert "gps_lag_s" in samples.columns

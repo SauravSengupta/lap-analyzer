@@ -58,6 +58,11 @@ Import: `from lap_analyzer.schemas import SessionMeta`. (pydantic v2 BaseModel.)
   `coolant_max_f`, `iat_first_f`, `iat_max_f`, `trackaddict_start_finish` (dict).
   The OBD-derived ones (`throttle_max_observed`, `speed_max_obd_mph`, `rpm_max`)
   are `None` for GPS-only sessions.
+- **`gps_lag`** (`Optional[dict]`, default `None`): the `gps_lag.summarize_lags`
+  provenance block (`method_version`, `session_median_s`, `n_lap`, `n_session`,
+  `n_accel`, `n_default`, and `n_disabled` when `--no-gps-lag` was used).
+  `None` marks a `meta.json` written before `gps-lag-v1` (stale — no correction
+  applied at ingest).
 - **`trackaddict_split_points`** defaults to `[]` (list of dict).
 - **Invariants:** constructing with only the required fields succeeds and leaves
   optionals at their defaults; `model_dump_json()` → `model_validate_json()`
@@ -102,7 +107,7 @@ Signature: `(path) -> dict`.
 ## normalize.normalize_dataframe
 
 Import: `from lap_analyzer.normalize import normalize_dataframe`.
-Signature: `(raw: pd.DataFrame, session_id: str, canonical_lap_length_m: float | None = None) -> tuple[pd.DataFrame, dict]`.
+Signature: `(raw: pd.DataFrame, session_id: str, canonical_lap_length_m: float | None = None, gps_lag: bool = True) -> tuple[pd.DataFrame, dict]`.
 The `raw` frame is assumed already column-renamed to canonical names (as
 `read_csv` does): `t, lap, lat, long, speed_mph, speed_mph_gps, lat_g, long_g,
 brake, rpm, throttle_raw, coolant_f, iat_f`, etc. **The input must contain all 6
@@ -110,11 +115,21 @@ canonical OBD channels — `rpm, speed_mph, throttle_raw, coolant_f, iat_f,
 manifold_psi` — because they are forward/back-filled together. `manifold_psi` is
 required on input even though it is dropped from the output.**
 
-- **Contract (PIPELINE.md):** returns `(out_df, {"throttle_max_observed": <float>})`
+- **Contract (PIPELINE.md):** returns `(out_df, {"throttle_max_observed": <float>, "gps_lag": dict[int, LagEstimate]})`
   where `out_df` has exactly the documented `samples.parquet` columns
   (`session_id, t, lap, dist_m, dist_lap_m, speed_mph, speed_mph_gps,
   throttle_norm, brake, rpm, lat_g, long_g, coolant_f, iat_f, lat, long,
-  altitude_m, gps_accuracy_m`).
+  altitude_m, gps_accuracy_m, gps_lag_s`).
+- **GPS lag correction (spec 2026-09-18, right after the OBD fill):** the
+  per-lap τ is estimated with `gps_lag.estimate_session_gps_lag(df, enabled=gps_lag)`
+  and applied with `gps_lag.apply_gps_lag`. GPS-derived columns —
+  `lat, long, altitude_m, gps_accuracy_m, speed_mph_gps`, and the **`lap`
+  counter itself** — are re-timed by sample-and-hold, so lap boundaries can move
+  earlier and `dist_lap_m` resets at the new boundary. `gps_lag_s` (float32) is
+  the row's applied τ. `gps_lag=False` → τ = 0 everywhere, GPS columns pass
+  through unchanged, and every lap's estimate has `source == "disabled"`. The
+  derived dict's `"gps_lag"` key carries the raw `dict[int, LagEstimate]` keyed
+  by the **original (pre-shift) lap number**.
 - **Invariants (ARCHITECTURE / axis note):**
   - **`lat_g` is negated:** canonical `lat_g == -raw["lat_g"]`. A raw left-turn
     (raw > 0) becomes negative; **positive `lat_g` = right turn.**
@@ -182,9 +197,17 @@ Signature: `(track: str) -> set[str]`.
 ## normalize.normalize_session (OBD-dropout: GPS-only ingest)
 
 Import: `from lap_analyzer.normalize import normalize_session`.
-Signature: `normalize_session(csv_path, track, out_dir) -> SessionMeta` — `out_dir`
-is a required positional (the directory the `<session_id>/` output folder is
-created under).
+Signature: `normalize_session(csv_path, track, out_dir, gps_lag: bool = True) -> SessionMeta`
+— `out_dir` is a required positional (the directory the `<session_id>/` output
+folder is created under).
+
+- **GPS-lag provenance:** `laps.csv` gains `gps_lag_s` (float, rounded 3dp),
+  `gps_lag_corr` (float, rounded 4dp, `NaN` for `session`/`default`/`disabled`
+  sources), and `gps_lag_source` (one of `lap`, `session`, `accel`, `default`,
+  `disabled`) merged in on `lap`. `samples.parquet` carries `gps_lag_s`.
+  `meta.gps_lag` is the `gps_lag.summarize_lags` block (`method_version ==
+  "gps-lag-v1"`). Passing `gps_lag=False` (or CLI `--no-gps-lag`) makes every
+  lap's source `"disabled"` and `gps_lag_s` all `0`.
 
 - **KNOWN behavior — OBD dropout (~12% of real sessions log without OBD):** if the
   raw CSV is missing any of the 6 OBD columns, the session is ingested as
@@ -800,3 +823,51 @@ with `make_trackaddict_csv`; create raw CSVs under
   - re-running without `--force` on already-normalized output prints `skip `.
   - the final summary line reports the processed/skipped/excluded/gps-only/failed
     counts.
+  - **`--no-gps-lag`** skips GPS lag correction: every row's `gps_lag_s` is `0`
+    and `laps.csv`'s `gps_lag_source` is `"disabled"` for every lap. For A/B
+    comparison against corrected output.
+
+---
+
+## gps_lag.* (Tasks 1–2: `lap_analyzer/gps_lag.py`)
+
+Import: `from lap_analyzer.gps_lag import (LagEstimate, estimate_gps_lag,
+estimate_session_gps_lag, apply_gps_lag, resolve_session_lags, summarize_lags,
+xcorr_lag, OBD_HOLD_LEAD_S)`. Pure, no I/O.
+
+- **`LagEstimate`** (frozen dataclass): `tau_s: float` (lag to apply, already
+  net of `OBD_HOLD_LEAD_S` on the OBD path), `corr: float` (peak correlation;
+  `NaN` for `session`/`default`/`disabled`), `source: str` — one of `lap`,
+  `session`, `accel`, `default`, `disabled` (`"none"` is an internal
+  unresolved-lap marker never returned by `estimate_session_gps_lag`).
+- **`estimate_gps_lag(t, v_obd, v_gps, long_g) -> LagEstimate`:** one lap. Uses
+  the OBD cross-correlation path (`v_obd` vs `v_gps`, masked to `> 20 mph`, min
+  peak corr `0.97`, min qualifying span `30 s`) when `v_obd` has any finite
+  value, else the accelerometer path (`d(v_gps)/dt` vs `long_g`, both smoothed,
+  min corr `0.6`). Returns `source="none"` (τ `NaN`) when nothing qualifies.
+- **`estimate_session_gps_lag(df, enabled=True) -> dict[int, LagEstimate]`:**
+  per-lap τ keyed by the lap number **as logged (pre-shift)**. `enabled=False`
+  → every lap gets `LagEstimate(0.0, NaN, "disabled")`. Otherwise every lap is
+  estimated independently, then `resolve_session_lags` applies the fallback
+  ladder with the first and last lap (when ≥3 laps) always treated as edge laps
+  that never set their own τ.
+- **`resolve_session_lags(per_lap, edge_laps) -> dict[int, LagEstimate]`:**
+  accepted non-edge laps (`source` in `lap`/`accel`) keep their own τ; every
+  other lap gets the session median of those (`source="session"`); if none were
+  accepted, every lap gets `LAG_DEFAULT_S` (0.45 s) with `source="default"`.
+- **`apply_gps_lag(df, tau_by_lap) -> pd.DataFrame`:** re-times every present
+  GPS column in `GPS_COLUMNS` (`lat, long, altitude_m, gps_accuracy_m,
+  speed_mph_gps, heading, sector, lap`) by **sample-and-hold** (never
+  interpolated — the trajectory layer detects fresh fixes by
+  `|Δtrack_dist| > FRESH_FIX_M`). τ is **not** a step function of lap: it is
+  piecewise-linear, blended between one knot per original lap placed at that
+  lap's time midpoint (value = that lap's estimate); at each lap's own midpoint
+  the applied τ equals exactly that lap's estimate, and it blends linearly
+  between adjacent midpoints (holds constant beyond the first/last knot). This
+  keeps the source row index **monotone non-decreasing** across lap seams — a
+  stepped per-lap τ can make it go backward and replay fixes. Adds `gps_lag_s`
+  (float32) = the row's applied τ.
+- **`summarize_lags(lags) -> dict`:** the `meta.json` `gps_lag` block —
+  `method_version` ("gps-lag-v1"), `session_median_s` (median finite τ, or
+  `None`), `n_lap`, `n_session`, `n_accel`, `n_default` (source counts), plus
+  `n_disabled` only when any lap's source is `"disabled"`.

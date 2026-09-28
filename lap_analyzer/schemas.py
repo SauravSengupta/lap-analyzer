@@ -29,3 +29,6 @@ class SessionMeta(BaseModel):
     trackaddict_start_finish: Optional[dict] = None
     trackaddict_split_points: list[dict] = []
     raw_csv_path: str
+    # GPS lag correction provenance (gps_lag.summarize_lags). None = normalized before
+    # gps-lag-v1 (stale); method_version is the staleness marker.
+    gps_lag: Optional[dict] = None

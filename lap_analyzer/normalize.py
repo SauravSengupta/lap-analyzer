@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from .config import data_root
+from .gps_lag import apply_gps_lag, estimate_session_gps_lag, summarize_lags
 from .schemas import SessionMeta
 
 
@@ -63,6 +64,7 @@ OUTPUT_COLUMNS = [
     "lat_g", "long_g",
     "coolant_f", "iat_f",
     "lat", "long", "altitude_m", "gps_accuracy_m",
+    "gps_lag_s",
 ]
 
 SESSION_ID_RE = re.compile(r"Log-(\d{8}-\d{6})")
@@ -115,6 +117,7 @@ def normalize_dataframe(
     raw: pd.DataFrame,
     session_id: str,
     canonical_lap_length_m: float | None = None,
+    gps_lag: bool = True,
 ) -> tuple[pd.DataFrame, dict]:
     df = raw.copy()
 
@@ -127,6 +130,13 @@ def normalize_dataframe(
     # OBD channels only update on OBD ticks; forward-fill so every row has the most recent reading.
     # For GPS-only (OBD-dropout) sessions these columns are all-NaN and stay NaN.
     df[OBD_CHANNELS] = df[OBD_CHANNELS].ffill().bfill()
+
+    # GPS lag: the Garmin feed is ~0.45 s late vs the row clock (TrackAddict's GPS_Delay
+    # is ~0 — BT transport only). Estimate τ per lap and re-time every GPS-derived column
+    # (incl. the GPS-timed Lap counter) by sample-and-hold. gps_lag=False → τ = 0.
+    # Design: docs/superpowers/specs/2026-09-18-gps-lag-correction-design.md.
+    lags = estimate_session_gps_lag(df, enabled=gps_lag)
+    df = apply_gps_lag(df, {k: e.tau_s for k, e in lags.items()})
 
     # Per-session throttle max is the "true 100%" for this car/sensor (Porsche pedals top out ~90% raw).
     # GPS-only sessions have no throttle channel -> throttle_norm is NaN everywhere (distinct from
@@ -166,7 +176,7 @@ def normalize_dataframe(
     if df["rpm"].notna().any():
         df["rpm"] = df["rpm"].fillna(0).astype("int32")
 
-    return df[OUTPUT_COLUMNS], {"throttle_max_observed": throttle_max}
+    return df[OUTPUT_COLUMNS], {"throttle_max_observed": throttle_max, "gps_lag": lags}
 
 
 def compute_lap_times(df: pd.DataFrame) -> pd.DataFrame:
@@ -300,7 +310,7 @@ def _canonical_lap_length(track: str) -> float | None:
     return float(val) if val else None
 
 
-def normalize_session(csv_path: Path, track: str, out_dir: Path) -> SessionMeta:
+def normalize_session(csv_path: Path, track: str, out_dir: Path, gps_lag: bool = True) -> SessionMeta:
     csv_path = Path(csv_path)
     out_dir = Path(out_dir)
 
@@ -319,12 +329,20 @@ def normalize_session(csv_path: Path, track: str, out_dir: Path) -> SessionMeta:
     first_utc = float(raw["utc"].iloc[0])
 
     canonical_length = _canonical_lap_length(track)
-    df, derived = normalize_dataframe(raw, session_id, canonical_lap_length_m=canonical_length)
+    df, derived = normalize_dataframe(
+        raw, session_id, canonical_lap_length_m=canonical_length, gps_lag=gps_lag)
     lap_times = compute_lap_times(df)
     summary = lap_summary(df, lap_times)
+    lag_rows = pd.DataFrame([
+        {"lap": k, "gps_lag_s": round(e.tau_s, 3), "gps_lag_corr": round(e.corr, 4),
+         "gps_lag_source": e.source}
+        for k, e in derived["gps_lag"].items()
+    ])
+    summary = summary.merge(lag_rows, on="lap", how="left")
     meta = build_session_meta(
         session_id, track, raw_meta, derived, df, summary, first_utc, has_obd=has_obd
     )
+    meta.gps_lag = summarize_lags(derived["gps_lag"])
 
     session_dir = out_dir / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
