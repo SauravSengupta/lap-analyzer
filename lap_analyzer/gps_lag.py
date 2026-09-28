@@ -1,10 +1,15 @@
-"""GPS lag correction — re-time GPS-derived channels onto the row clock at ingest.
+"""GPS lag correction — re-time GPS speed onto the row clock at ingest.
 
-The Garmin GLO 2 feed TrackAddict logs is late relative to the row clock (median 0.45 s,
+The Garmin GLO 2's speed output is late relative to the row clock (median 0.45 s,
 mostly per-session, ±0.07 s lap-to-lap). TrackAddict's GPS_Delay column is ~0 — it only
 measures Bluetooth transport. This module estimates the lag per lap by cross-correlating
 GPS speed against OBD speed (or d(GPS speed)/dt against the accelerometer when there is
-no OBD) and re-attaches GPS channels to the row clock by sample-and-hold.
+no OBD) and re-attaches GPS speed to the row clock by sample-and-hold.
+
+Position is NOT re-timed: a regression of GPS-vs-OBD position offset on speed measured
+it ~on time vs OBD (2026-09-27, PIR raw lag −0.02 s, Ridge +0.15 s) — only the receiver's
+speed output carries the filter latency. Shifting position by the speed lag made it run
+0.2–0.4 s ahead of OBD, opening a 10–15 m gap through fast corners.
 
 Design: docs/superpowers/specs/2026-09-18-gps-lag-correction-design.md. Pure, no I/O.
 """
@@ -30,9 +35,12 @@ MPH_TO_MPS = 0.44704        # exact unit conversion
 G = 9.80665                 # standard gravity, m/s²
 METHOD_VERSION = "gps-lag-v1"
 
-# Every GPS-derived column TrackAddict logs; re-timed together when present.
-GPS_COLUMNS = ["lat", "long", "altitude_m", "gps_accuracy_m", "speed_mph_gps",
-               "heading", "sector", "lap"]
+# Only speed_mph_gps carries the receiver's filter latency (measured 2026-09-27):
+# position (lat, long, altitude_m, gps_accuracy_m), heading, sector, and the
+# TrackAddict lap counter are all on time vs OBD and are left exactly as logged.
+# heading lags even more than speed (~+0.16 s) but no downstream consumer reads it,
+# so it is left uncorrected too.
+RETIMED_COLUMNS = ["speed_mph_gps"]
 
 
 @dataclass(frozen=True)
@@ -157,13 +165,15 @@ def estimate_session_gps_lag(df: pd.DataFrame, enabled: bool = True) -> dict[int
 
 
 def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float]) -> pd.DataFrame:
-    """Re-attach GPS-derived columns to the row clock by SAMPLE-AND-HOLD (never interpolate:
-    the trajectory layer detects fresh fixes by |Δtrack_dist| > FRESH_FIX_M).
+    """Re-attach speed_mph_gps to the row clock by SAMPLE-AND-HOLD (never interpolate:
+    the trajectory layer detects fresh fixes by |Δtrack_dist| > FRESH_FIX_M). Position,
+    heading, sector, and the lap counter are not re-timed (measured on time vs OBD) and
+    pass through unchanged.
 
     τ is not applied as a step function of lap: at a lap boundary, a straight per-lap τ
     step can make the source index j go BACKWARD (e.g. lap k+1 has a smaller τ than lap
     k, so the first rows of lap k+1 would re-use fixes already consumed at the end of
-    lap k), replaying position/altitude/speed backward across the seam. Instead τ(t) is
+    lap k), replaying speed backward across the seam. Instead τ(t) is
     a piecewise-linear function through one knot per original lap at that lap's time
     midpoint t_mid_k = (first t of lap k + last t of lap k) / 2, value tau_by_lap[k]
     (laps missing from the dict, or with a NaN τ, contribute no knot; with no knots at
@@ -200,7 +210,7 @@ def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float]) -> pd.DataFram
 
     j = np.searchsorted(t, t + tau, side="right") - 1
     j = np.clip(j, 0, len(t) - 1)
-    for col in GPS_COLUMNS:
+    for col in RETIMED_COLUMNS:
         if col in df.columns:
             out[col] = df[col].to_numpy()[j]
     out["gps_lag_s"] = tau.astype(np.float32)

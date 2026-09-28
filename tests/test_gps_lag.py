@@ -198,11 +198,11 @@ def _held_frame():
     })
 
 
-def test_hold_semantics_positions_are_subset():
+def test_hold_semantics_speed_is_subset():
     df = _held_frame()
     out = apply_gps_lag(df, {1: 0.45, 2: 0.30})
-    before = set(zip(df["lat"], df["long"]))
-    after = set(zip(out["lat"], out["long"]))
+    before = set(df["speed_mph_gps"])
+    after = set(out["speed_mph_gps"])
     assert after <= before
 
 
@@ -213,22 +213,20 @@ def test_rows_take_the_fix_from_tau_later():
     assert out.loc[0, "speed_mph_gps"] == df.loc[5, "speed_mph_gps"]
 
 
-def test_lap_counter_moves_exactly_rows_within_tau_before_boundary():
-    df = _held_frame()                     # boundary at t = 3.0 (row 30)
-    out = apply_gps_lag(df, {1: 0.45, 2: 0.45})
-    assert len(out) == len(df)
-    moved = (out["lap"] != df["lap"])
-    # rows with 2.55 <= t < 3.0 (t + 0.45 >= 3.0) now belong to lap 2
-    expected = (df["t"] >= 3.0 - 0.45 - 1e-9) & (df["t"] < 3.0)
-    assert (moved == expected).all()
-    assert out["lap"].is_monotonic_increasing
+def test_position_and_lap_are_unchanged():
+    # Position/altitude/accuracy/lap are measured on-time vs OBD (2026-09-27) and are
+    # never re-timed, even with non-zero, differing per-lap tau.
+    df = _held_frame()
+    out = apply_gps_lag(df, {1: 0.45, 2: 0.30})
+    for col in ("lat", "long", "altitude_m", "gps_accuracy_m", "lap"):
+        pd.testing.assert_series_equal(out[col], df[col])
 
 
 def test_tail_holds_last_fix_no_nan():
     df = _held_frame()
     out = apply_gps_lag(df, {1: 0.45, 2: 1.2})
-    assert not out[["lat", "long", "speed_mph_gps", "lap"]].isna().any().any()
-    assert out["lat"].iloc[-1] == df["lat"].iloc[-1]
+    assert not out["speed_mph_gps"].isna().any()
+    assert out["speed_mph_gps"].iloc[-1] == df["speed_mph_gps"].iloc[-1]
 
 
 def test_gps_lag_s_is_blended_and_equals_tau_at_each_lap_midpoint():
@@ -253,11 +251,10 @@ def test_gps_lag_s_is_blended_and_equals_tau_at_each_lap_midpoint():
 def test_source_index_never_goes_backward_across_seam():
     df = _held_frame()
     out = apply_gps_lag(df, {1: 1.2, 2: 0.3})
-    # altitude_m increases monotonically with fix index in the fixture; if the source
-    # index j ever goes backward, altitude_m (and lap) would dip at the seam.
-    alt = out["altitude_m"].to_numpy()
-    assert np.all(np.diff(alt) >= 0)
-    assert np.all(np.diff(out["lap"].to_numpy()) >= 0)
+    # speed_mph_gps increases monotonically with fix index in the fixture; if the
+    # source index j ever goes backward, speed_mph_gps would dip at the seam.
+    speed = out["speed_mph_gps"].to_numpy()
+    assert np.all(np.diff(speed) >= 0)
 
 
 def test_non_gps_columns_untouched():

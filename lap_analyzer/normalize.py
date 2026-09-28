@@ -131,10 +131,11 @@ def normalize_dataframe(
     # For GPS-only (OBD-dropout) sessions these columns are all-NaN and stay NaN.
     df[OBD_CHANNELS] = df[OBD_CHANNELS].ffill().bfill()
 
-    # GPS lag: the Garmin feed is ~0.45 s late vs the row clock (TrackAddict's GPS_Delay
-    # is ~0 — BT transport only). Estimate τ per lap and re-time every GPS-derived column
-    # (incl. the GPS-timed Lap counter) by sample-and-hold. gps_lag=False → τ = 0.
-    # Design: docs/superpowers/specs/2026-09-18-gps-lag-correction-design.md.
+    # GPS lag: the Garmin feed's SPEED output is ~0.45 s late vs the row clock
+    # (TrackAddict's GPS_Delay is ~0 — BT transport only). Estimate τ per lap and
+    # re-time speed_mph_gps only by sample-and-hold; position and the Lap counter are
+    # measured on time vs OBD (2026-09-27) and are left exactly as logged.
+    # gps_lag=False → τ = 0. Design: docs/superpowers/specs/2026-09-18-gps-lag-correction-design.md.
     lags = estimate_session_gps_lag(df, enabled=gps_lag)
     df = apply_gps_lag(df, {k: e.tau_s for k, e in lags.items()})
 

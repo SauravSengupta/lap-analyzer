@@ -449,14 +449,18 @@ def test_normalize_gps_lag_disabled():
     np.testing.assert_array_equal(out["speed_mph_gps"].to_numpy(), raw["speed_mph_gps"].to_numpy())
 
 
-# SPEC: normalize.normalize_dataframe — shifted lap counter: laps start earlier, dist_lap_m resets there
-def test_normalize_gps_lag_moves_lap_boundaries_earlier():
+# SPEC: normalize.normalize_dataframe — position/lap are measured on-time vs OBD and
+# are left exactly as logged; only speed_mph_gps is re-timed (2026-09-27 decision).
+def test_normalize_gps_lag_leaves_lap_boundaries_and_position():
     raw = _lagged_raw(0.5)
     out, _ = normalize_dataframe(raw, "S")
-    first_t = out.groupby("lap")["t"].first()
-    raw_first_t = raw.groupby("lap")["t"].first()
-    assert (first_t.loc[2:] < raw_first_t.loc[2:]).all()
-    assert (out.groupby("lap")["dist_lap_m"].first() == 0).all()
+    disabled, _ = normalize_dataframe(raw, "S", gps_lag=False)
+    for lp in sorted(raw["lap"].unique()):
+        out_lap = out[out["lap"] == lp]
+        base_lap = disabled[disabled["lap"] == lp]
+        assert out_lap["t"].iloc[0] == pytest.approx(base_lap["t"].iloc[0])
+        assert out_lap["lat"].iloc[0] == pytest.approx(base_lap["lat"].iloc[0])
+        assert out_lap["dist_lap_m"].iloc[0] == pytest.approx(base_lap["dist_lap_m"].iloc[0])
 
 
 # ---------------------------------------------------------------------------

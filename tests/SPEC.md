@@ -120,13 +120,15 @@ required on input even though it is dropped from the output.**
   (`session_id, t, lap, dist_m, dist_lap_m, speed_mph, speed_mph_gps,
   throttle_norm, brake, rpm, lat_g, long_g, coolant_f, iat_f, lat, long,
   altitude_m, gps_accuracy_m, gps_lag_s`).
-- **GPS lag correction (spec 2026-09-18, right after the OBD fill):** the
-  per-lap τ is estimated with `gps_lag.estimate_session_gps_lag(df, enabled=gps_lag)`
-  and applied with `gps_lag.apply_gps_lag`. GPS-derived columns —
-  `lat, long, altitude_m, gps_accuracy_m, speed_mph_gps`, and the **`lap`
-  counter itself** — are re-timed by sample-and-hold, so lap boundaries can move
-  earlier and `dist_lap_m` resets at the new boundary. `gps_lag_s` (float32) is
-  the row's applied τ. `gps_lag=False` → τ = 0 everywhere, GPS columns pass
+- **GPS lag correction (spec 2026-09-18, narrowed 2026-09-27, right after the OBD
+  fill):** the per-lap τ is estimated with
+  `gps_lag.estimate_session_gps_lag(df, enabled=gps_lag)` and applied with
+  `gps_lag.apply_gps_lag`. Only **`speed_mph_gps`** is re-timed, by sample-and-hold —
+  a regression of GPS-vs-OBD position offset on speed showed position is measured
+  ~on time vs OBD, so `lat, long, altitude_m, gps_accuracy_m`, `heading`, `sector`,
+  and the **`lap`** counter are left exactly as logged; lap boundaries and
+  `dist_lap_m` are therefore unchanged by the correction. `gps_lag_s` (float32) is
+  the row's applied τ. `gps_lag=False` → τ = 0 everywhere, `speed_mph_gps` passes
   through unchanged, and every lap's estimate has `source == "disabled"`. The
   derived dict's `"gps_lag"` key carries the raw `dict[int, LagEstimate]` keyed
   by the **original (pre-shift) lap number**.
@@ -855,11 +857,12 @@ xcorr_lag, OBD_HOLD_LEAD_S)`. Pure, no I/O.
   accepted non-edge laps (`source` in `lap`/`accel`) keep their own τ; every
   other lap gets the session median of those (`source="session"`); if none were
   accepted, every lap gets `LAG_DEFAULT_S` (0.45 s) with `source="default"`.
-- **`apply_gps_lag(df, tau_by_lap) -> pd.DataFrame`:** re-times every present
-  GPS column in `GPS_COLUMNS` (`lat, long, altitude_m, gps_accuracy_m,
-  speed_mph_gps, heading, sector, lap`) by **sample-and-hold** (never
-  interpolated — the trajectory layer detects fresh fixes by
-  `|Δtrack_dist| > FRESH_FIX_M`). τ is **not** a step function of lap: it is
+- **`apply_gps_lag(df, tau_by_lap) -> pd.DataFrame`:** re-times only the column in
+  `RETIMED_COLUMNS` (`speed_mph_gps`) by **sample-and-hold** (never interpolated —
+  the trajectory layer detects fresh fixes by `|Δtrack_dist| > FRESH_FIX_M`).
+  Position (`lat, long, altitude_m, gps_accuracy_m`), `heading`, `sector`, and the
+  `lap` counter are measured on time vs OBD (2026-09-27) and pass through
+  unchanged. τ is **not** a step function of lap: it is
   piecewise-linear, blended between one knot per original lap placed at that
   lap's time midpoint (value = that lap's estimate); at each lap's own midpoint
   the applied τ equals exactly that lap's estimate, and it blends linearly
