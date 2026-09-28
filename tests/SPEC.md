@@ -119,19 +119,22 @@ required on input even though it is dropped from the output.**
   where `out_df` has exactly the documented `samples.parquet` columns
   (`session_id, t, lap, dist_m, dist_lap_m, speed_mph, speed_mph_gps,
   throttle_norm, brake, rpm, lat_g, long_g, coolant_f, iat_f, lat, long,
-  altitude_m, gps_accuracy_m, gps_lag_s`).
-- **GPS lag correction (spec 2026-09-18, narrowed 2026-09-27, right after the OBD
-  fill):** the per-lap τ is estimated with
+  altitude_m, gps_accuracy_m, gps_lag_s, gps_pos_lag_s`).
+- **GPS lag correction (spec 2026-09-18, extended 2026-09-27 to position, right after
+  the OBD fill):** the per-lap SPEED τ is estimated with
   `gps_lag.estimate_session_gps_lag(df, enabled=gps_lag)` and applied with
-  `gps_lag.apply_gps_lag`. Only **`speed_mph_gps`** is re-timed, by sample-and-hold —
-  a regression of GPS-vs-OBD position offset on speed showed position is measured
-  ~on time vs OBD, so `lat, long, altitude_m, gps_accuracy_m`, `heading`, `sector`,
-  and the **`lap`** counter are left exactly as logged; lap boundaries and
-  `dist_lap_m` are therefore unchanged by the correction. `gps_lag_s` (float32) is
-  the row's applied τ. `gps_lag=False` → τ = 0 everywhere, `speed_mph_gps` passes
-  through unchanged, and every lap's estimate has `source == "disabled"`. The
-  derived dict's `"gps_lag"` key carries the raw `dict[int, LagEstimate]` keyed
-  by lap number.
+  `gps_lag.apply_gps_lag`. **`speed_mph_gps`** is re-timed by τ_speed, by
+  sample-and-hold. Position (`lat, long, altitude_m, gps_accuracy_m`), `sector`, and
+  the **`lap`** counter (GPS-position-timed) are re-timed too, by the smaller
+  τ_pos = τ_speed − `POS_SPEED_OFFSET_S` (0.12 s, measured 2026-09-27: the GPS speed
+  channel lags position by that much more, per cumulative path-length-vs-odometer
+  fits) — so lap boundaries move EARLIER and `dist_lap_m` moves with them (still
+  starting at 0 per lap). `heading` is left exactly as logged (nothing downstream
+  reads it). `gps_lag_s` (float32) is the row's applied τ_speed; `gps_pos_lag_s`
+  (float32) is the row's applied τ_pos (not clamped — may be negative). `gps_lag=False`
+  → τ_speed = τ_pos = 0 everywhere, both groups pass through unchanged, and every
+  lap's estimate has `source == "disabled"`. The derived dict's `"gps_lag"` key
+  carries the raw `dict[int, LagEstimate]` keyed by lap number (SPEED τ).
 - **Invariants (ARCHITECTURE / axis note):**
   - **`lat_g` is negated:** canonical `lat_g == -raw["lat_g"]`. A raw left-turn
     (raw > 0) becomes negative; **positive `lat_g` = right turn.**
@@ -835,7 +838,7 @@ with `make_trackaddict_csv`; create raw CSVs under
 
 Import: `from lap_analyzer.gps_lag import (LagEstimate, estimate_gps_lag,
 estimate_session_gps_lag, apply_gps_lag, resolve_session_lags, summarize_lags,
-xcorr_lag, OBD_HOLD_LEAD_S)`. Pure, no I/O.
+xcorr_lag, OBD_HOLD_LEAD_S, POS_SPEED_OFFSET_S)`. Pure, no I/O.
 
 - **`LagEstimate`** (frozen dataclass): `tau_s: float` (lag to apply, already
   net of `OBD_HOLD_LEAD_S` on the OBD path), `corr: float` (peak correlation;
@@ -857,22 +860,30 @@ xcorr_lag, OBD_HOLD_LEAD_S)`. Pure, no I/O.
   accepted non-edge laps (`source` in `lap`/`accel`) keep their own τ; every
   other lap gets the session median of those (`source="session"`); if none were
   accepted, every lap gets `LAG_DEFAULT_S` (0.45 s) with `source="default"`.
-- **`apply_gps_lag(df, tau_by_lap) -> pd.DataFrame`:** re-times only the column in
-  `RETIMED_COLUMNS` (`speed_mph_gps`) by **sample-and-hold** (never interpolated —
-  the output only ever holds values the receiver actually reported).
-  Position (`lat, long, altitude_m, gps_accuracy_m`), `heading`, `sector`, and the
-  `lap` counter are measured on time vs OBD (2026-09-27) and pass through
-  unchanged. τ is **not** a step function of lap: it is
-  piecewise-linear, blended between one knot per original lap placed at that
-  lap's time midpoint (value = that lap's estimate); at each lap's own midpoint
-  the applied τ equals exactly that lap's estimate, and it blends linearly
-  between adjacent midpoints (holds constant beyond the first/last knot). This
-  keeps the source row index **monotone non-decreasing** across lap seams — a
-  stepped per-lap τ can make it go backward and replay fixes. Adds `gps_lag_s`
-  (float32) = the row's applied τ.
+- **`apply_gps_lag(df, tau_by_lap) -> pd.DataFrame`:** `tau_by_lap` is the SPEED τ per
+  lap. Re-times `SPEED_COLUMNS` (`speed_mph_gps`) by τ_speed(t), and `POSITION_COLUMNS`
+  (`lat, long, altitude_m, gps_accuracy_m, sector, lap`) by
+  τ_pos(t) = τ_speed(t) − `POS_SPEED_OFFSET_S` (0.12 s) — except where τ_speed(t) == 0
+  exactly (disabled/identity path), where τ_pos is also 0. τ_pos is not clamped and
+  may be negative. Both groups are re-timed by **sample-and-hold** (never
+  interpolated — the output only ever holds values the receiver actually reported).
+  `heading` is measured to lag position by a further ~0.08 s but nothing downstream
+  reads it, so it passes through unchanged. τ_speed is **not** a step function of
+  lap: it is piecewise-linear, blended between one knot per ORIGINAL lap (read
+  before the `lap` column is overwritten by the position re-timing) placed at that
+  lap's time midpoint (value = that lap's estimate); at each lap's own midpoint the
+  applied τ_speed equals exactly that lap's estimate, and it blends linearly between
+  adjacent midpoints (holds constant beyond the first/last knot). τ_pos is a
+  constant offset of τ_speed, so it inherits the same shape. This keeps each
+  group's source row index **monotone non-decreasing** across lap seams — a stepped
+  per-lap τ can make it go backward and replay fixes. Because the Lap counter
+  (`lap`) is re-timed by τ_pos, lap boundaries move earlier by τ_pos·v (~8 m at S/F
+  speed) when τ_pos > 0. Adds `gps_lag_s` (float32) = the row's applied τ_speed, and
+  `gps_pos_lag_s` (float32) = the row's applied τ_pos.
 - **`summarize_lags(lags) -> dict`:** the `meta.json` `gps_lag` block —
-  `method_version` ("gps-lag-v1"), `session_median_s` (the median of the
-  *applied* τ over every lap, including session-filled and edge laps — not
-  just laps whose own estimate was accepted — or `None` if no lap has a
-  finite τ), `n_lap`, `n_session`, `n_accel`, `n_default` (source counts),
-  plus `n_disabled` only when any lap's source is `"disabled"`.
+  `method_version` ("gps-lag-v2" — v1 sessions have speed-only correction),
+  `pos_speed_offset_s` (`POS_SPEED_OFFSET_S`, 0.12), `session_median_s` (the median
+  of the *applied* τ_speed over every lap, including session-filled and edge laps —
+  not just laps whose own estimate was accepted — or `None` if no lap has a finite
+  τ), `n_lap`, `n_session`, `n_accel`, `n_default` (source counts), plus
+  `n_disabled` only when any lap's source is `"disabled"`.

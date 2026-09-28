@@ -1,15 +1,25 @@
-"""GPS lag correction — re-time GPS speed onto the row clock at ingest.
+"""GPS lag correction — re-time GPS speed AND position onto the row clock at ingest.
 
 The Garmin GLO 2's speed output is late relative to the row clock (median 0.45 s,
 mostly per-session, ±0.07 s lap-to-lap). TrackAddict's GPS_Delay column is ~0 — it only
-measures Bluetooth transport. This module estimates the lag per lap by cross-correlating
-GPS speed against OBD speed (or d(GPS speed)/dt against the accelerometer when there is
-no OBD) and re-attaches GPS speed to the row clock by sample-and-hold.
+measures Bluetooth transport. This module estimates the SPEED lag per lap by
+cross-correlating GPS speed against OBD speed (or d(GPS speed)/dt against the
+accelerometer when there is no OBD) and re-attaches GPS speed to the row clock by
+sample-and-hold.
 
-Position is NOT re-timed: a regression of GPS-vs-OBD position offset on speed measured
-it ~on time vs OBD (2026-09-27, PIR raw lag −0.02 s, Ridge +0.15 s) — only the receiver's
-speed output carries the filter latency. Shifting position by the speed lag made it run
-0.2–0.4 s ahead of OBD, opening a 10–15 m gap through fast corners.
+Position lags too, but less: measured on the raw corpus (2026-09-27, cumulative GPS
+path length vs OBD odometer, speed channel as a control through the same fit), GPS
+**position** lags the row clock by ~0.15 s, and the GPS **speed** channel lags ~0.12 s
+MORE than position (p10-p90 0.05-0.23 s, robust across three methods; PIR 135 / Ridge
+196 laps). So position gets its own, smaller lag: τ_pos = τ_speed − POS_SPEED_OFFSET_S.
+An earlier attempt that shifted position by the full speed lag overshot by ~0.2 s and
+regressed PIR T1 — that is why position is never just given τ_speed. τ_pos is not
+clamped: it may be negative for low-τ laps.
+
+The TrackAddict Lap counter is GPS-position-timed, so it moves WITH position (same
+τ_pos, same source index) — lap boundaries move earlier by τ_pos·v (~8 m at S/F speed).
+`sector` moves with position too. `heading` is left exactly as logged: it lags ~0.08 s
+more than position-derived course, but nothing downstream reads it.
 
 Design: docs/superpowers/specs/2026-09-18-gps-lag-correction-design.md. Pure, no I/O.
 """
@@ -33,13 +43,16 @@ LAG_DEFAULT_S = 0.45        # 2026-09-18, corpus median GPS lag (618 clean laps,
 ACCEL_SMOOTH_S = 0.5        # 2026-09-27, smoothing window for dv/dt and long_g on the accel path
 MPH_TO_MPS = 0.44704        # exact unit conversion
 G = 9.80665                 # standard gravity, m/s²
-METHOD_VERSION = "gps-lag-v1"
+METHOD_VERSION = "gps-lag-v2"  # v1 sessions have speed-only correction (position untouched)
+POS_SPEED_OFFSET_S = 0.12   # 2026-09-27, speed-channel minus position lag (cumulative GPS
+                            # path length vs OBD odometer, PIR 135 / Ridge 196 laps): τ_pos = τ_speed − 0.12
 
-# Only speed_mph_gps is re-timed (measured 2026-09-27): position (lat, long, altitude_m,
-# gps_accuracy_m), sector, and the TrackAddict lap counter are ~on time vs OBD and are
-# left exactly as logged. heading lags even more than speed (~+0.16 s) but no downstream
-# consumer reads it, so it is also left as logged.
-RETIMED_COLUMNS = ["speed_mph_gps"]
+# speed_mph_gps is re-timed by τ_speed. Position, sector, and the TrackAddict lap
+# counter are GPS-position-timed and are re-timed by τ_pos = τ_speed − POS_SPEED_OFFSET_S
+# (measured 2026-09-27). heading lags position by a further ~0.08 s but no downstream
+# consumer reads it, so it is left exactly as logged.
+SPEED_COLUMNS = ["speed_mph_gps"]
+POSITION_COLUMNS = ["lat", "long", "altitude_m", "gps_accuracy_m", "sector", "lap"]
 
 
 @dataclass(frozen=True)
@@ -168,30 +181,36 @@ def estimate_session_gps_lag(df: pd.DataFrame, enabled: bool = True) -> dict[int
 
 
 def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float]) -> pd.DataFrame:
-    """Re-attach speed_mph_gps to the row clock by SAMPLE-AND-HOLD (never interpolate —
-    the output only ever holds values the receiver actually reported). Position, heading,
-    sector, and the lap counter are not re-timed and pass through unchanged.
+    """Re-attach speed_mph_gps (by τ_speed) and position + lap (by τ_pos) to the row
+    clock by SAMPLE-AND-HOLD (never interpolate — the output only ever holds values
+    the receiver actually reported). `tau_by_lap` is the SPEED τ per lap; the position
+    group uses τ_pos(t) = τ_speed(t) − POS_SPEED_OFFSET_S, except where τ_speed(t) == 0
+    exactly (disabled / identity path), where τ_pos is also 0. heading is left as
+    logged (nothing downstream reads it).
 
-    τ is not applied as a step function of lap: at a lap boundary, a straight per-lap τ
-    step can make the source index j go BACKWARD (e.g. lap k+1 has a smaller τ than lap
-    k, so the first rows of lap k+1 would re-use fixes already consumed at the end of
-    lap k), replaying speed backward across the seam. Instead τ(t) is
-    a piecewise-linear function through one knot per original lap at that lap's time
-    midpoint t_mid_k = (first t of lap k + last t of lap k) / 2, value tau_by_lap[k]
-    (laps missing from the dict, or with a NaN τ, contribute no knot; with no knots at
-    all, τ = 0 everywhere). At each lap's own midpoint the applied τ equals exactly that
-    lap's estimate; between midpoints τ blends linearly, and outside the first/last
-    knot it holds constant (np.interp's default). This keeps the source index j
-    monotone non-decreasing as long as dτ/dt > −1, which is guaranteed here because
-    |Δτ| between adjacent lap estimates is at most ~1.8 s spread over at least half a
-    lap of t on each side (dτ/dt therefore stays close to 0, never near −1).
+    τ_speed is not applied as a step function of lap: at a lap boundary, a straight
+    per-lap τ step can make the source index j go BACKWARD (e.g. lap k+1 has a smaller
+    τ than lap k, so the first rows of lap k+1 would re-use fixes already consumed at
+    the end of lap k), replaying a channel backward across the seam. Instead τ_speed(t)
+    is a piecewise-linear function through one knot per ORIGINAL lap (read before the
+    lap column is overwritten by the position re-timing) at that lap's time midpoint
+    t_mid_k = (first t of lap k + last t of lap k) / 2, value tau_by_lap[k] (laps
+    missing from the dict, or with a NaN τ, contribute no knot; with no knots at all,
+    τ_speed = 0 everywhere). At each lap's own midpoint the applied τ_speed equals
+    exactly that lap's estimate; between midpoints it blends linearly, and outside the
+    first/last knot it holds constant (np.interp's default). This keeps each group's
+    source index j monotone non-decreasing as long as dτ/dt > −1, which is guaranteed
+    here because |Δτ| between adjacent lap estimates is at most ~1.8 s spread over at
+    least half a lap of t on each side (dτ/dt therefore stays close to 0, never near
+    −1). τ_pos is a constant offset from τ_speed, so it inherits the same guarantee.
 
-    Row i takes col[j], j = last index with t[j] <= t[i] + τ(t[i]) (never interpolated).
-    Rows within τ of the log end hold the last fix.
+    Row i takes col[j], j = last index with t[j] <= t[i] + τ_group(t[i]) (never
+    interpolated). Rows within τ of the log end hold the last fix. Each group applies
+    its own duplicate-timestamp identity guard (τ_group == 0 -> identity).
     """
     out = df.copy()
     t = df["t"].to_numpy(dtype=float)
-    lap = df["lap"].to_numpy()
+    lap = df["lap"].to_numpy()  # ORIGINAL lap column — knots come from this, before overwrite
 
     knot_t, knot_tau = [], []
     for k in sorted(pd.unique(lap)):
@@ -206,19 +225,28 @@ def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float]) -> pd.DataFram
         order = np.argsort(knot_t)
         knot_t = np.asarray(knot_t, dtype=float)[order]
         knot_tau = np.asarray(knot_tau, dtype=float)[order]
-        tau = np.interp(t, knot_t, knot_tau)
+        tau_speed = np.interp(t, knot_t, knot_tau)
     else:
-        tau = np.zeros(len(t), dtype=float)
+        tau_speed = np.zeros(len(t), dtype=float)
 
-    j = np.searchsorted(t, t + tau, side="right") - 1
-    j = np.clip(j, 0, len(t) - 1)
-    # τ = 0 must be the identity: with duplicate timestamps searchsorted lands on the
-    # last duplicate, which would overwrite rows that should pass through untouched.
-    j = np.where(tau == 0, np.arange(len(t)), j)
-    for col in RETIMED_COLUMNS:
-        if col in df.columns:
-            out[col] = df[col].to_numpy()[j]
-    out["gps_lag_s"] = tau.astype(np.float32)
+    tau_pos = np.where(tau_speed == 0, 0.0, tau_speed - POS_SPEED_OFFSET_S)
+
+    def _retime(cols, tau):
+        j = np.searchsorted(t, t + tau, side="right") - 1
+        j = np.clip(j, 0, len(t) - 1)
+        # τ = 0 must be the identity: with duplicate timestamps searchsorted lands on
+        # the last duplicate, which would overwrite rows that should pass through
+        # untouched.
+        j = np.where(tau == 0, np.arange(len(t)), j)
+        for col in cols:
+            if col in df.columns:
+                out[col] = df[col].to_numpy()[j]
+
+    _retime(SPEED_COLUMNS, tau_speed)
+    _retime(POSITION_COLUMNS, tau_pos)
+
+    out["gps_lag_s"] = tau_speed.astype(np.float32)
+    out["gps_pos_lag_s"] = tau_pos.astype(np.float32)
     return out
 
 
@@ -233,6 +261,7 @@ def summarize_lags(lags: dict[int, LagEstimate]) -> dict:
     taus = [e.tau_s for e in lags.values() if np.isfinite(e.tau_s)]
     block = {
         "method_version": METHOD_VERSION,
+        "pos_speed_offset_s": POS_SPEED_OFFSET_S,
         "session_median_s": round(float(np.median(taus)), 3) if taus else None,
         "n_lap": counts["lap"], "n_session": counts["session"],
         "n_accel": counts["accel"], "n_default": counts["default"],

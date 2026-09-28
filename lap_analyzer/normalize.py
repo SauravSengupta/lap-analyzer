@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from .config import data_root
-from .gps_lag import apply_gps_lag, estimate_session_gps_lag, summarize_lags
+from .gps_lag import POS_SPEED_OFFSET_S, apply_gps_lag, estimate_session_gps_lag, summarize_lags
 from .schemas import SessionMeta
 
 
@@ -64,7 +64,7 @@ OUTPUT_COLUMNS = [
     "lat_g", "long_g",
     "coolant_f", "iat_f",
     "lat", "long", "altitude_m", "gps_accuracy_m",
-    "gps_lag_s",
+    "gps_lag_s", "gps_pos_lag_s",
 ]
 
 SESSION_ID_RE = re.compile(r"Log-(\d{8}-\d{6})")
@@ -132,10 +132,11 @@ def normalize_dataframe(
     df[OBD_CHANNELS] = df[OBD_CHANNELS].ffill().bfill()
 
     # GPS lag: the Garmin feed's SPEED output is ~0.45 s late vs the row clock
-    # (TrackAddict's GPS_Delay is ~0 — BT transport only). Estimate τ per lap and
-    # re-time speed_mph_gps only by sample-and-hold; position and the Lap counter are
-    # measured on time vs OBD (2026-09-27) and are left exactly as logged.
-    # gps_lag=False → τ = 0. Design: docs/superpowers/specs/2026-09-18-gps-lag-correction-design.md.
+    # (TrackAddict's GPS_Delay is ~0 — BT transport only). Estimate τ_speed per lap and
+    # re-time speed_mph_gps by sample-and-hold; position and the Lap counter (also
+    # GPS-position-timed) are re-timed too, by the smaller τ_speed − 0.12 s measured
+    # 2026-09-27 (POS_SPEED_OFFSET_S). gps_lag=False → τ = 0 everywhere for both groups.
+    # Design: docs/superpowers/specs/2026-09-18-gps-lag-correction-design.md.
     lags = estimate_session_gps_lag(df, enabled=gps_lag)
     df = apply_gps_lag(df, {k: e.tau_s for k, e in lags.items()})
 
@@ -335,8 +336,11 @@ def normalize_session(csv_path: Path, track: str, out_dir: Path, gps_lag: bool =
     lap_times = compute_lap_times(df)
     summary = lap_summary(df, lap_times)
     lag_rows = pd.DataFrame([
-        {"lap": k, "gps_lag_s": round(e.tau_s, 3), "gps_lag_corr": round(e.corr, 4),
-         "gps_lag_source": e.source}
+        {"lap": k, "gps_lag_s": round(e.tau_s, 3),
+         "gps_pos_lag_s": (
+             0.0 if e.source == "disabled" else round(e.tau_s - POS_SPEED_OFFSET_S, 3)
+         ),
+         "gps_lag_corr": round(e.corr, 4), "gps_lag_source": e.source}
         for k, e in derived["gps_lag"].items()
     ])
     summary = summary.merge(lag_rows, on="lap", how="left")

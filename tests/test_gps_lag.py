@@ -13,6 +13,7 @@ from lap_analyzer.gps_lag import (
     LAG_MIN_CORR,
     METHOD_VERSION,
     OBD_HOLD_LEAD_S,
+    POS_SPEED_OFFSET_S,
     LagEstimate,
     apply_gps_lag,
     estimate_gps_lag,
@@ -206,6 +207,16 @@ def test_hold_semantics_speed_is_subset():
     assert after <= before
 
 
+def test_hold_semantics_position_is_subset():
+    # Position is re-timed too (2026-09-27): still sample-and-hold, so the set of
+    # distinct (lat, long) values after correction is a subset of the input's.
+    df = _held_frame()
+    out = apply_gps_lag(df, {1: 0.45, 2: 0.30})
+    before = set(zip(df["lat"], df["long"]))
+    after = set(zip(out["lat"], out["long"]))
+    assert after <= before
+
+
 def test_rows_take_the_fix_from_tau_later():
     df = _held_frame()
     out = apply_gps_lag(df, {1: 0.5, 2: 0.5})
@@ -213,13 +224,31 @@ def test_rows_take_the_fix_from_tau_later():
     assert out.loc[0, "speed_mph_gps"] == df.loc[5, "speed_mph_gps"]
 
 
-def test_position_and_lap_are_unchanged():
-    # Position/altitude/accuracy/lap are measured on-time vs OBD (2026-09-27) and are
-    # never re-timed, even with non-zero, differing per-lap tau.
+def test_position_is_retimed_by_tau_pos():
+    # tau_speed = 0.5 constant -> tau_pos = 0.5 - POS_SPEED_OFFSET_S = 0.38 constant.
+    # Row 0 (t=0.0) holds the fix logged at t=0.38, i.e. the last row with t <= 0.38.
     df = _held_frame()
-    out = apply_gps_lag(df, {1: 0.45, 2: 0.30})
-    for col in ("lat", "long", "altitude_m", "gps_accuracy_m", "lap"):
-        pd.testing.assert_series_equal(out[col], df[col])
+    out = apply_gps_lag(df, {1: 0.5, 2: 0.5})
+    t = df["t"].to_numpy()
+    tau_pos = 0.5 - POS_SPEED_OFFSET_S
+    j = int(np.searchsorted(t, 0.0 + tau_pos, side="right") - 1)
+    assert out.loc[0, "lat"] == df.loc[j, "lat"]
+    assert out.loc[0, "long"] == df.loc[j, "long"]
+    assert out.loc[0, "speed_mph_gps"] == df.loc[5, "speed_mph_gps"]
+
+
+def test_lap_counter_moves_exactly_rows_within_tau_pos_of_boundary():
+    df = _held_frame()
+    tau_by_lap = {1: 0.5, 2: 0.5}
+    out = apply_gps_lag(df, tau_by_lap)
+    tau_pos = 0.5 - POS_SPEED_OFFSET_S
+    t = df["t"].to_numpy()
+    boundary = df.loc[df["lap"] == 2, "t"].iloc[0]
+    expect_moved = (df["lap"] == 1) & (t + tau_pos >= boundary)
+    moved = (out["lap"] == 2) & (df["lap"] == 1)
+    assert moved.equals(expect_moved)
+    assert len(out) == len(df)
+    assert out["lap"].is_monotonic_increasing
 
 
 def test_tail_holds_last_fix_no_nan():
@@ -227,6 +256,8 @@ def test_tail_holds_last_fix_no_nan():
     out = apply_gps_lag(df, {1: 0.45, 2: 1.2})
     assert not out["speed_mph_gps"].isna().any()
     assert out["speed_mph_gps"].iloc[-1] == df["speed_mph_gps"].iloc[-1]
+    assert not out["lat"].isna().any()
+    assert out["lat"].iloc[-1] == df["lat"].iloc[-1]
 
 
 def test_gps_lag_s_is_blended_and_equals_tau_at_each_lap_midpoint():
@@ -251,10 +282,12 @@ def test_gps_lag_s_is_blended_and_equals_tau_at_each_lap_midpoint():
 def test_source_index_never_goes_backward_across_seam():
     df = _held_frame()
     out = apply_gps_lag(df, {1: 1.2, 2: 0.3})
-    # speed_mph_gps increases monotonically with fix index in the fixture; if the
-    # source index j ever goes backward, speed_mph_gps would dip at the seam.
+    # speed_mph_gps and altitude_m increase monotonically with fix index in the
+    # fixture; if the source index j ever goes backward, they would dip at the seam.
     speed = out["speed_mph_gps"].to_numpy()
+    altitude = out["altitude_m"].to_numpy()
     assert np.all(np.diff(speed) >= 0)
+    assert np.all(np.diff(altitude) >= 0)
 
 
 def test_non_gps_columns_untouched():
@@ -271,13 +304,35 @@ def test_zero_tau_is_identity_with_duplicate_timestamps():
     df.loc[10, "t"] = df.loc[11, "t"]
     df.loc[10, "speed_mph_gps"] = -1.0
     out = apply_gps_lag(df, {1: 0.0, 2: 0.0})
-    pd.testing.assert_frame_equal(out.drop(columns="gps_lag_s"), df)
+    pd.testing.assert_frame_equal(out.drop(columns=["gps_lag_s", "gps_pos_lag_s"]), df)
+    assert (out["gps_pos_lag_s"] == 0).all()
 
 
 def test_zero_tau_is_identity():
     df = _held_frame()
     out = apply_gps_lag(df, {1: 0.0, 2: 0.0})
-    pd.testing.assert_frame_equal(out.drop(columns="gps_lag_s"), df)
+    pd.testing.assert_frame_equal(out.drop(columns=["gps_lag_s", "gps_pos_lag_s"]), df)
+    assert (out["gps_pos_lag_s"] == 0).all()
+
+
+def test_negative_tau_pos_is_allowed_no_clamp():
+    # tau_speed = 0.05 constant -> tau_pos = 0.05 - 0.12 = -0.07: allowed, no error.
+    df = _held_frame()
+    out = apply_gps_lag(df, {1: 0.05, 2: 0.05})
+    assert not out["gps_pos_lag_s"].isna().any()
+    np.testing.assert_allclose(out["gps_pos_lag_s"].to_numpy(), -0.07, atol=1e-4)
+
+
+def test_gps_pos_lag_s_is_float32_and_offset_from_gps_lag_s():
+    df = _held_frame()
+    out = apply_gps_lag(df, {1: 0.45, 2: 0.30})
+    assert out["gps_pos_lag_s"].dtype == np.float32
+    speed_tau = out["gps_lag_s"].to_numpy()
+    pos_tau = out["gps_pos_lag_s"].to_numpy()
+    nonzero = speed_tau != 0
+    np.testing.assert_allclose(
+        pos_tau[nonzero], speed_tau[nonzero] - POS_SPEED_OFFSET_S, atol=1e-5
+    )
 
 
 def test_summarize_lags_counts_sources():
@@ -287,3 +342,4 @@ def test_summarize_lags_counts_sources():
     assert s["method_version"] == METHOD_VERSION
     assert (s["n_lap"], s["n_session"], s["n_accel"], s["n_default"]) == (2, 2, 0, 0)
     assert s["session_median_s"] == pytest.approx(0.5)
+    assert s["pos_speed_offset_s"] == pytest.approx(POS_SPEED_OFFSET_S)

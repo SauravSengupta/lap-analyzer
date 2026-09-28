@@ -161,7 +161,7 @@ OUTPUT_COLUMNS = [
     "session_id", "t", "lap", "dist_m", "dist_lap_m", "speed_mph",
     "speed_mph_gps", "throttle_norm", "brake", "rpm", "lat_g", "long_g",
     "coolant_f", "iat_f", "lat", "long", "altitude_m", "gps_accuracy_m",
-    "gps_lag_s",
+    "gps_lag_s", "gps_pos_lag_s",
 ]
 
 
@@ -449,17 +449,25 @@ def test_normalize_gps_lag_disabled():
     np.testing.assert_array_equal(out["speed_mph_gps"].to_numpy(), raw["speed_mph_gps"].to_numpy())
 
 
-# SPEC: normalize.normalize_dataframe — position/lap are measured on-time vs OBD and
-# are left exactly as logged; only speed_mph_gps is re-timed (2026-09-27 decision).
-def test_normalize_gps_lag_leaves_lap_boundaries_and_position():
+# SPEC: normalize.normalize_dataframe — position AND the Lap counter are re-timed by
+# tau_pos = tau_speed - POS_SPEED_OFFSET_S (2026-09-27 decision): lap boundaries move
+# EARLIER (the TrackAddict Lap counter is GPS-position-timed), but dist_lap_m still
+# starts at 0 for every lap since it is re-derived from the (now moved) lap column.
+def test_normalize_gps_lag_moves_lap_boundaries_earlier():
     raw = _lagged_raw(0.5)
     out, _ = normalize_dataframe(raw, "S")
     disabled, _ = normalize_dataframe(raw, "S", gps_lag=False)
-    np.testing.assert_array_equal(out["lat"].to_numpy(), disabled["lat"].to_numpy())
-    np.testing.assert_array_equal(out["long"].to_numpy(), disabled["long"].to_numpy())
-    np.testing.assert_array_equal(out["lap"].to_numpy(), disabled["lap"].to_numpy())
-    np.testing.assert_allclose(out["dist_m"].to_numpy(), disabled["dist_m"].to_numpy())
-    np.testing.assert_allclose(out["dist_lap_m"].to_numpy(), disabled["dist_lap_m"].to_numpy())
+
+    corrected_starts = out.groupby("lap")["t"].min()
+    disabled_starts = disabled.groupby("lap")["t"].min()
+    common = sorted(set(corrected_starts.index) & set(disabled_starts.index))
+    inner_laps = common[1:-1] if len(common) >= 3 else common[1:]
+    assert inner_laps, "expected at least one inner lap"
+    for lap in inner_laps:
+        assert corrected_starts[lap] < disabled_starts[lap]
+
+    for lap, g in out.groupby("lap"):
+        assert g["dist_lap_m"].iloc[0] == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -767,8 +775,10 @@ def test_normalize_session_writes_gps_lag_provenance(make_trackaddict_csv, monke
     meta = normalize_session(csv, "ridge", tmp_path / "out")
     sdir = tmp_path / "out" / meta.session_id
     laps = pd.read_csv(sdir / "laps.csv")
-    assert {"gps_lag_s", "gps_lag_corr", "gps_lag_source"} <= set(laps.columns)
+    assert {"gps_lag_s", "gps_pos_lag_s", "gps_lag_corr", "gps_lag_source"} <= set(laps.columns)
     assert laps["gps_lag_source"].isin(["lap", "session", "accel", "default"]).all()
-    assert meta.gps_lag["method_version"] == "gps-lag-v1"
+    assert meta.gps_lag["method_version"] == "gps-lag-v2"
+    assert meta.gps_lag["pos_speed_offset_s"] == pytest.approx(0.12)
     samples = pd.read_parquet(sdir / "samples.parquet")
     assert "gps_lag_s" in samples.columns
+    assert "gps_pos_lag_s" in samples.columns
