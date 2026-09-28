@@ -45,3 +45,6 @@ Thumbs.db
 
 # Generated plot outputs from scripts/
 scripts/*.png
+
+# GPS-lag A/B baseline root (scripts/gps_lag_acceptance.py)
+data_nolag/

@@ -153,6 +153,7 @@ def main() -> int:
     ap.add_argument("--dump")
     ap.add_argument("--baseline", action="store_true")
     a = ap.parse_args()
+    sys.stdout.reconfigure(encoding="utf-8")  # τ/≤ in the table; Windows redirects default to cp1252
     if a.dump:
         import contextlib
         import io
