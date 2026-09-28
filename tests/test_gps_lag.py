@@ -303,14 +303,14 @@ def test_zero_tau_is_identity_with_duplicate_timestamps():
     df = _held_frame()
     df.loc[10, "t"] = df.loc[11, "t"]
     df.loc[10, "speed_mph_gps"] = -1.0
-    out = apply_gps_lag(df, {1: 0.0, 2: 0.0})
+    out = apply_gps_lag(df, {1: 0.0, 2: 0.0}, pos_offset_s=0.0)
     pd.testing.assert_frame_equal(out.drop(columns=["gps_lag_s", "gps_pos_lag_s"]), df)
     assert (out["gps_pos_lag_s"] == 0).all()
 
 
 def test_zero_tau_is_identity():
     df = _held_frame()
-    out = apply_gps_lag(df, {1: 0.0, 2: 0.0})
+    out = apply_gps_lag(df, {1: 0.0, 2: 0.0}, pos_offset_s=0.0)
     pd.testing.assert_frame_equal(out.drop(columns=["gps_lag_s", "gps_pos_lag_s"]), df)
     assert (out["gps_pos_lag_s"] == 0).all()
 
@@ -329,9 +329,8 @@ def test_gps_pos_lag_s_is_float32_and_offset_from_gps_lag_s():
     assert out["gps_pos_lag_s"].dtype == np.float32
     speed_tau = out["gps_lag_s"].to_numpy()
     pos_tau = out["gps_pos_lag_s"].to_numpy()
-    nonzero = speed_tau != 0
     np.testing.assert_allclose(
-        pos_tau[nonzero], speed_tau[nonzero] - POS_SPEED_OFFSET_S, atol=1e-5
+        pos_tau, speed_tau - POS_SPEED_OFFSET_S, atol=1e-5
     )
 
 
@@ -343,3 +342,12 @@ def test_summarize_lags_counts_sources():
     assert (s["n_lap"], s["n_session"], s["n_accel"], s["n_default"]) == (2, 2, 0, 0)
     assert s["session_median_s"] == pytest.approx(0.5)
     assert s["pos_speed_offset_s"] == pytest.approx(POS_SPEED_OFFSET_S)
+
+
+def test_tau_pos_is_continuous_where_blended_speed_tau_crosses_zero():
+    # Speed τ of opposite sign on adjacent laps blends through 0 between their midpoints;
+    # the position offset must not snap there (only the explicit pos_offset_s disables it).
+    df = _held_frame()
+    out = apply_gps_lag(df, {1: 0.06, 2: -0.06})
+    np.testing.assert_allclose(out["gps_pos_lag_s"].to_numpy(),
+                               out["gps_lag_s"].to_numpy() - POS_SPEED_OFFSET_S, atol=1e-5)

@@ -863,8 +863,9 @@ xcorr_lag, OBD_HOLD_LEAD_S, POS_SPEED_OFFSET_S)`. Pure, no I/O.
 - **`apply_gps_lag(df, tau_by_lap) -> pd.DataFrame`:** `tau_by_lap` is the SPEED τ per
   lap. Re-times `SPEED_COLUMNS` (`speed_mph_gps`) by τ_speed(t), and `POSITION_COLUMNS`
   (`lat, long, altitude_m, gps_accuracy_m, sector, lap`) by
-  τ_pos(t) = τ_speed(t) − `POS_SPEED_OFFSET_S` (0.12 s) — except where τ_speed(t) == 0
-  exactly (disabled/identity path), where τ_pos is also 0. τ_pos is not clamped and
+  τ_pos(t) = τ_speed(t) − `pos_offset_s` (default `POS_SPEED_OFFSET_S` = 0.12 s;
+  normalize passes 0 when `gps_lag=False`, so that path is the identity for both
+  groups; τ_pos stays continuous where the blended τ_speed crosses 0). τ_pos is not clamped and
   may be negative. Both groups are re-timed by **sample-and-hold** (never
   interpolated — the output only ever holds values the receiver actually reported).
   `heading` is measured to lag position by a further ~0.08 s but nothing downstream

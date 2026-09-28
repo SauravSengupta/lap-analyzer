@@ -180,13 +180,14 @@ def estimate_session_gps_lag(df: pd.DataFrame, enabled: bool = True) -> dict[int
     return resolve_session_lags(per_lap, edge)
 
 
-def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float]) -> pd.DataFrame:
+def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float],
+                  pos_offset_s: float = POS_SPEED_OFFSET_S) -> pd.DataFrame:
     """Re-attach speed_mph_gps (by τ_speed) and position + lap (by τ_pos) to the row
     clock by SAMPLE-AND-HOLD (never interpolate — the output only ever holds values
     the receiver actually reported). `tau_by_lap` is the SPEED τ per lap; the position
-    group uses τ_pos(t) = τ_speed(t) − POS_SPEED_OFFSET_S, except where τ_speed(t) == 0
-    exactly (disabled / identity path), where τ_pos is also 0. heading is left as
-    logged (nothing downstream reads it).
+    group uses τ_pos(t) = τ_speed(t) − pos_offset_s (default POS_SPEED_OFFSET_S; the
+    disabled path passes 0 so both groups are the identity). heading is left as logged
+    (nothing downstream reads it).
 
     τ_speed is not applied as a step function of lap: at a lap boundary, a straight
     per-lap τ step can make the source index j go BACKWARD (e.g. lap k+1 has a smaller
@@ -229,7 +230,7 @@ def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float]) -> pd.DataFram
     else:
         tau_speed = np.zeros(len(t), dtype=float)
 
-    tau_pos = np.where(tau_speed == 0, 0.0, tau_speed - POS_SPEED_OFFSET_S)
+    tau_pos = tau_speed - pos_offset_s
 
     def _retime(cols, tau):
         j = np.searchsorted(t, t + tau, side="right") - 1

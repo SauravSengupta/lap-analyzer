@@ -138,7 +138,8 @@ def normalize_dataframe(
     # 2026-09-27 (POS_SPEED_OFFSET_S). gps_lag=False → τ = 0 everywhere for both groups.
     # Design: docs/superpowers/specs/2026-09-18-gps-lag-correction-design.md.
     lags = estimate_session_gps_lag(df, enabled=gps_lag)
-    df = apply_gps_lag(df, {k: e.tau_s for k, e in lags.items()})
+    df = apply_gps_lag(df, {k: e.tau_s for k, e in lags.items()},
+                       pos_offset_s=POS_SPEED_OFFSET_S if gps_lag else 0.0)
 
     # Per-session throttle max is the "true 100%" for this car/sensor (Porsche pedals top out ~90% raw).
     # GPS-only sessions have no throttle channel -> throttle_norm is NaN everywhere (distinct from
