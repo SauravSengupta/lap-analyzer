@@ -231,12 +231,33 @@ def test_tail_holds_last_fix_no_nan():
     assert out["lat"].iloc[-1] == df["lat"].iloc[-1]
 
 
-def test_gps_lag_s_column_is_per_original_lap():
+def test_gps_lag_s_is_blended_and_equals_tau_at_each_lap_midpoint():
     df = _held_frame()
     out = apply_gps_lag(df, {1: 0.45, 2: 0.30})
     assert out["gps_lag_s"].dtype == np.float32
-    assert np.allclose(out.loc[df["lap"] == 1, "gps_lag_s"], 0.45)
-    assert np.allclose(out.loc[df["lap"] == 2, "gps_lag_s"], 0.30)
+
+    t = df["t"].to_numpy()
+    lag = out["gps_lag_s"].to_numpy()
+
+    # Lap 1: t in [0, 2.9], midpoint 1.45. Lap 2: t in [3.0, 5.9], midpoint 4.45.
+    mid1_idx = int(np.argmin(np.abs(t - 1.45)))
+    mid2_idx = int(np.argmin(np.abs(t - 4.45)))
+    assert lag[mid1_idx] == pytest.approx(0.45, abs=0.01)
+    assert lag[mid2_idx] == pytest.approx(0.30, abs=0.01)
+
+    # Between the two midpoints, gps_lag_s is monotone (decreasing, since 0.45 -> 0.30).
+    between = lag[mid1_idx:mid2_idx + 1]
+    assert np.all(np.diff(between) <= 1e-9)
+
+
+def test_source_index_never_goes_backward_across_seam():
+    df = _held_frame()
+    out = apply_gps_lag(df, {1: 1.2, 2: 0.3})
+    # altitude_m increases monotonically with fix index in the fixture; if the source
+    # index j ever goes backward, altitude_m (and lap) would dip at the seam.
+    alt = out["altitude_m"].to_numpy()
+    assert np.all(np.diff(alt) >= 0)
+    assert np.all(np.diff(out["lap"].to_numpy()) >= 0)
 
 
 def test_non_gps_columns_untouched():

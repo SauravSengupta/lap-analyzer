@@ -160,12 +160,44 @@ def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float]) -> pd.DataFram
     """Re-attach GPS-derived columns to the row clock by SAMPLE-AND-HOLD (never interpolate:
     the trajectory layer detects fresh fixes by |Δtrack_dist| > FRESH_FIX_M).
 
-    Row i takes col[j], j = last index with t[j] <= t[i] + τ(original lap of row i).
+    τ is not applied as a step function of lap: at a lap boundary, a straight per-lap τ
+    step can make the source index j go BACKWARD (e.g. lap k+1 has a smaller τ than lap
+    k, so the first rows of lap k+1 would re-use fixes already consumed at the end of
+    lap k), replaying position/altitude/speed backward across the seam. Instead τ(t) is
+    a piecewise-linear function through one knot per original lap at that lap's time
+    midpoint t_mid_k = (first t of lap k + last t of lap k) / 2, value tau_by_lap[k]
+    (laps missing from the dict, or with a NaN τ, contribute no knot; with no knots at
+    all, τ = 0 everywhere). At each lap's own midpoint the applied τ equals exactly that
+    lap's estimate; between midpoints τ blends linearly, and outside the first/last
+    knot it holds constant (np.interp's default). This keeps the source index j
+    monotone non-decreasing as long as dτ/dt > −1, which is guaranteed here because
+    |Δτ| between adjacent lap estimates is at most ~1.8 s spread over at least half a
+    lap of t on each side (dτ/dt therefore stays close to 0, never near −1).
+
+    Row i takes col[j], j = last index with t[j] <= t[i] + τ(t[i]) (never interpolated).
     Rows within τ of the log end hold the last fix.
     """
     out = df.copy()
     t = df["t"].to_numpy(dtype=float)
-    tau = df["lap"].map(tau_by_lap).fillna(0.0).to_numpy(dtype=float)
+    lap = df["lap"].to_numpy()
+
+    knot_t, knot_tau = [], []
+    for k in sorted(pd.unique(lap)):
+        tau_k = tau_by_lap.get(k)
+        if tau_k is None or not np.isfinite(tau_k):
+            continue
+        m = lap == k
+        knot_t.append((t[m][0] + t[m][-1]) / 2.0)
+        knot_tau.append(float(tau_k))
+
+    if knot_t:
+        order = np.argsort(knot_t)
+        knot_t = np.asarray(knot_t, dtype=float)[order]
+        knot_tau = np.asarray(knot_tau, dtype=float)[order]
+        tau = np.interp(t, knot_t, knot_tau)
+    else:
+        tau = np.zeros(len(t), dtype=float)
+
     j = np.searchsorted(t, t + tau, side="right") - 1
     j = np.clip(j, 0, len(t) - 1)
     for col in GPS_COLUMNS:
