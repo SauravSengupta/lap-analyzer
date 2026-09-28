@@ -140,8 +140,8 @@ def _measure(root: str, correct: bool) -> dict:
     env = {**os.environ, "DATA_ROOT": root}
     args = [sys.executable, __file__, "--dump", root] + ([] if correct else ["--baseline"])
     p = subprocess.run(args, env=env, capture_output=True, text=True, cwd=ROOT)
+    sys.stderr.write(p.stderr)   # battery table + diagnostics, pass or fail
     if p.returncode != 0:
-        sys.stderr.write(p.stderr)
         raise SystemExit(2)
     return json.loads(p.stdout.strip().splitlines()[-1])
 
