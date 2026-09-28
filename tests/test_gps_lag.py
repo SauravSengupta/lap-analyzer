@@ -264,6 +264,16 @@ def test_non_gps_columns_untouched():
     pd.testing.assert_series_equal(out["long_g"], df["long_g"])
 
 
+def test_zero_tau_is_identity_with_duplicate_timestamps():
+    # TrackAddict logs occasional duplicate timestamps; with τ = 0 (--no-gps-lag) every
+    # row must pass through untouched, not take the last duplicate's value.
+    df = _held_frame()
+    df.loc[10, "t"] = df.loc[11, "t"]
+    df.loc[10, "speed_mph_gps"] = -1.0
+    out = apply_gps_lag(df, {1: 0.0, 2: 0.0})
+    pd.testing.assert_frame_equal(out.drop(columns="gps_lag_s"), df)
+
+
 def test_zero_tau_is_identity():
     df = _held_frame()
     out = apply_gps_lag(df, {1: 0.0, 2: 0.0})

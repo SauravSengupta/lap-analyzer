@@ -208,6 +208,9 @@ def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float]) -> pd.DataFram
 
     j = np.searchsorted(t, t + tau, side="right") - 1
     j = np.clip(j, 0, len(t) - 1)
+    # τ = 0 must be the identity: with duplicate timestamps searchsorted lands on the
+    # last duplicate, which would overwrite rows that should pass through untouched.
+    j = np.where(tau == 0, np.arange(len(t)), j)
     for col in RETIMED_COLUMNS:
         if col in df.columns:
             out[col] = df[col].to_numpy()[j]
