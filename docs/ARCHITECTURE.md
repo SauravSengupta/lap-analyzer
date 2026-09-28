@@ -71,6 +71,7 @@ component under `lap_analyzer/cli/`:
 | Component | Module | What it owns |
 |---|---|---|
 | 1. Normalizer | `lap_analyzer.normalize` | CSV → tidy parquet + per-lap summary + per-lap dist rescaling |
+| — GPS speed lag correction | `lap_analyzer.gps_lag` | per-lap GPS speed retiming at ingest (decision 7) |
 | 2. Track definition | `tracks/<track>.json` | corner ranges, anchors, reference, in `track_dist_m` units |
 | 2.5. Corner candidate scan | `lap_analyzer.corners` | lat-G peak detection (bootstrap-time seeding only) |
 | 3. Corner labeler | `lap_analyzer.labeler` | Maps-pin drift correction + centerline projection + transit table |
@@ -313,6 +314,67 @@ in `trajectory.py` come from. The trust model with its real numbers is in
 [GPS_TRUST.md](GPS_TRUST.md); the full narrative of the redesign — the dead ends, the
 39.79 s ghost, and the generalisable lessons — is in
 [DESIGN-JOURNEY.md](DESIGN-JOURNEY.md).
+
+### 7. GPS speed lag correction: speed only, estimated per lap at ingest
+
+**What we do.** `lap_analyzer/gps_lag.py` estimates a per-lap GPS speed lag τ
+at `normalize` time by cross-correlating `speed_mph_gps` against `speed_mph`
+(OBD) on a 0.05 s grid over −0.3…1.5 s, parabola-refined, with
+`τ = peak_lag − OBD_HOLD_LEAD_S` (0.075 s, correcting for OBD's own
+sample-and-hold lead). A lap's own estimate is accepted at corr ≥ 0.97 with
+≥ 30 s of >20 mph data; otherwise it falls back to the session median of
+accepted laps (also always used for warmup/cooldown), then to an
+accelerometer-based estimate for GPS-only sessions (`d(speed_mph_gps)/dt` vs
+`long_g`, corr ≥ 0.6), then to a fixed default of 0.45 s. `--no-gps-lag` sets
+τ = 0 everywhere (source `disabled`), reproducing pre-feature output exactly.
+Only `speed_mph_gps` is re-timed, by sample-and-hold, with τ blended linearly
+across each lap-time midpoint so re-timed values never replay backward at lap
+seams. Provenance (`gps_lag_s`, `gps_lag_corr`, `gps_lag_source`,
+`meta.gps_lag`) is written alongside — see [PIPELINE.md](PIPELINE.md).
+
+**Why speed only.** The original design re-timed GPS position by the same τ
+too. Measuring `track_dist_m − dist_lap_m` against speed showed position was
+already ~on time against OBD (PIR −0.02 s, Ridge +0.15 s) while GPS speed
+itself lags ~0.45 s — two different channels inside the same TrackAddict
+record have different latencies. Shifting position by the speed τ therefore
+over-corrected it: position started running 0.2–0.4 s ahead of where it
+should be, opening a 10–15 m gap at PIR T1 and collapsing its rank-eligible
+rate from 80% to 22%. Narrowing the fix to speed-only (user decision,
+2026-09-27) removed that regression; heading lags ~0.16 s more than speed but
+nothing downstream reads heading, so it's left alone too.
+
+**Why sample-and-hold + seam-blended τ.** OBD itself arrives sample-and-held
+(hence `OBD_HOLD_LEAD_S`), so re-timing GPS speed the same way keeps the two
+channels comparable sample-for-sample rather than introducing a smoothing
+mismatch. Blending τ linearly across lap-time midpoints (rather than snapping
+to a new lap's τ at the lap boundary) avoids a step in the re-timed series
+that would otherwise replay a moment of GPS speed twice or skip one at every
+lap seam.
+
+**Why per-lap estimation with a conservative 0.97 cutoff.** τ drifts lap to
+lap (a session median alone left residual lag), so estimating it per lap
+tracks that drift; but a low correlation threshold would accept noisy peaks
+as if they were real measurements. 0.97 stays conservative even though it
+pushes some clean laps to the session-median fallback — see the acceptance
+result below.
+
+**Acceptance.** `scripts/gps_lag_acceptance.py --baseline-root data_nolag
+--root data`: gate 1 (residual lag) reached 91.2% (Ridge) / 91.0% (PIR)
+against a 95% target — **accepted-unmet**: the misses are 39 clean laps whose
+own estimate scored corr 0.84–0.97 and fell back to the session median; an
+independent heading cross-check could not validate them well enough to lower
+the cutoff, so 0.97 stays and the gap is accepted rather than chased. Gate 3
+(OBD-session corner outputs identical to `--no-gps-lag`) — pass. Gate 4
+(trust battery / `rank_eligible`, +0.0 pp) — pass. Gates 2 (heading) and 5
+(T1 brake std) were dropped along with the full-shift position premise they
+were testing.
+
+**Approaches we rejected:** re-timing position by the same τ as speed (see
+above — cost PIR T1 rank-eligibility); a single session-wide τ instead of
+per-lap (left residual drift the per-lap estimate corrects); a looser
+correlation cutoff to shrink the fallback population (would accept
+noise-driven τ estimates as measurements — rejected per the acceptance
+result above).
 
 ---
 

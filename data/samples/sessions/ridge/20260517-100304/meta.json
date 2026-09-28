@@ -9,6 +9,7 @@
   "duration_s": 1881.42,
   "best_lap": 9,
   "best_lap_time_s": 121.286,
+  "has_obd": true,
   "throttle_max_observed": 90.98,
   "speed_max_obd_mph": 126.138,
   "rpm_max": 7878,
@@ -37,5 +38,13 @@
       "long": -123.194524
     }
   ],
-  "raw_csv_path": "D:\\Projects\\lap-analyzer\\data\\raw\\ridge\\Log-20260517-100304 The Ridge - Full Track - 2.01.246.csv"
+  "raw_csv_path": "data\\raw\\ridge\\Log-20260517-100304 The Ridge - Full Track - 2.01.246.csv",
+  "gps_lag": {
+    "method_version": "gps-lag-v1",
+    "session_median_s": 0.279,
+    "n_lap": 10,
+    "n_session": 2,
+    "n_accel": 0,
+    "n_default": 0
+  }
 }

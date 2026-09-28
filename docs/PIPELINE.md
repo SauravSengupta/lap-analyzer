@@ -66,6 +66,7 @@ python -m lap_analyzer.cli.normalize [csv] --track TRACK [--all] [--out DIR] [--
 | `--all` | Process every CSV in `data/raw/<track>/`. |
 | `--out` | Override the output directory (default `data/sessions/<track>/`). |
 | `--force` | Re-normalize even if outputs already exist. |
+| `--no-gps-lag` | Disable the GPS speed lag correction below (τ = 0, `gps_lag_source = "disabled"`; output identical to pre-feature). |
 
 Per-CSV status line is one of: `ok` (normalized), `skip` (already present, no
 `--force`), `excl` (listed in session notes with `exclude`), `gpsonly` (CSV has no
@@ -78,6 +79,20 @@ python -m lap_analyzer.cli.normalize "data/raw/ridge/Log-20260517-100304 ....csv
 # Re-normalize everything (e.g. after editing lap_length_internal_m)
 python -m lap_analyzer.cli.normalize --track ridge --all --force
 ```
+
+**GPS speed lag correction.** TrackAddict's GPS speed lags OBD speed by
+~0.45 s (position is not affected — see below). `normalize` estimates a
+per-lap τ by cross-correlating GPS speed against OBD speed and re-times
+`speed_mph_gps` only, by sample-and-hold with the τ blended across lap seams
+so values never replay backward. Falls back per-lap: `lap` (own
+cross-correlation, corr ≥ 0.97) → `session` (median of the session's accepted
+laps; always used for warmup/cooldown) → `accel` (GPS-only sessions: GPS
+speed derivative vs `long_g`) → `default` (0.45 s). `--no-gps-lag` disables
+it (τ = 0, source `disabled`). Provenance is written to `gps_lag_s` /
+`gps_lag_corr` / `gps_lag_source` in `laps.csv`, per-row `gps_lag_s` in
+`samples.parquet`, and a `gps_lag` summary block in `meta.json` (absent means
+the session predates this feature). See
+[ARCHITECTURE.md](ARCHITECTURE.md) decision 7 for why only speed is re-timed.
 
 ### `label_corners` — corner labels + per-corner-transit table
 
@@ -260,6 +275,7 @@ One row per sample. After `normalize`, the columns are:
 | `lat`, `long` | float | WGS84 |
 | `altitude_m` | float | |
 | `gps_accuracy_m` | float | |
+| `gps_lag_s` | float32 | per-row applied GPS speed lag τ(t), seconds (see the GPS speed lag correction note above) |
 
 After `label_corners`, each `samples.parquet` gains:
 
@@ -288,7 +304,12 @@ One row per lap:
 `session_id, lap, lap_time_s, lap_dist_m, max_speed_mph, avg_speed_mph,
 max_rpm, max_lat_g, max_accel_g, max_decel_g, pct_wot, avg_throttle,
 pct_braking, coolant_min_f, coolant_max_f, iat_min_f, iat_max_f, is_clean,
-clean_reason`
+clean_reason, gps_lag_s, gps_lag_corr, gps_lag_source`
+
+- `gps_lag_s` / `gps_lag_corr` / `gps_lag_source` — this lap's estimated GPS
+  speed lag τ, its cross-correlation, and which fallback tier produced it
+  (`lap`, `session`, `accel`, `default`, or `disabled`). See the GPS speed lag
+  correction note under `normalize` above.
 
 - `lap_time_s` is measured start-crossing to next start-crossing (the final
   in-lap uses end-of-data minus its start).
@@ -307,6 +328,11 @@ n_clean_laps, sample_rate_hz, duration_s, best_lap, best_lap_time_s,
 throttle_max_observed, speed_max_obd_mph, rpm_max, coolant_min_f, coolant_max_f,
 iat_first_f, iat_max_f, trackaddict_start_finish, trackaddict_split_points,
 raw_csv_path`.
+
+A `gps_lag` block summarizes the session's GPS speed lag correction:
+`method_version, session_median_s, n_lap, n_session, n_accel, n_default` (lap
+counts per fallback tier). Absent means the session was normalized before this
+feature and predates the correction.
 
 ### `corners.parquet` — the analytical workhorse
 

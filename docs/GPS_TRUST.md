@@ -32,6 +32,20 @@ They come from one evidence pass (design R1), and a monotone `s_hat` crosses any
 scalar ruler position exactly once, so ghost crossings (a teleport path clipping a
 distant gate) are structurally impossible.
 
+## Input calibration: GPS speed is re-timed upstream
+
+Before any of the above runs, `normalize` re-times `speed_mph_gps` (only) to
+correct a per-lap GPS speed lag against OBD speed (typically ~0.45 s; see
+[PIPELINE.md](PIPELINE.md) and ARCHITECTURE.md decision 7). GPS **position**
+was measured to be ~on time against OBD and is left unshifted — shifting it
+was tried and cost T1 rank-eligibility (80% → 22%) at PIR. So the trajectory
+layer's inputs are unchanged for OBD sessions: `dist_lap_m` (OBD) and
+`track_dist_m` (built from position) are exactly as before, and every
+downstream trust decision in this file applies unmodified. `speed_mph_gps` is
+a cross-check channel only and isn't consumed by `trajectory.py`. A session's
+`meta.gps_lag` block being absent means it was normalized before this
+correction existed.
+
 ## Always trustworthy: OBD
 
 The OBD channels — `speed_mph`, `throttle`, `long_g`, `rpm`, and `dist_lap_m`
