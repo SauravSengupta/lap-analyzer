@@ -35,11 +35,10 @@ MPH_TO_MPS = 0.44704        # exact unit conversion
 G = 9.80665                 # standard gravity, m/s²
 METHOD_VERSION = "gps-lag-v1"
 
-# Only speed_mph_gps carries the receiver's filter latency (measured 2026-09-27):
-# position (lat, long, altitude_m, gps_accuracy_m), heading, sector, and the
-# TrackAddict lap counter are all on time vs OBD and are left exactly as logged.
-# heading lags even more than speed (~+0.16 s) but no downstream consumer reads it,
-# so it is left uncorrected too.
+# Only speed_mph_gps is re-timed (measured 2026-09-27): position (lat, long, altitude_m,
+# gps_accuracy_m), sector, and the TrackAddict lap counter are ~on time vs OBD and are
+# left exactly as logged. heading lags even more than speed (~+0.16 s) but no downstream
+# consumer reads it, so it is also left as logged.
 RETIMED_COLUMNS = ["speed_mph_gps"]
 
 
@@ -165,10 +164,9 @@ def estimate_session_gps_lag(df: pd.DataFrame, enabled: bool = True) -> dict[int
 
 
 def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float]) -> pd.DataFrame:
-    """Re-attach speed_mph_gps to the row clock by SAMPLE-AND-HOLD (never interpolate:
-    the trajectory layer detects fresh fixes by |Δtrack_dist| > FRESH_FIX_M). Position,
-    heading, sector, and the lap counter are not re-timed (measured on time vs OBD) and
-    pass through unchanged.
+    """Re-attach speed_mph_gps to the row clock by SAMPLE-AND-HOLD (never interpolate —
+    the output only ever holds values the receiver actually reported). Position, heading,
+    sector, and the lap counter are not re-timed and pass through unchanged.
 
     τ is not applied as a step function of lap: at a lap boundary, a straight per-lap τ
     step can make the source index j go BACKWARD (e.g. lap k+1 has a smaller τ than lap
