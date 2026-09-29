@@ -408,16 +408,29 @@ def test_normalize_dtypes():
 
 
 def _lagged_raw(delay_s, n_laps=4, lap_s=60.0, rate=27.0):
-    """Raw frame whose GPS channels lag OBD by delay_s (plus the OBD hold lead)."""
+    """Raw frame whose GPS channels lag OBD by delay_s (plus the OBD hold lead).
+
+    `lat` moves north by the OBD-integrated distance (held at ~8 Hz fixes) so
+    the path-length position estimator has a physically consistent trajectory
+    to measure, not just the speed xcorr path.
+    """
     from lap_analyzer.gps_lag import OBD_HOLD_LEAD_S
     t = np.arange(0, n_laps * lap_s, 1 / rate)
     v = lambda x: 70 + 30 * np.sin(2 * np.pi * x / 23.0) + 12 * np.sin(2 * np.pi * x / 6.7)  # noqa: E731
     d = delay_s + OBD_HOLD_LEAD_S
     n = len(t)
+    v_mps = v(t) * 0.44704
+    D = np.concatenate([[0.0], np.cumsum((v_mps[:-1] + v_mps[1:]) / 2.0 * np.diff(t))])
+    fix_hz = 8.0
+    fix_times = np.arange(0, n_laps * lap_s, 1 / fix_hz)
+    fix_D = np.interp(fix_times - d, t, D, left=D[0], right=D[-1])
+    deg_per_m = 1.0 / 111320.0  # ~1 degree latitude per 111.32 km
+    fix_lat = 45.0 + fix_D * deg_per_m
+    idx = np.clip(np.searchsorted(fix_times, t, side="right") - 1, 0, len(fix_times) - 1)
     return _raw_frame(
         n=n, t=t, lap=(t // lap_s).astype(int) + 1,
         speed_mph=v(t), speed_mph_gps=v(t - d),
-        lat=45.0 + np.floor((t - d) * 8) * 1e-6,   # ~8 Hz held fixes, moving
+        lat=fix_lat[idx],
         long=np.full(n, -122.0),
     )
 
@@ -777,8 +790,13 @@ def test_normalize_session_writes_gps_lag_provenance(make_trackaddict_csv, monke
     laps = pd.read_csv(sdir / "laps.csv")
     assert {"gps_lag_s", "gps_pos_lag_s", "gps_lag_corr", "gps_lag_source"} <= set(laps.columns)
     assert laps["gps_lag_source"].isin(["lap", "session", "accel", "default"]).all()
-    assert meta.gps_lag["method_version"] == "gps-lag-v2"
+    assert meta.gps_lag["method_version"] == "gps-lag-v3"
     assert meta.gps_lag["pos_speed_offset_s"] == pytest.approx(0.12)
+    assert meta.gps_lag["pos_lag_source"] in ("path", "offset")
+    assert isinstance(meta.gps_lag["pos_lag_s"], float)
+    # laps.csv's gps_pos_lag_s is the single session τ_pos, constant across all laps.
+    assert laps["gps_pos_lag_s"].nunique() == 1
+    assert laps["gps_pos_lag_s"].iloc[0] == pytest.approx(meta.gps_lag["pos_lag_s"])
     samples = pd.read_parquet(sdir / "samples.parquet")
     assert "gps_lag_s" in samples.columns
     assert "gps_pos_lag_s" in samples.columns

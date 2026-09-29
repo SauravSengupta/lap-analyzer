@@ -7,14 +7,18 @@ cross-correlating GPS speed against OBD speed (or d(GPS speed)/dt against the
 accelerometer when there is no OBD) and re-attaches GPS speed to the row clock by
 sample-and-hold.
 
-Position lags too, but less: measured on the raw corpus (2026-09-27, cumulative GPS
-path length vs OBD odometer, speed channel as a control through the same fit), GPS
-**position** lags the row clock by ~0.15 s, and the GPS **speed** channel lags ~0.12 s
-MORE than position (p10-p90 0.05-0.23 s, robust across three methods; PIR 135 / Ridge
-196 laps). So position gets its own, smaller lag: τ_pos = τ_speed − POS_SPEED_OFFSET_S.
-An earlier attempt that shifted position by the full speed lag overshot by ~0.2 s and
-regressed PIR T1 — that is why position is never just given τ_speed. τ_pos is not
-clamped: it may be negative for low-τ laps.
+Position lags too, but less. Originally (2026-09-27) this was measured indirectly as
+speed-minus-offset: τ_pos = τ_speed − POS_SPEED_OFFSET_S (0.12 s, cumulative GPS path
+length vs OBD odometer, speed channel as a control through the same fit; PIR 135 /
+Ridge 196 laps). That offset mixed two different estimation methods (xcorr for
+τ_speed, path-length for the offset) and over-corrected PIR. As of 2026-09-28, τ_pos
+is measured DIRECTLY per session with the path-length method (`estimate_position_lag`
+/ `estimate_session_position_lag`) — one τ_pos for the whole session (per-lap position
+estimates are too noisy: p10-p90 ≈ 0.04-0.45 s). The speed-offset method survives only
+as the fallback for GPS-only sessions (no OBD odometer to fit against) or sessions
+with too few eligible laps. An earlier attempt that shifted position by the full speed
+lag overshot by ~0.2 s and regressed PIR T1 — that is why position is never just given
+τ_speed. τ_pos is not clamped: it may be negative.
 
 The TrackAddict Lap counter is GPS-position-timed, so it moves WITH position (same
 τ_pos, same source index) — lap boundaries move earlier by τ_pos·v (~8 m at S/F speed).
@@ -43,14 +47,25 @@ LAG_DEFAULT_S = 0.45        # 2026-09-18, corpus median GPS lag (618 clean laps,
 ACCEL_SMOOTH_S = 0.5        # 2026-09-27, smoothing window for dv/dt and long_g on the accel path
 MPH_TO_MPS = 0.44704        # exact unit conversion
 G = 9.80665                 # standard gravity, m/s²
-METHOD_VERSION = "gps-lag-v2"  # v1 sessions have speed-only correction (position untouched)
+METHOD_VERSION = "gps-lag-v3"  # v1: speed-only. v2: τ_pos = τ_speed - offset. v3: τ_pos
+                                # measured directly per session (path-length method, 2026-09-28)
 POS_SPEED_OFFSET_S = 0.12   # 2026-09-27, speed-channel minus position lag (cumulative GPS
-                            # path length vs OBD odometer, PIR 135 / Ridge 196 laps): τ_pos = τ_speed − 0.12
+                            # path length vs OBD odometer, PIR 135 / Ridge 196 laps).
+                            # Fallback only as of gps-lag-v3: τ_pos = τ_speed − 0.12 when the
+                            # direct path-length estimate is unusable (GPS-only session, or
+                            # too few eligible laps).
+POS_LAG_GRID_S = 0.01       # 2026-09-27, path-length vs OBD odometer, PIR 135 / Ridge 196 laps: τ search step
+POS_SMOOTH_FIXES = 7        # 2026-09-27, path-length vs OBD odometer, PIR 135 / Ridge 196 laps: centred rolling mean (in fresh fixes)
+POS_TELEPORT_M = 30.0       # 2026-09-27, path-length vs OBD odometer, PIR 135 / Ridge 196 laps: reject a lap with a fresh-fix jump above this
+POS_TRIM_ROWS = 50          # 2026-09-27, path-length vs OBD odometer, PIR 135 / Ridge 196 laps: rows trimmed off each end before fitting
+POS_MIN_ROWS = 1500         # 2026-09-27, path-length vs OBD odometer, PIR 135 / Ridge 196 laps: per-lap eligibility floor
+POS_MAX_SLOW_FRAC = 0.05    # 2026-09-27, path-length vs OBD odometer, PIR 135 / Ridge 196 laps: per-lap eligibility ceiling (rows < LAG_MIN_SPEED_MPH)
+POS_MIN_LAPS = 2            # 2026-09-28, minimum eligible non-edge laps to trust the session path-length median over the speed-offset fallback
 
 # speed_mph_gps is re-timed by τ_speed. Position, sector, and the TrackAddict lap
-# counter are GPS-position-timed and are re-timed by τ_pos = τ_speed − POS_SPEED_OFFSET_S
-# (measured 2026-09-27). heading lags position by a further ~0.08 s but no downstream
-# consumer reads it, so it is left exactly as logged.
+# counter are GPS-position-timed and are re-timed by a single per-session τ_pos
+# (measured directly by estimate_session_position_lag). heading lags position by a
+# further ~0.08 s but no downstream consumer reads it, so it is left exactly as logged.
 SPEED_COLUMNS = ["speed_mph_gps"]
 POSITION_COLUMNS = ["lat", "long", "altitude_m", "gps_accuracy_m", "sector", "lap"]
 
@@ -180,14 +195,133 @@ def estimate_session_gps_lag(df: pd.DataFrame, enabled: bool = True) -> dict[int
     return resolve_session_lags(per_lap, edge)
 
 
+def estimate_position_lag(t, lat, lon, speed_mph) -> float:
+    """One lap's POSITION lag by the path-length method (2026-09-27, PIR 135 / Ridge
+    196 laps): cross-correlate a smoothed cumulative GPS path length against OBD
+    cumulative distance (trapezoidal). Pure per-lap estimator — session-level
+    eligibility (min rows, max slow fraction) and the median/fallback ladder live in
+    `estimate_session_position_lag`, not here. Returns NaN when the lap is too short,
+    has too few fresh GPS fixes, or has a teleport glitch (a fresh-fix step > 30 m).
+
+    Method: D(t) is the trapezoidal cumulative OBD distance. Fresh fixes are rows
+    where lat or lon changed from the previous row (first row counts). Positions are
+    projected to local (x, y) metres with ONE fixed reference (mean lat/lon over the
+    lap — not a per-point cos(lat), which adds a spurious term and shortens the path),
+    smoothed with a 7-fix centred rolling mean, then their cumulative path length S is
+    interpolated onto the row clock. Both S and D are trimmed 50 rows off each end
+    before fitting S(t) ≈ a + k·D(t − τ) + c·(t − t0) by least squares over a
+    τ grid; τ is the value minimising the residual std. The returned lag is that τ,
+    net of OBD_HOLD_LEAD_S (the OBD sample-and-hold's lead on the row clock).
+    """
+    t = np.asarray(t, dtype=float)
+    lat = np.asarray(lat, dtype=float)
+    lon = np.asarray(lon, dtype=float)
+    speed_mph = np.asarray(speed_mph, dtype=float)
+    n = len(t)
+    if n - 2 * POS_TRIM_ROWS < 50:
+        return float("nan")
+
+    # D(t): trapezoidal cumulative OBD distance.
+    v_mps = speed_mph * MPH_TO_MPS
+    D = np.concatenate([[0.0], np.cumsum((v_mps[:-1] + v_mps[1:]) / 2.0 * np.diff(t))])
+
+    # Fresh fixes: lat or lon changed from the previous row (first row counts).
+    fresh = np.ones(n, dtype=bool)
+    fresh[1:] = (lat[1:] != lat[:-1]) | (lon[1:] != lon[:-1])
+    if fresh.sum() < 10:
+        return float("nan")
+
+    # Local projection with ONE fixed reference (not a per-point cos(lat), which
+    # adds a spurious term and shortens the path ~9%).
+    lat_r, lon_r = np.radians(lat), np.radians(lon)
+    lat0, lon0 = float(np.mean(lat_r)), float(np.mean(lon_r))
+    c0 = np.cos(lat0)
+    R = 6371000.0
+    x = R * c0 * (lon_r - lon0)
+    y = R * (lat_r - lat0)
+
+    t_fresh = t[fresh]
+    x_fresh = pd.Series(x[fresh]).rolling(POS_SMOOTH_FIXES, center=True, min_periods=1).mean().to_numpy()
+    y_fresh = pd.Series(y[fresh]).rolling(POS_SMOOTH_FIXES, center=True, min_periods=1).mean().to_numpy()
+
+    steps = np.hypot(np.diff(x_fresh), np.diff(y_fresh))
+    if len(steps) and steps.max() > POS_TELEPORT_M:
+        return float("nan")  # teleport glitch
+
+    S_fresh = np.concatenate([[0.0], np.cumsum(steps)])
+    S = np.interp(t, t_fresh, S_fresh)
+
+    lo, hi = POS_TRIM_ROWS, n - POS_TRIM_ROWS
+    t_trim, S_trim = t[lo:hi], S[lo:hi]
+    if len(t_trim) < 50:
+        return float("nan")
+
+    t0 = t_trim[0]
+    best_tau, best_std = 0.0, np.inf
+    for tau in np.arange(LAG_SEARCH_MIN_S, LAG_SEARCH_MAX_S + POS_LAG_GRID_S, POS_LAG_GRID_S):
+        D_shift = np.interp(t_trim - tau, t, D)
+        A = np.column_stack([np.ones_like(t_trim), D_shift, t_trim - t0])
+        coef, *_ = np.linalg.lstsq(A, S_trim, rcond=None)
+        resid = S_trim - A @ coef
+        std = float(resid.std())
+        if std < best_std:
+            best_std, best_tau = std, float(tau)
+
+    return best_tau - OBD_HOLD_LEAD_S
+
+
+def estimate_session_position_lag(df: pd.DataFrame, speed_lags: dict[int, "LagEstimate"],
+                                  enabled: bool = True) -> tuple[float, str, int]:
+    """One τ_pos for the whole session (2026-09-28: per-lap position estimates are too
+    noisy, p10-p90 ~= 0.04-0.45 s, to apply lap-by-lap).
+
+    Tries the path-length method (`estimate_position_lag`) over each non-edge lap
+    (edge = first/last lap when >= 3 laps) that meets the per-lap eligibility rule
+    (>= POS_MIN_ROWS rows, <= POS_MAX_SLOW_FRAC of rows under LAG_MIN_SPEED_MPH) and
+    returns a finite value. With >= POS_MIN_LAPS such laps, returns
+    (median, "path", n_laps). Otherwise — a GPS-only session (no OBD speed to fit
+    against) or an OBD session with too few eligible laps — falls back to the median
+    over laps of (τ_speed - POS_SPEED_OFFSET_S), source "offset". `enabled=False`
+    always returns (0.0, "disabled", 0). Not clamped.
+    """
+    if not enabled:
+        return 0.0, "disabled", 0
+
+    laps = sorted(int(k) for k in df["lap"].unique())
+    edge = {laps[0], laps[-1]} if len(laps) >= 3 else set()
+
+    taus: list[float] = []
+    has_obd = "speed_mph" in df.columns and np.isfinite(df["speed_mph"]).any()
+    if has_obd:
+        for k, g in df.groupby("lap", sort=True):
+            if int(k) in edge:
+                continue
+            if len(g) < POS_MIN_ROWS:
+                continue
+            if float((g["speed_mph"] < LAG_MIN_SPEED_MPH).mean()) > POS_MAX_SLOW_FRAC:
+                continue
+            tau = estimate_position_lag(g["t"], g["lat"], g["long"], g["speed_mph"])
+            if np.isfinite(tau):
+                taus.append(tau)
+
+    if len(taus) >= POS_MIN_LAPS:
+        return float(np.median(taus)), "path", len(taus)
+
+    offset_taus = [e.tau_s - POS_SPEED_OFFSET_S for e in speed_lags.values() if np.isfinite(e.tau_s)]
+    if not offset_taus:
+        return float("nan"), "offset", 0
+    return float(np.median(offset_taus)), "offset", len(offset_taus)
+
+
 def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float],
-                  pos_offset_s: float = POS_SPEED_OFFSET_S) -> pd.DataFrame:
-    """Re-attach speed_mph_gps (by τ_speed) and position + lap (by τ_pos) to the row
-    clock by SAMPLE-AND-HOLD (never interpolate — the output only ever holds values
-    the receiver actually reported). `tau_by_lap` is the SPEED τ per lap; the position
-    group uses τ_pos(t) = τ_speed(t) − pos_offset_s (default POS_SPEED_OFFSET_S; the
-    disabled path passes 0 so both groups are the identity). heading is left as logged
-    (nothing downstream reads it).
+                  tau_pos: float = 0.0) -> pd.DataFrame:
+    """Re-attach speed_mph_gps (by τ_speed) and position + lap (by a constant τ_pos)
+    to the row clock by SAMPLE-AND-HOLD (never interpolate — the output only ever
+    holds values the receiver actually reported). `tau_by_lap` is the SPEED τ per lap;
+    `tau_pos` is a single SESSION-level position τ (measured directly by
+    `estimate_session_position_lag` — no blend needed since it is already one value
+    for the whole session; default 0.0 so the disabled path is the identity for both
+    groups). heading is left as logged (nothing downstream reads it).
 
     τ_speed is not applied as a step function of lap: at a lap boundary, a straight
     per-lap τ step can make the source index j go BACKWARD (e.g. lap k+1 has a smaller
@@ -199,11 +333,12 @@ def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float],
     missing from the dict, or with a NaN τ, contribute no knot; with no knots at all,
     τ_speed = 0 everywhere). At each lap's own midpoint the applied τ_speed equals
     exactly that lap's estimate; between midpoints it blends linearly, and outside the
-    first/last knot it holds constant (np.interp's default). This keeps each group's
-    source index j monotone non-decreasing as long as dτ/dt > −1, which is guaranteed
-    here because |Δτ| between adjacent lap estimates is at most ~1.8 s spread over at
-    least half a lap of t on each side (dτ/dt therefore stays close to 0, never near
-    −1). τ_pos is a constant offset from τ_speed, so it inherits the same guarantee.
+    first/last knot it holds constant (np.interp's default). This keeps the speed
+    group's source index j monotone non-decreasing as long as dτ/dt > −1, which is
+    guaranteed here because |Δτ| between adjacent lap estimates is at most ~1.8 s
+    spread over at least half a lap of t on each side (dτ/dt therefore stays close to
+    0, never near −1). τ_pos is constant over the whole session, so its source index is
+    trivially monotone.
 
     Row i takes col[j], j = last index with t[j] <= t[i] + τ_group(t[i]) (never
     interpolated). Rows within τ of the log end hold the last fix. Each group applies
@@ -230,7 +365,7 @@ def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float],
     else:
         tau_speed = np.zeros(len(t), dtype=float)
 
-    tau_pos = tau_speed - pos_offset_s
+    tau_pos_arr = np.full(len(t), float(tau_pos), dtype=float)
 
     def _retime(cols, tau):
         j = np.searchsorted(t, t + tau, side="right") - 1
@@ -244,19 +379,24 @@ def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float],
                 out[col] = df[col].to_numpy()[j]
 
     _retime(SPEED_COLUMNS, tau_speed)
-    _retime(POSITION_COLUMNS, tau_pos)
+    _retime(POSITION_COLUMNS, tau_pos_arr)
 
     out["gps_lag_s"] = tau_speed.astype(np.float32)
-    out["gps_pos_lag_s"] = tau_pos.astype(np.float32)
+    out["gps_pos_lag_s"] = tau_pos_arr.astype(np.float32)
     return out
 
 
-def summarize_lags(lags: dict[int, LagEstimate]) -> dict:
+def summarize_lags(lags: dict[int, LagEstimate],
+                   pos_lag: tuple[float, str, int] | None = None) -> dict:
     """The meta.json `gps_lag` block (method_version is the staleness marker).
 
-    `session_median_s` is the median of the applied τ (`tau_s`) across ALL laps in the
-    session — including laps that fell back to the session median or an edge-lap
-    default — not just the laps that set their own estimate.
+    `session_median_s` is the median of the applied τ_speed (`tau_s`) across ALL laps
+    in the session — including laps that fell back to the session median or an
+    edge-lap default — not just the laps that set their own estimate. `pos_speed_offset_s`
+    is kept for the fallback method's provenance even though it is no longer applied to
+    every lap. `pos_lag`, when given, is `estimate_session_position_lag`'s
+    (tau_pos, source, n_laps_used) — surfaced as `pos_lag_s`, `pos_lag_source`,
+    `pos_lag_n_laps`.
     """
     counts = Counter(e.source for e in lags.values())
     taus = [e.tau_s for e in lags.values() if np.isfinite(e.tau_s)]
@@ -269,4 +409,9 @@ def summarize_lags(lags: dict[int, LagEstimate]) -> dict:
     }
     if counts["disabled"]:
         block["n_disabled"] = counts["disabled"]
+    if pos_lag is not None:
+        tau_pos, pos_source, n_laps_used = pos_lag
+        block["pos_lag_s"] = round(float(tau_pos), 3) if np.isfinite(tau_pos) else None
+        block["pos_lag_source"] = pos_source
+        block["pos_lag_n_laps"] = n_laps_used
     return block

@@ -13,11 +13,14 @@ from lap_analyzer.gps_lag import (
     LAG_MIN_CORR,
     METHOD_VERSION,
     OBD_HOLD_LEAD_S,
+    POS_MIN_LAPS,
     POS_SPEED_OFFSET_S,
     LagEstimate,
     apply_gps_lag,
     estimate_gps_lag,
+    estimate_position_lag,
     estimate_session_gps_lag,
+    estimate_session_position_lag,
     resolve_session_lags,
     summarize_lags,
     xcorr_lag,
@@ -182,6 +185,98 @@ def test_disabled_is_zero_everywhere():
 
 
 # ---------------------------------------------------------------------------
+# estimate_position_lag / estimate_session_position_lag — path-length method
+# (2026-09-27 decision: measure position lag directly instead of τ_speed − offset)
+# ---------------------------------------------------------------------------
+
+R_EARTH_M = 6371000.0
+OVAL_RADIUS_M = 200.0
+
+
+def _oval_lap(true_delay_s, duration=90.0, rate=27.0, fix_hz=9.0):
+    """A synthetic lap on a circle of radius OVAL_RADIUS_M, arc-length-parametrised
+    so cumulative path length equals cumulative OBD distance exactly (noiseless).
+    GPS positions are the TRUE track positions evaluated true_delay_s late, held
+    at ~fix_hz fresh fixes (sample-and-hold), like a real GPS receiver."""
+    t = np.arange(0, duration, 1 / rate)
+    v_mph = 40.0 + 15.0 * np.sin(2 * np.pi * t / 17.3)  # varies ~25-55 mph, never < 20
+    v_mps = v_mph * 0.44704
+    D = np.concatenate([[0.0], np.cumsum((v_mps[:-1] + v_mps[1:]) / 2.0 * np.diff(t))])
+
+    fix_times = np.arange(0, duration, 1 / fix_hz)
+    fix_D = np.interp(fix_times - true_delay_s, t, D, left=D[0], right=D[-1])
+    angle = fix_D / OVAL_RADIUS_M
+    fix_x = OVAL_RADIUS_M * np.sin(angle)
+    fix_y = OVAL_RADIUS_M * (1 - np.cos(angle))
+
+    lat0, lon0 = 45.0, -122.0
+    c0 = np.cos(np.radians(lat0))
+    fix_lat = lat0 + np.degrees(fix_y / R_EARTH_M)
+    fix_lon = lon0 + np.degrees(fix_x / (R_EARTH_M * c0))
+
+    idx = np.clip(np.searchsorted(fix_times, t, side="right") - 1, 0, len(fix_times) - 1)
+    lat, lon = fix_lat[idx], fix_lon[idx]
+    return t, lat, lon, v_mph
+
+
+def test_estimate_position_lag_recovers_known_delay():
+    d = 0.20 + OBD_HOLD_LEAD_S
+    t, lat, lon, v_mph = _oval_lap(d)
+    tau = estimate_position_lag(t, lat, lon, v_mph)
+    assert tau == pytest.approx(0.20, abs=0.03)
+
+
+def test_estimate_position_lag_nan_on_teleport():
+    t, lat, lon, v_mph = _oval_lap(0.20 + OBD_HOLD_LEAD_S)
+    lat = lat.copy()
+    lat[len(lat) // 2] += 1.0  # ~100km jump, way past the 30m teleport threshold
+    assert np.isnan(estimate_position_lag(t, lat, lon, v_mph))
+
+
+def test_estimate_position_lag_nan_on_short_lap():
+    t, lat, lon, v_mph = _oval_lap(0.20 + OBD_HOLD_LEAD_S, duration=3.0)
+    assert np.isnan(estimate_position_lag(t, lat, lon, v_mph))
+
+
+def _pos_session(delays, lap_s=90.0):
+    """OBD session frame: lap k's GPS position is delayed by delays[k-1]."""
+    parts = []
+    for k, d in enumerate(delays, start=1):
+        t, lat, lon, v_mph = _oval_lap(d + OBD_HOLD_LEAD_S, duration=lap_s)
+        parts.append(pd.DataFrame({
+            "t": t + (k - 1) * lap_s, "lap": k,
+            "lat": lat, "long": lon, "speed_mph": v_mph,
+        }))
+    return pd.concat(parts, ignore_index=True)
+
+
+def test_estimate_session_position_lag_obd_session_uses_path_method():
+    df = _pos_session([0.15, 0.20, 0.25, 0.30])  # laps 1,4 are edges, excluded
+    speed_lags = {k: _ok(0.5) for k in (1, 2, 3, 4)}
+    tau_pos, source, n_laps = estimate_session_position_lag(df, speed_lags)
+    assert source == "path"
+    assert n_laps >= POS_MIN_LAPS
+    assert tau_pos == pytest.approx(0.225, abs=0.05)  # median of inner laps 0.20, 0.25
+
+
+def test_estimate_session_position_lag_gps_only_falls_back_to_offset():
+    df = _pos_session([0.2, 0.2, 0.2, 0.2])
+    df["speed_mph"] = np.nan  # GPS-only session: path method has no OBD to check against
+    speed_lags = {1: _ok(0.5, "accel"), 2: _ok(0.6, "accel"),
+                  3: _ok(0.4, "accel"), 4: _ok(0.5, "accel")}
+    tau_pos, source, n_laps = estimate_session_position_lag(df, speed_lags)
+    expect = float(np.median([e.tau_s - POS_SPEED_OFFSET_S for e in speed_lags.values()]))
+    assert source == "offset"
+    assert tau_pos == pytest.approx(expect)
+
+
+def test_estimate_session_position_lag_disabled():
+    df = _pos_session([0.2, 0.2, 0.2])
+    tau_pos, source, n_laps = estimate_session_position_lag(df, {}, enabled=False)
+    assert (tau_pos, source, n_laps) == (0.0, "disabled", 0)
+
+
+# ---------------------------------------------------------------------------
 # apply_gps_lag — sample-and-hold re-timing
 # ---------------------------------------------------------------------------
 
@@ -225,12 +320,12 @@ def test_rows_take_the_fix_from_tau_later():
 
 
 def test_position_is_retimed_by_tau_pos():
-    # tau_speed = 0.5 constant -> tau_pos = 0.5 - POS_SPEED_OFFSET_S = 0.38 constant.
-    # Row 0 (t=0.0) holds the fix logged at t=0.38, i.e. the last row with t <= 0.38.
+    # tau_pos is now an explicit scalar, independent of tau_speed.
+    # Row 0 (t=0.0) holds the fix logged at t=tau_pos, i.e. the last row with t <= tau_pos.
     df = _held_frame()
-    out = apply_gps_lag(df, {1: 0.5, 2: 0.5})
+    tau_pos = 0.38
+    out = apply_gps_lag(df, {1: 0.5, 2: 0.5}, tau_pos=tau_pos)
     t = df["t"].to_numpy()
-    tau_pos = 0.5 - POS_SPEED_OFFSET_S
     j = int(np.searchsorted(t, 0.0 + tau_pos, side="right") - 1)
     assert out.loc[0, "lat"] == df.loc[j, "lat"]
     assert out.loc[0, "long"] == df.loc[j, "long"]
@@ -239,9 +334,8 @@ def test_position_is_retimed_by_tau_pos():
 
 def test_lap_counter_moves_exactly_rows_within_tau_pos_of_boundary():
     df = _held_frame()
-    tau_by_lap = {1: 0.5, 2: 0.5}
-    out = apply_gps_lag(df, tau_by_lap)
-    tau_pos = 0.5 - POS_SPEED_OFFSET_S
+    tau_pos = 0.38
+    out = apply_gps_lag(df, {1: 0.5, 2: 0.5}, tau_pos=tau_pos)
     t = df["t"].to_numpy()
     boundary = df.loc[df["lap"] == 2, "t"].iloc[0]
     expect_moved = (df["lap"] == 1) & (t + tau_pos >= boundary)
@@ -303,35 +397,32 @@ def test_zero_tau_is_identity_with_duplicate_timestamps():
     df = _held_frame()
     df.loc[10, "t"] = df.loc[11, "t"]
     df.loc[10, "speed_mph_gps"] = -1.0
-    out = apply_gps_lag(df, {1: 0.0, 2: 0.0}, pos_offset_s=0.0)
+    out = apply_gps_lag(df, {1: 0.0, 2: 0.0}, tau_pos=0.0)
     pd.testing.assert_frame_equal(out.drop(columns=["gps_lag_s", "gps_pos_lag_s"]), df)
     assert (out["gps_pos_lag_s"] == 0).all()
 
 
 def test_zero_tau_is_identity():
     df = _held_frame()
-    out = apply_gps_lag(df, {1: 0.0, 2: 0.0}, pos_offset_s=0.0)
+    out = apply_gps_lag(df, {1: 0.0, 2: 0.0}, tau_pos=0.0)
     pd.testing.assert_frame_equal(out.drop(columns=["gps_lag_s", "gps_pos_lag_s"]), df)
     assert (out["gps_pos_lag_s"] == 0).all()
 
 
 def test_negative_tau_pos_is_allowed_no_clamp():
-    # tau_speed = 0.05 constant -> tau_pos = 0.05 - 0.12 = -0.07: allowed, no error.
+    # An explicit negative session τ_pos is allowed, no clamping.
     df = _held_frame()
-    out = apply_gps_lag(df, {1: 0.05, 2: 0.05})
+    out = apply_gps_lag(df, {1: 0.05, 2: 0.05}, tau_pos=-0.07)
     assert not out["gps_pos_lag_s"].isna().any()
     np.testing.assert_allclose(out["gps_pos_lag_s"].to_numpy(), -0.07, atol=1e-4)
 
 
-def test_gps_pos_lag_s_is_float32_and_offset_from_gps_lag_s():
+def test_gps_pos_lag_s_is_float32_and_equals_tau_pos_everywhere():
     df = _held_frame()
-    out = apply_gps_lag(df, {1: 0.45, 2: 0.30})
+    tau_pos = 0.33
+    out = apply_gps_lag(df, {1: 0.45, 2: 0.30}, tau_pos=tau_pos)
     assert out["gps_pos_lag_s"].dtype == np.float32
-    speed_tau = out["gps_lag_s"].to_numpy()
-    pos_tau = out["gps_pos_lag_s"].to_numpy()
-    np.testing.assert_allclose(
-        pos_tau, speed_tau - POS_SPEED_OFFSET_S, atol=1e-5
-    )
+    np.testing.assert_allclose(out["gps_pos_lag_s"].to_numpy(), tau_pos, atol=1e-5)
 
 
 def test_summarize_lags_counts_sources():
@@ -342,12 +433,13 @@ def test_summarize_lags_counts_sources():
     assert (s["n_lap"], s["n_session"], s["n_accel"], s["n_default"]) == (2, 2, 0, 0)
     assert s["session_median_s"] == pytest.approx(0.5)
     assert s["pos_speed_offset_s"] == pytest.approx(POS_SPEED_OFFSET_S)
+    assert "pos_lag_s" not in s
 
 
-def test_tau_pos_is_continuous_where_blended_speed_tau_crosses_zero():
-    # Speed τ of opposite sign on adjacent laps blends through 0 between their midpoints;
-    # the position offset must not snap there (only the explicit pos_offset_s disables it).
-    df = _held_frame()
-    out = apply_gps_lag(df, {1: 0.06, 2: -0.06})
-    np.testing.assert_allclose(out["gps_pos_lag_s"].to_numpy(),
-                               out["gps_lag_s"].to_numpy() - POS_SPEED_OFFSET_S, atol=1e-5)
+def test_summarize_lags_adds_pos_lag_block_when_given():
+    lags = {1: LagEstimate(0.5, 0.99, "lap"), 2: LagEstimate(0.5, 0.99, "lap")}
+    s = summarize_lags(lags, pos_lag=(0.22, "path", 2))
+    assert s["method_version"] == "gps-lag-v3"
+    assert s["pos_lag_s"] == pytest.approx(0.22)
+    assert s["pos_lag_source"] == "path"
+    assert s["pos_lag_n_laps"] == 2

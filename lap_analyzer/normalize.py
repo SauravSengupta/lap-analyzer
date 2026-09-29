@@ -9,7 +9,12 @@ import numpy as np
 import pandas as pd
 
 from .config import data_root
-from .gps_lag import POS_SPEED_OFFSET_S, apply_gps_lag, estimate_session_gps_lag, summarize_lags
+from .gps_lag import (
+    apply_gps_lag,
+    estimate_session_gps_lag,
+    estimate_session_position_lag,
+    summarize_lags,
+)
 from .schemas import SessionMeta
 
 
@@ -133,13 +138,15 @@ def normalize_dataframe(
 
     # GPS lag: the Garmin feed's SPEED output is ~0.45 s late vs the row clock
     # (TrackAddict's GPS_Delay is ~0 — BT transport only). Estimate τ_speed per lap and
-    # re-time speed_mph_gps by sample-and-hold; position and the Lap counter (also
-    # GPS-position-timed) are re-timed too, by the smaller τ_speed − 0.12 s measured
-    # 2026-09-27 (POS_SPEED_OFFSET_S). gps_lag=False → τ = 0 everywhere for both groups.
+    # re-time speed_mph_gps by sample-and-hold. Position and the Lap counter (also
+    # GPS-position-timed) are re-timed too, by a single per-session τ_pos measured
+    # DIRECTLY by the path-length method (estimate_session_position_lag) — this must
+    # run on the frame BEFORE apply_gps_lag re-times it (raw positions, OBD ffilled).
+    # gps_lag=False → τ = 0 everywhere for both groups.
     # Design: docs/superpowers/specs/2026-09-18-gps-lag-correction-design.md.
     lags = estimate_session_gps_lag(df, enabled=gps_lag)
-    df = apply_gps_lag(df, {k: e.tau_s for k, e in lags.items()},
-                       pos_offset_s=POS_SPEED_OFFSET_S if gps_lag else 0.0)
+    tau_pos, pos_source, pos_n_laps = estimate_session_position_lag(df, lags, enabled=gps_lag)
+    df = apply_gps_lag(df, {k: e.tau_s for k, e in lags.items()}, tau_pos=tau_pos)
 
     # Per-session throttle max is the "true 100%" for this car/sensor (Porsche pedals top out ~90% raw).
     # GPS-only sessions have no throttle channel -> throttle_norm is NaN everywhere (distinct from
@@ -179,7 +186,11 @@ def normalize_dataframe(
     if df["rpm"].notna().any():
         df["rpm"] = df["rpm"].fillna(0).astype("int32")
 
-    return df[OUTPUT_COLUMNS], {"throttle_max_observed": throttle_max, "gps_lag": lags}
+    return df[OUTPUT_COLUMNS], {
+        "throttle_max_observed": throttle_max,
+        "gps_lag": lags,
+        "gps_pos_lag": (tau_pos, pos_source, pos_n_laps),
+    }
 
 
 def compute_lap_times(df: pd.DataFrame) -> pd.DataFrame:
@@ -336,11 +347,10 @@ def normalize_session(csv_path: Path, track: str, out_dir: Path, gps_lag: bool =
         raw, session_id, canonical_lap_length_m=canonical_length, gps_lag=gps_lag)
     lap_times = compute_lap_times(df)
     summary = lap_summary(df, lap_times)
+    session_tau_pos = round(derived["gps_pos_lag"][0], 3)
     lag_rows = pd.DataFrame([
         {"lap": k, "gps_lag_s": round(e.tau_s, 3),
-         "gps_pos_lag_s": (
-             0.0 if e.source == "disabled" else round(e.tau_s - POS_SPEED_OFFSET_S, 3)
-         ),
+         "gps_pos_lag_s": session_tau_pos,
          "gps_lag_corr": round(e.corr, 4), "gps_lag_source": e.source}
         for k, e in derived["gps_lag"].items()
     ])
@@ -348,7 +358,7 @@ def normalize_session(csv_path: Path, track: str, out_dir: Path, gps_lag: bool =
     meta = build_session_meta(
         session_id, track, raw_meta, derived, df, summary, first_utc, has_obd=has_obd
     )
-    meta.gps_lag = summarize_lags(derived["gps_lag"])
+    meta.gps_lag = summarize_lags(derived["gps_lag"], derived["gps_pos_lag"])
 
     session_dir = out_dir / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
