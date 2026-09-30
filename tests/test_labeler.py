@@ -234,13 +234,13 @@ def _anchor(corner_id, lat, lon):
     """
     from lap_analyzer.labeler import CalibrationAnchor
 
-    fields = dict(
-        corner_id=corner_id,
-        ref_lat=lat,
-        ref_long=lon,
-        start_m=0.0,
-        end_m=10_000.0,
-    )
+    fields = {
+        "corner_id": corner_id,
+        "ref_lat": lat,
+        "ref_long": lon,
+        "start_m": 0.0,
+        "end_m": 10_000.0,
+    }
     try:
         return CalibrationAnchor(**fields)
     except TypeError:
@@ -318,7 +318,7 @@ def test_compute_lap_drift_single_anchor_zero_disagreement(make_lap_samples):
     sample_lon = a_lon + 12.0 / M_PER_DEG_LON
     lap = _lap_with_points(make_lap_samples, [(sample_lat, sample_lon)])
     anchors = [_anchor("A", a_lat, a_lon)]
-    drift_lat, drift_lon, n_used, disagreement = compute_lap_drift(
+    _drift_lat, drift_lon, n_used, disagreement = compute_lap_drift(
         lap, anchors, M_PER_DEG_LAT, M_PER_DEG_LON
     )
     assert n_used == 1
@@ -735,7 +735,7 @@ def test_build_session_corners_emits_section_rank_eligible(ridge_session_corners
     assert (sig >= 0).all()
     # A-tier is exactly σ_t ≤ 0.10 s AND section status ok — a rank-eligible row can
     # never carry a σ wider than the tier-A bound.
-    assert (corners.loc[corners["rank_eligible"] == True, "section_sigma_t_s"] <= 0.10 + 1e-9).all()  # noqa: E712
+    assert (corners.loc[corners["rank_eligible"] == True, "section_sigma_t_s"] <= 0.10 + 1e-9).all()
 
 
 # ---------------------------------------------------------------------------

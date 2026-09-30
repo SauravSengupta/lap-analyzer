@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
@@ -135,7 +135,7 @@ def _iter_clean_laps(track: str):
             if not {"lap", "track_dist_m", "dist_lap_m", "lat", "long"} <= have:
                 continue
             df = pd.read_parquet(sp, columns=cols)
-        except Exception:
+        except (OSError, ValueError):  # unreadable/corrupt sample file: skipped by design
             continue
         if df["track_dist_m"].isna().all():
             continue
@@ -211,7 +211,7 @@ def build_corridor(track: str, save: bool = True) -> Corridor:
         "calib_version": CALIB_VERSION,
         "input_hash": _centerline_hash(centerline),
         "n_laps": n_laps,
-        "build_date": date.today().isoformat(),
+        "build_date": datetime.now(UTC).date().isoformat(),
         "track": track,
     }
     corridor = Corridor(s_bin=grid, e_lo=e_lo, e_hi=e_hi, tx=tx, ty=ty, gx=gx, gy=gy,
@@ -474,7 +474,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     if len(knots) < 2:
         return _prior_only_trajectory(t, dl, v, backbone_status, corridor, checks,
                                       sigma_floor=sigma_floor)
-    dh, se, neff = _knot_fit(dl[ev], delta[ev], w_env[ev], knots)
+    dh, se, _neff = _knot_fit(dl[ev], delta[ev], w_env[ev], knots)
     slope_bound = _slope_bound(knots, dl, v, g["lat_g"].to_numpy(dtype=float), corridor, td)
     dh, clip_mag = _rate_limit(dh, slope_bound, knots)
     sig = _knot_sigma(dh, se, clip_mag, knots, dl[ev], slope_bound)

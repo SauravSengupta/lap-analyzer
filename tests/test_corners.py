@@ -20,7 +20,6 @@ import pytest
 
 from lap_analyzer.corners import extract_lap_candidates, extract_session_candidates
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

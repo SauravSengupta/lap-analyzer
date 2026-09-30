@@ -34,7 +34,6 @@ import pandas as pd
 from .config import sessions_dir, tracks_dir
 from .normalize import reference_session_ids
 
-
 # STANDARD reliability tier — see notebooks/reliability_tiers.py for the analysis
 # that produced these thresholds.
 DRIFT_DISAGREEMENT_LIMIT_M = 20.0

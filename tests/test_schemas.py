@@ -5,26 +5,25 @@ pydantic v2 BaseModel. Behavior derived from the spec only.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
 
 from lap_analyzer.schemas import SessionMeta
 
-
 # The 9 required fields per SPEC, with spec-typed sample values.
-REQUIRED = dict(
-    session_id="20260101-120000",
-    track="ridge",
-    vehicle="Porsche 981 Cayman",
-    date_utc=datetime(2026, 1, 1, 12, 0, 0),
-    n_laps=5,
-    n_clean_laps=3,
-    sample_rate_hz=21.0,
-    duration_s=600.0,
-    raw_csv_path="data/raw/ridge/Log-20260101-120000.csv",
-)
+REQUIRED = {
+    "session_id": "20260101-120000",
+    "track": "ridge",
+    "vehicle": "Porsche 981 Cayman",
+    "date_utc": datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
+    "n_laps": 5,
+    "n_clean_laps": 3,
+    "sample_rate_hz": 21.0,
+    "duration_s": 600.0,
+    "raw_csv_path": "data/raw/ridge/Log-20260101-120000.csv",
+}
 
 # The optional fields that SPEC says default to None. The OBD-derived ones are
 # None for GPS-only sessions.

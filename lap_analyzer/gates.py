@@ -29,7 +29,7 @@ class TrackFrame:
     m_per_deg_lon: float
 
     @classmethod
-    def from_centerline(cls, centerline: pd.DataFrame) -> "TrackFrame":
+    def from_centerline(cls, centerline: pd.DataFrame) -> TrackFrame:
         lat0 = float(centerline["lat"].mean())
         lon0 = float(centerline["long"].mean())
         return cls(

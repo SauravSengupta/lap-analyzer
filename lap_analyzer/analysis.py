@@ -116,7 +116,7 @@ _SECTION_TIME_COLS = ["session_id", "lap", "corner_id", "section_time_s", "sigma
 _RANGE_TIME_COLS = [c for c in _SECTION_TIME_COLS if c != "corner_id"]
 
 
-def _read_traj_samples(sp) -> "pd.DataFrame | None":
+def _read_traj_samples(sp) -> pd.DataFrame | None:
     """A session's samples with every channel the trajectory estimator needs.
     None when the parquet lacks the core columns or has no GPS at all."""
     try:
@@ -125,7 +125,7 @@ def _read_traj_samples(sp) -> "pd.DataFrame | None":
         if not {"lap", "t", "track_dist_m", "dist_lap_m", "lat", "long"} <= have:
             return None
         s = pd.read_parquet(sp, columns=[c for c in _TRAJ_SAMPLE_COLS if c in have])
-    except Exception:
+    except (OSError, ValueError):  # unreadable/corrupt parquet (pyarrow raises ArrowInvalid ⊂ ValueError)
         return None
     if s["track_dist_m"].isna().all():
         return None
@@ -171,7 +171,7 @@ def _corpus_trajectories(track: str):
             if len(g) >= 2:
                 try:
                     traj = estimate_trajectory(g, corridor, frame)
-                except Exception:
+                except Exception:  # noqa: BLE001 — degenerate lap → no estimate; a row is still emitted (R10)
                     traj = None
             yield sid_dir.name, int(lap_n), g, corridor, traj
 
@@ -261,7 +261,7 @@ def gear_bands(track: str) -> np.ndarray:
     for sp in sorted(root.rglob("samples.parquet")):
         try:
             df = pd.read_parquet(sp, columns=["rpm", "speed_mph"])
-        except Exception:
+        except (OSError, ValueError):  # unreadable / pre-OBD-schema file: skipped by design
             continue
         # Exclude idle / slow-speed creep where the rpm/speed ratio is meaningless.
         m = (df["rpm"] > 1200) & (df["speed_mph"] > 8)
@@ -317,7 +317,7 @@ def derive_gear(
     t = s["t"].to_numpy()
     # Fallback only for a single-sample frame; 0.046s ~= TrackAddict's 21.7 Hz.
     dt = float(np.median(np.diff(t))) if len(t) > 1 else 0.046
-    n_dwell = max(1, int(round(min_dwell_s / dt)))
+    n_dwell = max(1, round(min_dwell_s / dt))
     confirmed = _confirm_runs(raw, n_dwell)
     gear = pd.Series(confirmed, index=s.index).ffill()
     gear[rpm == 0] = np.nan
@@ -329,7 +329,7 @@ def span_time(
     dist_a: float,
     dist_b: float,
     centerline: pd.DataFrame,
-    frame: "TrackFrame | None" = None,
+    frame: TrackFrame | None = None,
     corridor=None,
 ):
     """Gate-to-gate section time for one lap — a thin shell over the trajectory layer.

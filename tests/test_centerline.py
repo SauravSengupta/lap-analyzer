@@ -210,7 +210,7 @@ def test_install_laps_single_clean_lap(installed_synth):
 def test_install_meta_records_synthetic_and_source(installed_synth):
     # SPEC: centerline.install_centerline — meta.json records synthetic: true and
     #       the source path.
-    synth_dir, centerline_path = installed_synth
+    synth_dir, _centerline_path = installed_synth
     meta = json.loads((synth_dir / "meta.json").read_text(encoding="utf-8"))
     assert meta.get("synthetic") is True
     # The source path references the centerline parquet that was installed.

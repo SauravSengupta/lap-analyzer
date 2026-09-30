@@ -326,7 +326,7 @@ def test_estimate_session_position_lag_gps_only_falls_back_to_offset():
     df["speed_mph"] = np.nan  # GPS-only session: path method has no OBD to check against
     speed_lags = {1: _ok(0.5, "accel"), 2: _ok(0.6, "accel"),
                   3: _ok(0.4, "accel"), 4: _ok(0.5, "accel")}
-    tau_pos, source, n_laps = estimate_session_position_lag(df, speed_lags)
+    tau_pos, source, _n_laps = estimate_session_position_lag(df, speed_lags)
     expect = float(np.median([e.tau_s - POS_SPEED_OFFSET_S for e in speed_lags.values()]))
     assert source == "offset"
     assert tau_pos == pytest.approx(expect)

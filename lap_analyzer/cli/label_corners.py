@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     for sd in targets:
         try:
             n_samples = label_session_samples(sd, track, ref=ref)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — batch runner: report the session and keep going
             print(f"  {sd.name}  LABEL FAILED: {e}", file=sys.stderr)
             continue
         labeled.append(sd)
@@ -73,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     for sd in labeled:
         try:
             n_transits = build_session_corners_file(sd, track, corridor=corridor, frame=frame)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — batch runner: report the session and keep going
             print(f"  {sd.name}  CORNERS FAILED: {e}", file=sys.stderr)
             continue
         n_sessions += 1

@@ -28,7 +28,6 @@ from lap_analyzer.normalize import (
     session_id_from_filename,
 )
 
-
 # ---------------------------------------------------------------------------
 # session_id_from_filename
 # ---------------------------------------------------------------------------
@@ -416,7 +415,7 @@ def _lagged_raw(delay_s, n_laps=4, lap_s=60.0, rate=27.0):
     """
     from lap_analyzer.gps_lag import OBD_HOLD_LEAD_S
     t = np.arange(0, n_laps * lap_s, 1 / rate)
-    v = lambda x: 70 + 30 * np.sin(2 * np.pi * x / 23.0) + 12 * np.sin(2 * np.pi * x / 6.7)  # noqa: E731
+    v = lambda x: 70 + 30 * np.sin(2 * np.pi * x / 23.0) + 12 * np.sin(2 * np.pi * x / 6.7)
     d = delay_s + OBD_HOLD_LEAD_S
     n = len(t)
     v_mps = v(t) * 0.44704

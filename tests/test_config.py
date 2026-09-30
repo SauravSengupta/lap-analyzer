@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 from lap_analyzer.config import (
     corpus_dir,
     data_root,

@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
 
-
 SMOOTH_SECONDS = 0.3
 MIN_PEAK_SPACING_S = 3.0
 PEAK_HEIGHT_G = 0.4
@@ -40,8 +39,8 @@ def extract_lap_candidates(lap_df: pd.DataFrame, sample_rate_hz: float) -> list[
     obd_present = bool(lap_df["speed_mph"].notna().any())
     speed_col = "speed_mph" if obd_present else "speed_mph_gps"
 
-    window = max(3, int(round(SMOOTH_SECONDS * sample_rate_hz)))
-    distance = int(round(MIN_PEAK_SPACING_S * sample_rate_hz))
+    window = max(3, round(SMOOTH_SECONDS * sample_rate_hz))
+    distance = round(MIN_PEAK_SPACING_S * sample_rate_hz)
 
     lat_g = lap_df["lat_g"].to_numpy()
     lat_g_smooth = pd.Series(lat_g).rolling(window=window, center=True, min_periods=1).mean().to_numpy()

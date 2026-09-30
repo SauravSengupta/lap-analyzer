@@ -131,7 +131,7 @@ def xcorr_lag(t, ref, sig, mask=None) -> tuple[float, float]:
 def _smooth(t, x):
     """Centred rolling mean over ~ACCEL_SMOOTH_S (window in samples from the median dt)."""
     dt = float(np.median(np.diff(t))) if len(t) > 1 else 1.0
-    w = max(1, int(round(ACCEL_SMOOTH_S / dt)))
+    w = max(1, round(ACCEL_SMOOTH_S / dt))
     return pd.Series(x).rolling(w, center=True, min_periods=1).mean().to_numpy()
 
 
@@ -288,7 +288,7 @@ def estimate_position_lag(t, lat, lon, speed_mph) -> float:
     return float(ks[i] * POS_LAG_GRID_S) - OBD_HOLD_LEAD_S
 
 
-def estimate_session_position_lag(df: pd.DataFrame, speed_lags: dict[int, "LagEstimate"],
+def estimate_session_position_lag(df: pd.DataFrame, speed_lags: dict[int, LagEstimate],
                                   enabled: bool = True) -> tuple[float, str, int]:
     """One τ_pos for the whole session (2026-09-28: per-lap position estimates are too
     noisy, p10-p90 ~= 0.04-0.45 s, to apply lap-by-lap).
