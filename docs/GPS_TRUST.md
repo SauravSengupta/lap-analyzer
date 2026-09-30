@@ -32,23 +32,33 @@ They come from one evidence pass (design R1), and a monotone `s_hat` crosses any
 scalar ruler position exactly once, so ghost crossings (a teleport path clipping a
 distant gate) are structurally impossible.
 
-## Input calibration: GPS speed is re-timed upstream
+## Input calibration: GPS speed and position are re-timed upstream
 
-Before any of the above runs, `normalize` re-times `speed_mph_gps` (only) to
-correct a per-lap GPS speed lag against OBD speed (typically ~0.45 s; see
-[PIPELINE.md](PIPELINE.md) and ARCHITECTURE.md decision 7). GPS **position**
-was measured to be ~on time against OBD and is left unshifted — shifting it
-was tried and cost T1 rank-eligibility (80% → 22%) at PIR.
+Before any of the above runs, `normalize` removes two measured GPS lags (see
+[PIPELINE.md](PIPELINE.md) and ARCHITECTURE.md decision 7): a per-lap lag on
+`speed_mph_gps` against OBD speed (typically ~0.45 s), and ONE per-session lag
+on GPS **position** (lat, long, altitude, accuracy, sector, and the TrackAddict
+Lap counter) measured directly as GPS path length against the OBD odometer
+(~0.15–0.18 s; session median 0.18 s on both tracks). Speed lags position by a
+further ~0.12 s, so the two are corrected separately. Heading is left as logged.
 
-For **OBD sessions** the trajectory layer's inputs are unchanged: `dist_lap_m`
-(OBD-integrated) and `track_dist_m` (built from position) are exactly as
-before, so every downstream trust decision in this file applies unmodified;
-`speed_mph_gps` there is a cross-check channel only. For **GPS-only**
-sessions (~12% of sessions, no OBD), `speed_mph_gps` *is* the speed backbone —
-`dist_m`/`dist_lap_m` integrate it, and `trajectory.py` and the corner labeler
-use it directly — so the re-timing now puts that backbone on the same clock
-as GPS position instead of ~0.45 s behind it. A session's `meta.gps_lag` block
-being absent means it was normalized before this correction existed.
+For **OBD sessions** `dist_lap_m` (OBD-integrated) is unchanged, but
+`track_dist_m` and the trajectory corridor are built from position and so move
+with the correction: OBD events on `track_dist_m` land at their true position
+(~0.18·v earlier) and lap boundaries move earlier by τ_pos·v (~8 m at S/F
+speed). The corridor must be rebuilt after re-normalizing (PIPELINE.md). For
+**GPS-only** sessions (~12% of sessions, no OBD), `speed_mph_gps` *is* the speed
+backbone — `dist_m`/`dist_lap_m` integrate it, and `trajectory.py` and the corner
+labeler use it directly — so the speed re-timing puts that backbone on the
+same clock as position; their τ_pos uses the `offset` fallback.
+
+The trust layer's bands were effectively tuned on lagged positions. The
+correction widens PIR T1's odometer-vs-gate gap by ~5–7 m (entry ~45 m/s, exit
+~22 m/s), past T1's 8.1 m driven band, so T1 `rank_eligible` fell 80% → 66%
+(accepted-unmet 2026-09-29; every other corner and both tracks' overall rates
+are within tolerance). Recalibrating the bands on corrected data, for all
+corners, is the open follow-up. A session's `meta.gps_lag` block being absent or
+older than `gps-lag-v3` means it is stale.
 
 ## Always trustworthy: OBD
 

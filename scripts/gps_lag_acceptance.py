@@ -50,6 +50,13 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 TRACKS = ["ridge", "pir"]
 
+# Accepted-unmet per-corner P2 gaps. User decision 2026-09-29: PIR T1 rank_eligible
+# 80% -> 66%. The correction widens T1's odometer-vs-gate gap by ~5-7 m (entry ~45 m/s,
+# exit ~22 m/s), past T1's 8.1 m driven band, which was effectively tuned on lagged
+# positions. Follow-up: recalibrate the trust layer's bands on corrected data (all
+# corners, not T1 alone).
+ACCEPTED_UNMET_CORNERS = {("pir", "T1")}
+
 
 def _residual(track):
     from lap_analyzer.config import sessions_dir
@@ -206,11 +213,17 @@ def main() -> int:
         # deltas are corrected - baseline (negative = a drop); print the signed
         # change as-is rather than a drop magnitude mislabeled with a "+".
         deltas = {cid: (corr_pc[cid] - base_pc[cid]) * 100 for cid in base_pc if cid in corr_pc}
-        worst_cid = min(deltas, key=deltas.get) if deltas else None
-        worst_delta = deltas[worst_cid] if worst_cid is not None else float("nan")
-        gate(f"P2 per-corner rank_eligible {t}", not deltas or -worst_delta <= 5.0,
+        accepted = {cid: d for cid, d in deltas.items() if (t, str(cid)) in ACCEPTED_UNMET_CORNERS}
+        gated = {cid: d for cid, d in deltas.items() if cid not in accepted}
+        worst_cid = min(gated, key=gated.get) if gated else None
+        worst_delta = gated[worst_cid] if worst_cid is not None else float("nan")
+        gate(f"P2 per-corner rank_eligible {t}", not gated or -worst_delta <= 5.0,
              f"worst corner {worst_cid}: {base_pc.get(worst_cid, float('nan')):.1%} -> "
              f"{corr_pc.get(worst_cid, float('nan')):.1%} ({worst_delta:+.1f} pp)")
+        for cid, d in accepted.items():
+            print(f"[ACCEPTED-UNMET] P2 per-corner rank_eligible {t} {cid}: "
+                  f"{base_pc[cid]:.1%} -> {corr_pc[cid]:.1%} ({d:+.1f} pp) "
+                  f"(accepted 2026-09-29: T1 odometer-vs-gate gap widens past its driven band)")
 
     for t in TRACKS:
         b = base[f"{t}_brake_std_median"]
