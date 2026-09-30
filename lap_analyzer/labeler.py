@@ -24,7 +24,6 @@ from scipy.spatial import cKDTree
 
 from .config import sessions_dir, tracks_dir
 
-
 THROTTLE_LIFT_THRESHOLD = 0.8
 THROTTLE_RETURN_THRESHOLD = 0.8
 THROTTLE_RETURN_SUSTAIN_S = 0.3

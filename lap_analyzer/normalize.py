@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -288,7 +288,7 @@ def build_session_meta(
         session_id=session_id,
         track=track,
         vehicle=raw_meta.get("vehicle", "unknown"),
-        date_utc=datetime.fromtimestamp(first_utc, tz=timezone.utc),
+        date_utc=datetime.fromtimestamp(first_utc, tz=UTC),
         n_laps=int(summary["lap"].nunique()),
         n_clean_laps=int(summary["is_clean"].sum()),
         sample_rate_hz=round(sample_rate, 2),
@@ -318,7 +318,7 @@ def _canonical_lap_length(track: str) -> float | None:
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):  # unreadable file or malformed JSON (JSONDecodeError ⊂ ValueError)
         return None
     val = data.get("lap_length_internal_m")
     return float(val) if val else None

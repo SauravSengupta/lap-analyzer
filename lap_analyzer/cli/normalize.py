@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         try:
             meta = normalize_session(csv, args.track, out, gps_lag=not args.no_gps_lag)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — batch runner: report the session and keep going
             print(f"FAIL  {sid}: {type(e).__name__}: {e}")
             failed += 1
             continue

@@ -25,9 +25,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from lap_analyzer.quality import compute_quality
 import lap_analyzer.quality as quality_mod
-
+from lap_analyzer.quality import compute_quality
 
 # ---------------------------------------------------------------------------
 # Fixtures

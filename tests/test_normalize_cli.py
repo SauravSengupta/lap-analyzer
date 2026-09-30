@@ -31,7 +31,6 @@ import pandas as pd
 
 from lap_analyzer.cli.normalize import main
 
-
 # ---------------------------------------------------------------------------
 # Raw TrackAddict CSV builders (from PIPELINE.md's column-contract table)
 # ---------------------------------------------------------------------------

@@ -12,7 +12,11 @@ import pandas as pd
 import pytest
 
 from lap_analyzer.trajectory import (
-    CALIB_VERSION, ENV_CAP_M, Corridor, _fit_envelope, build_corridor,
+    CALIB_VERSION,
+    ENV_CAP_M,
+    Corridor,
+    _fit_envelope,
+    build_corridor,
     load_corridor,
 )
 
@@ -79,7 +83,7 @@ def test_em_trim_purges_mode4_contamination():
         votes.append((np.arange(n_bins), off))
 
     lo1, hi1 = _fit_envelope(votes, n_bins, reject=None)          # pass 1
-    lo2, hi2 = _fit_envelope(votes, n_bins, reject=(lo1, hi1))    # pass 2 (EM-trim)
+    lo2, _hi2 = _fit_envelope(votes, n_bins, reject=(lo1, hi1))    # pass 2 (EM-trim)
 
     # Clean bin: both passes agree and sit near the clean p2 (≈ -10, +pad).
     assert lo2[clean_bin] == pytest.approx(lo1[clean_bin], abs=1.0)

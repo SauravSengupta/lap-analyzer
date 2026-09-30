@@ -29,8 +29,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from lap_analyzer.config import corpus_dir, sessions_dir
 from lap_analyzer.corpus import build_corpus
-from lap_analyzer.config import sessions_dir, corpus_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SAMPLES_ROOT = REPO_ROOT / "data" / "samples"

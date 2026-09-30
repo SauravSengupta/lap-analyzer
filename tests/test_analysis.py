@@ -40,7 +40,6 @@ from lap_analyzer.analysis import (
 )
 from lap_analyzer.config import tracks_dir
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -238,7 +237,7 @@ def _gear_lap(make_lap_samples, ratio, n=200):
     speed = 60.0
     rpm = ratio * speed
     assert rpm > 1200 and speed > 8  # qualifies
-    return make_lap_samples(n=n, speed_mph=speed, rpm=int(round(rpm)))
+    return make_lap_samples(n=n, speed_mph=speed, rpm=round(rpm))
 
 
 def test_derive_gear_highest_ratio_is_index_zero(make_lap_samples):
