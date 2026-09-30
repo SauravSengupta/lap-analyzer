@@ -8,7 +8,7 @@
   "sample_rate_hz": 26.7,
   "duration_s": 1952.25,
   "best_lap": 2,
-  "best_lap_time_s": 120.397,
+  "best_lap_time_s": 120.401,
   "has_obd": true,
   "throttle_max_observed": 91.373,
   "speed_max_obd_mph": 126.138,
@@ -47,8 +47,8 @@
     "n_session": 5,
     "n_accel": 0,
     "n_default": 0,
-    "pos_lag_s": 0.025,
+    "pos_lag_s": 0.065,
     "pos_lag_source": "path",
-    "pos_lag_n_laps": 8
+    "pos_lag_n_laps": 7
   }
 }
