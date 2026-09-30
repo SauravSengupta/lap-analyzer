@@ -202,6 +202,12 @@ def estimate_position_lag(t, lat, lon, speed_mph) -> float:
     eligibility (min rows, max slow fraction) and the median/fallback ladder live in
     `estimate_session_position_lag`, not here. Returns NaN when the lap is too short,
     has too few fresh GPS fixes, or has a teleport glitch (a fresh-fix step > 30 m).
+    Also NaN for degenerate fits, which must never enter a session median: a
+    non-finite best residual std, a flat std curve (max - min <= max(1e-9, 1e-6 x mean
+    std), e.g. constant OBD speed), or an argmin on the first/last τ grid point
+    (edge-pinned: the true lag lies outside the search range, so the value is a guess).
+    Rows with non-finite lat/lon are DROPPED before fresh-fix detection (their t is
+    simply absent from the fix series); NaN if < 10 fresh fixes remain.
 
     Method: D(t) is the trapezoidal cumulative OBD distance. Fresh fixes are rows
     where lat or lon changed from the previous row (first row counts). Positions are
@@ -225,22 +231,26 @@ def estimate_position_lag(t, lat, lon, speed_mph) -> float:
     v_mps = speed_mph * MPH_TO_MPS
     D = np.concatenate([[0.0], np.cumsum((v_mps[:-1] + v_mps[1:]) / 2.0 * np.diff(t))])
 
-    # Fresh fixes: lat or lon changed from the previous row (first row counts).
-    fresh = np.ones(n, dtype=bool)
-    fresh[1:] = (lat[1:] != lat[:-1]) | (lon[1:] != lon[:-1])
+    # Drop rows with non-finite positions, then find fresh fixes among the rest: lat
+    # or lon changed from the previous kept row (first kept row counts).
+    finite = np.isfinite(lat) & np.isfinite(lon)
+    tf, latf, lonf = t[finite], lat[finite], lon[finite]
+    nf = len(tf)
+    fresh = np.ones(nf, dtype=bool)
+    fresh[1:] = (latf[1:] != latf[:-1]) | (lonf[1:] != lonf[:-1])
     if fresh.sum() < 10:
         return float("nan")
 
     # Local projection with ONE fixed reference (not a per-point cos(lat), which
     # adds a spurious term and shortens the path ~9%).
-    lat_r, lon_r = np.radians(lat), np.radians(lon)
+    lat_r, lon_r = np.radians(latf), np.radians(lonf)
     lat0, lon0 = float(np.mean(lat_r)), float(np.mean(lon_r))
     c0 = np.cos(lat0)
     R = 6371000.0
     x = R * c0 * (lon_r - lon0)
     y = R * (lat_r - lat0)
 
-    t_fresh = t[fresh]
+    t_fresh = tf[fresh]
     x_fresh = pd.Series(x[fresh]).rolling(POS_SMOOTH_FIXES, center=True, min_periods=1).mean().to_numpy()
     y_fresh = pd.Series(y[fresh]).rolling(POS_SMOOTH_FIXES, center=True, min_periods=1).mean().to_numpy()
 
@@ -257,17 +267,25 @@ def estimate_position_lag(t, lat, lon, speed_mph) -> float:
         return float("nan")
 
     t0 = t_trim[0]
-    best_tau, best_std = 0.0, np.inf
-    for tau in np.arange(LAG_SEARCH_MIN_S, LAG_SEARCH_MAX_S + POS_LAG_GRID_S, POS_LAG_GRID_S):
+    ks = np.arange(round(LAG_SEARCH_MIN_S / POS_LAG_GRID_S),
+                   round(LAG_SEARCH_MAX_S / POS_LAG_GRID_S) + 1)
+    stds = np.full(len(ks), np.nan)
+    for i, k in enumerate(ks):
+        tau = k * POS_LAG_GRID_S
         D_shift = np.interp(t_trim - tau, t, D)
         A = np.column_stack([np.ones_like(t_trim), D_shift, t_trim - t0])
         coef, *_ = np.linalg.lstsq(A, S_trim, rcond=None)
         resid = S_trim - A @ coef
-        std = float(resid.std())
-        if std < best_std:
-            best_std, best_tau = std, float(tau)
+        stds[i] = float(resid.std())
 
-    return best_tau - OBD_HOLD_LEAD_S
+    if not np.isfinite(stds).all():
+        return float("nan")
+    i = int(np.argmin(stds))
+    if i == 0 or i == len(ks) - 1:
+        return float("nan")  # edge-pinned
+    if stds.max() - stds.min() <= max(1e-9, 1e-6 * float(stds.mean())):
+        return float("nan")  # flat curve: no lag information
+    return float(ks[i] * POS_LAG_GRID_S) - OBD_HOLD_LEAD_S
 
 
 def estimate_session_position_lag(df: pd.DataFrame, speed_lags: dict[int, "LagEstimate"],
@@ -282,7 +300,9 @@ def estimate_session_position_lag(df: pd.DataFrame, speed_lags: dict[int, "LagEs
     (median, "path", n_laps). Otherwise — a GPS-only session (no OBD speed to fit
     against) or an OBD session with too few eligible laps — falls back to the median
     over laps of (τ_speed - POS_SPEED_OFFSET_S), source "offset". `enabled=False`
-    always returns (0.0, "disabled", 0). Not clamped.
+    always returns (0.0, "disabled", 0). Never returns a NaN τ: when no speed τ is
+    finite, or every speed lap's source is "default" (the offset is then a pure guess),
+    returns (LAG_DEFAULT_S − POS_SPEED_OFFSET_S, "offset-default", 0). Not clamped.
     """
     if not enabled:
         return 0.0, "disabled", 0
@@ -307,9 +327,10 @@ def estimate_session_position_lag(df: pd.DataFrame, speed_lags: dict[int, "LagEs
     if len(taus) >= POS_MIN_LAPS:
         return float(np.median(taus)), "path", len(taus)
 
-    offset_taus = [e.tau_s - POS_SPEED_OFFSET_S for e in speed_lags.values() if np.isfinite(e.tau_s)]
-    if not offset_taus:
-        return float("nan"), "offset", 0
+    finite = [e for e in speed_lags.values() if np.isfinite(e.tau_s)]
+    if not finite or all(e.source == "default" for e in finite):
+        return LAG_DEFAULT_S - POS_SPEED_OFFSET_S, "offset-default", 0
+    offset_taus = [e.tau_s - POS_SPEED_OFFSET_S for e in finite]
     return float(np.median(offset_taus)), "offset", len(offset_taus)
 
 
@@ -344,6 +365,8 @@ def apply_gps_lag(df: pd.DataFrame, tau_by_lap: dict[int, float],
     interpolated). Rows within τ of the log end hold the last fix. Each group applies
     its own duplicate-timestamp identity guard (τ_group == 0 -> identity).
     """
+    if not np.isfinite(tau_pos):
+        raise ValueError(f"tau_pos must be finite, got {tau_pos!r}")
     out = df.copy()
     t = df["t"].to_numpy(dtype=float)
     lap = df["lap"].to_numpy()  # ORIGINAL lap column — knots come from this, before overwrite

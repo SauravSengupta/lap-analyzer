@@ -60,7 +60,8 @@ Import: `from lap_analyzer.schemas import SessionMeta`. (pydantic v2 BaseModel.)
   are `None` for GPS-only sessions.
 - **`gps_lag`** (`Optional[dict]`, default `None`): the `gps_lag.summarize_lags`
   provenance block (`method_version`, `session_median_s`, `n_lap`, `n_session`,
-  `n_accel`, `n_default`, and `n_disabled` when `--no-gps-lag` was used).
+  `n_accel`, `n_default`, `pos_speed_offset_s`, `pos_lag_s`, `pos_lag_source`,
+  `pos_lag_n_laps`, and `n_disabled` when `--no-gps-lag` was used).
   `None` marks a `meta.json` written before `gps-lag-v1` (stale — no correction
   applied at ingest).
 - **`trackaddict_split_points`** defaults to `[]` (list of dict).
@@ -134,7 +135,7 @@ required on input even though it is dropped from the output.**
   τ_pos for the whole session — measured directly by the path-length method
   (`gps_lag.estimate_position_lag`, median over eligible non-edge laps) with a
   speed-offset fallback (τ_speed − `POS_SPEED_OFFSET_S`, 0.12 s) for GPS-only
-  sessions or sessions with too few eligible laps — so lap boundaries move EARLIER
+  sessions or sessions with too few eligible laps (source `"offset"`) — so lap boundaries move EARLIER
   (when τ_pos > 0) and `dist_lap_m` moves with them (still starting at 0 per lap).
   `heading` is left exactly as logged (nothing downstream reads it). `gps_lag_s`
   (float32) is the row's applied τ_speed; `gps_pos_lag_s` (float32) is the session
@@ -143,7 +144,16 @@ required on input even though it is dropped from the output.**
   speed estimate has `source == "disabled"`, and the position estimate is
   `(0.0, "disabled", 0)`. The derived dict's `"gps_lag"` key carries the raw
   `dict[int, LagEstimate]` keyed by lap number (SPEED τ); `"gps_pos_lag"` carries
-  the `(tau_pos, source, n_laps_used)` triple.
+  the `(tau_pos, source, n_laps_used)` triple. Position-lag sources: `"path"`,
+  `"offset"`, `"offset-default"` (no finite speed τ, or every speed lap's source is
+  `"default"` so the offset is a pure guess: τ_pos = `LAG_DEFAULT_S −
+  POS_SPEED_OFFSET_S`, n = 0), `"disabled"`. **NaN contract:** `estimate_position_lag`
+  returns NaN for degenerate fits (non-finite/flat residual curve, or argmin on the
+  first/last τ grid point = edge-pinned; non-finite lat/lon rows are dropped first,
+  NaN if < 10 fresh fixes remain) so they never enter the session median;
+  `estimate_session_position_lag` never returns a NaN τ; `apply_gps_lag` raises
+  `ValueError` on a non-finite `tau_pos`. `--no-gps-lag` leaves position/`lap`
+  unchanged with `gps_pos_lag_s == 0`.
 - **Invariants (ARCHITECTURE / axis note):**
   - **`lat_g` is negated:** canonical `lat_g == -raw["lat_g"]`. A raw left-turn
     (raw > 0) becomes negative; **positive `lat_g` = right turn.**
@@ -225,7 +235,8 @@ folder is created under).
   (`method_version == "gps-lag-v3"`), including `pos_lag_s`, `pos_lag_source`,
   `pos_lag_n_laps`. Passing `gps_lag=False` (or CLI `--no-gps-lag`) makes every
   lap's source `"disabled"`, `gps_lag_s` all `0`, and the position estimate
-  `(0.0, "disabled", 0)`.
+  `(0.0, "disabled", 0)`. In that case position and the `lap` counter are left
+  unchanged and `gps_pos_lag_s` is 0. `pos_lag_source` may also be `"offset-default"`.
 
 - **KNOWN behavior — OBD dropout (~12% of real sessions log without OBD):** if the
   raw CSV is missing any of the 6 OBD columns, the session is ingested as

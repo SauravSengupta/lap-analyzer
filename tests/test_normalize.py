@@ -462,10 +462,12 @@ def test_normalize_gps_lag_disabled():
     np.testing.assert_array_equal(out["speed_mph_gps"].to_numpy(), raw["speed_mph_gps"].to_numpy())
 
 
-# SPEC: normalize.normalize_dataframe — position AND the Lap counter are re-timed by
-# tau_pos = tau_speed - POS_SPEED_OFFSET_S (2026-09-27 decision): lap boundaries move
-# EARLIER (the TrackAddict Lap counter is GPS-position-timed), but dist_lap_m still
-# starts at 0 for every lap since it is re-derived from the (now moved) lap column.
+# SPEC: normalize.normalize_dataframe — position AND the Lap counter are re-timed by a
+# single per-session tau_pos (gps-lag-v3): measured directly by the path-length method
+# (cumulative GPS path vs OBD odometer, median over eligible non-edge laps), falling
+# back to tau_speed - POS_SPEED_OFFSET_S only when that is unusable. Lap boundaries
+# move EARLIER (the TrackAddict Lap counter is GPS-position-timed), but dist_lap_m
+# still starts at 0 for every lap since it is re-derived from the (now moved) lap column.
 def test_normalize_gps_lag_moves_lap_boundaries_earlier():
     raw = _lagged_raw(0.5)
     out, _ = normalize_dataframe(raw, "S")
@@ -481,6 +483,19 @@ def test_normalize_gps_lag_moves_lap_boundaries_earlier():
 
     for lap, g in out.groupby("lap"):
         assert g["dist_lap_m"].iloc[0] == pytest.approx(0.0)
+
+
+# SPEC: normalize.normalize_dataframe — an OBD session yields pos_lag_source "path" with
+# tau_pos near the fixture's net position delay
+def test_normalize_gps_lag_position_lag_uses_path_method():
+    # Fixture: GPS position is delayed by 0.5 + OBD_HOLD_LEAD_S on the row clock, so the
+    # net path-method lag is 0.5. Tolerance 0.08 s covers 8 Hz fix hold quantisation
+    # (0.125 s steps) plus the 0.01 s τ grid.
+    _, derived = normalize_dataframe(_lagged_raw(0.5), "S")
+    tau_pos, source, n_laps = derived["gps_pos_lag"]
+    assert source == "path"
+    assert n_laps >= 2
+    assert tau_pos == pytest.approx(0.5, abs=0.08)
 
 
 # ---------------------------------------------------------------------------
@@ -792,7 +807,7 @@ def test_normalize_session_writes_gps_lag_provenance(make_trackaddict_csv, monke
     assert laps["gps_lag_source"].isin(["lap", "session", "accel", "default"]).all()
     assert meta.gps_lag["method_version"] == "gps-lag-v3"
     assert meta.gps_lag["pos_speed_offset_s"] == pytest.approx(0.12)
-    assert meta.gps_lag["pos_lag_source"] in ("path", "offset")
+    assert meta.gps_lag["pos_lag_source"] in ("path", "offset", "offset-default")
     assert isinstance(meta.gps_lag["pos_lag_s"], float)
     # laps.csv's gps_pos_lag_s is the single session τ_pos, constant across all laps.
     assert laps["gps_pos_lag_s"].nunique() == 1

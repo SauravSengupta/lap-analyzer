@@ -238,6 +238,36 @@ def test_estimate_position_lag_nan_on_short_lap():
     assert np.isnan(estimate_position_lag(t, lat, lon, v_mph))
 
 
+def test_estimate_position_lag_drops_nonfinite_positions_then_fits():
+    # Contract: non-finite lat/lon rows are dropped before fresh-fix detection; if
+    # >= 10 fresh fixes remain the fit proceeds on the remaining rows.
+    t, lat, lon, v_mph = _oval_lap(0.20 + OBD_HOLD_LEAD_S)
+    lat = lat.copy()
+    lat[1000:1010] = np.nan
+    tau = estimate_position_lag(t, lat, lon, v_mph)
+    assert tau == pytest.approx(0.20, abs=0.05)
+
+
+def test_estimate_position_lag_nan_when_too_few_finite_fixes_remain():
+    t, lat, lon, v_mph = _oval_lap(0.20 + OBD_HOLD_LEAD_S)
+    lat = np.full_like(lat, np.nan)
+    assert np.isnan(estimate_position_lag(t, lat, lon, v_mph))
+
+
+def test_estimate_position_lag_nan_on_constant_obd_speed():
+    # Constant speed makes D(t) linear, so the residual std is flat across the tau grid.
+    t, lat, lon, _ = _oval_lap(0.20 + OBD_HOLD_LEAD_S)
+    v_const = np.full_like(t, 40.0)
+    assert np.isnan(estimate_position_lag(t, lat, lon, v_const))
+
+
+@pytest.mark.parametrize("delay", [-0.6, 1.9])
+def test_estimate_position_lag_nan_when_edge_pinned(delay):
+    # True delay outside the search range -> argmin lands on a grid endpoint.
+    t, lat, lon, v_mph = _oval_lap(delay)
+    assert np.isnan(estimate_position_lag(t, lat, lon, v_mph))
+
+
 def _pos_session(delays, lap_s=90.0):
     """OBD session frame: lap k's GPS position is delayed by delays[k-1]."""
     parts = []
@@ -251,12 +281,44 @@ def _pos_session(delays, lap_s=90.0):
 
 
 def test_estimate_session_position_lag_obd_session_uses_path_method():
-    df = _pos_session([0.15, 0.20, 0.25, 0.30])  # laps 1,4 are edges, excluded
+    # Asymmetric edge delays: if edge laps 1 and 4 were not excluded, the median
+    # would move well away from the inner-lap median.
+    df = _pos_session([0.9, 0.20, 0.25, 0.9])
     speed_lags = {k: _ok(0.5) for k in (1, 2, 3, 4)}
     tau_pos, source, n_laps = estimate_session_position_lag(df, speed_lags)
     assert source == "path"
-    assert n_laps >= POS_MIN_LAPS
-    assert tau_pos == pytest.approx(0.225, abs=0.05)  # median of inner laps 0.20, 0.25
+    assert n_laps == 2
+    assert tau_pos == pytest.approx(0.225, abs=0.03)  # median of inner laps 0.20, 0.25
+
+
+def test_estimate_session_position_lag_too_few_eligible_laps_uses_offset():
+    assert POS_MIN_LAPS == 2
+    df = _pos_session([0.20, 0.20, 0.9])  # 3 laps -> only lap 2 is non-edge
+    speed_lags = {k: _ok(0.5) for k in (1, 2, 3)}
+    tau_pos, source, n_laps = estimate_session_position_lag(df, speed_lags)
+    assert source == "offset"
+    assert n_laps == 3
+    assert tau_pos == pytest.approx(0.5 - POS_SPEED_OFFSET_S)
+
+
+def test_estimate_session_position_lag_no_finite_speed_tau_is_offset_default_not_nan():
+    df = _pos_session([0.2, 0.2, 0.2, 0.2])
+    df["speed_mph"] = np.nan
+    speed_lags = {k: LagEstimate(float("nan"), float("nan"), "none") for k in (1, 2, 3, 4)}
+    tau_pos, source, n_laps = estimate_session_position_lag(df, speed_lags)
+    assert source == "offset-default"
+    assert np.isfinite(tau_pos)
+    assert tau_pos == pytest.approx(LAG_DEFAULT_S - POS_SPEED_OFFSET_S)
+    assert n_laps == 0
+
+
+def test_estimate_session_position_lag_all_default_speed_laps_is_offset_default():
+    df = _pos_session([0.2, 0.2, 0.2, 0.2])
+    df["speed_mph"] = np.nan
+    speed_lags = {k: _ok(LAG_DEFAULT_S, "default") for k in (1, 2, 3, 4)}
+    tau_pos, source, _ = estimate_session_position_lag(df, speed_lags)
+    assert source == "offset-default"
+    assert tau_pos == pytest.approx(LAG_DEFAULT_S - POS_SPEED_OFFSET_S)
 
 
 def test_estimate_session_position_lag_gps_only_falls_back_to_offset():
@@ -306,7 +368,8 @@ def test_hold_semantics_position_is_subset():
     # Position is re-timed too (2026-09-27): still sample-and-hold, so the set of
     # distinct (lat, long) values after correction is a subset of the input's.
     df = _held_frame()
-    out = apply_gps_lag(df, {1: 0.45, 2: 0.30})
+    out = apply_gps_lag(df, {1: 0.45, 2: 0.30}, tau_pos=0.38)
+    assert not out["lat"].equals(df["lat"])  # the position really was moved
     before = set(zip(df["lat"], df["long"]))
     after = set(zip(out["lat"], out["long"]))
     assert after <= before
@@ -373,15 +436,23 @@ def test_gps_lag_s_is_blended_and_equals_tau_at_each_lap_midpoint():
     assert np.all(np.diff(between) <= 1e-9)
 
 
-def test_source_index_never_goes_backward_across_seam():
+@pytest.mark.parametrize("tau_pos", [0.38, -0.2])
+def test_source_index_never_goes_backward_across_seam(tau_pos):
     df = _held_frame()
-    out = apply_gps_lag(df, {1: 1.2, 2: 0.3})
+    out = apply_gps_lag(df, {1: 1.2, 2: 0.3}, tau_pos=tau_pos)
     # speed_mph_gps and altitude_m increase monotonically with fix index in the
     # fixture; if the source index j ever goes backward, they would dip at the seam.
     speed = out["speed_mph_gps"].to_numpy()
     altitude = out["altitude_m"].to_numpy()
     assert np.all(np.diff(speed) >= 0)
     assert np.all(np.diff(altitude) >= 0)
+    assert not np.array_equal(altitude, df["altitude_m"].to_numpy())  # position was moved
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_apply_gps_lag_rejects_non_finite_tau_pos(bad):
+    with pytest.raises(ValueError):
+        apply_gps_lag(_held_frame(), {1: 0.4, 2: 0.4}, tau_pos=bad)
 
 
 def test_non_gps_columns_untouched():

@@ -26,6 +26,10 @@ docs/superpowers/specs/2026-09-18-gps-lag-correction-design.md). Gate set:
       true (fillna False), skipping corners with < 10 such rows; take the median over
       corners. PASS if corrected ≤ baseline, per track.
 
+Known exclusion: ACCEPTED_UNMET_CORNERS = {("pir", "T1")} — PIR T1 is excluded from the
+P2 per-corner rank_eligible drop check (its delta is still reported separately as
+accepted-unmet and does not gate the verdict or the worst-corner figure).
+
 A/B's two fully rebuilt data roots on identical code:
   baseline root  — normalize --no-gps-lag → label_corners → flag_quality → build_corpus
   corrected root — the same without --no-gps-lag
