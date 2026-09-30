@@ -8,7 +8,8 @@
   "sample_rate_hz": 27.43,
   "duration_s": 1764.72,
   "best_lap": 3,
-  "best_lap_time_s": 93.577,
+  "best_lap_time_s": 93.566,
+  "has_obd": true,
   "throttle_max_observed": 91.373,
   "speed_max_obd_mph": 124.274,
   "rpm_max": 8052,
@@ -37,5 +38,17 @@
       "long": -122.690747
     }
   ],
-  "raw_csv_path": "D:\\Projects\\lap-analyzer\\data\\raw\\pir\\Log-20250522-101214 Portland Intl. Raceway - 1.33.420.csv"
+  "raw_csv_path": "data\\raw\\pir\\Log-20250522-101214 Portland Intl. Raceway - 1.33.420.csv",
+  "gps_lag": {
+    "method_version": "gps-lag-v3",
+    "pos_speed_offset_s": 0.12,
+    "session_median_s": 0.53,
+    "n_lap": 9,
+    "n_session": 2,
+    "n_accel": 0,
+    "n_default": 0,
+    "pos_lag_s": 0.315,
+    "pos_lag_source": "path",
+    "pos_lag_n_laps": 9
+  }
 }

@@ -15,6 +15,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--all", action="store_true", help="Process every CSV in data/raw/<track>/")
     p.add_argument("--out", help="Override output directory")
     p.add_argument("--force", action="store_true", help="Re-normalize even if outputs exist")
+    p.add_argument("--no-gps-lag", action="store_true",
+                   help="Skip GPS lag correction (τ = 0, gps_lag_source='disabled'); for A/B")
     args = p.parse_args(argv)
 
     out = Path(args.out) if args.out else sessions_dir(args.track)
@@ -55,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
             skipped += 1
             continue
         try:
-            meta = normalize_session(csv, args.track, out)
+            meta = normalize_session(csv, args.track, out, gps_lag=not args.no_gps_lag)
         except Exception as e:
             print(f"FAIL  {sid}: {type(e).__name__}: {e}")
             failed += 1

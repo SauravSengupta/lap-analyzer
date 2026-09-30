@@ -285,3 +285,21 @@ def test_all_run_with_failure_returns_two(tmp_path, monkeypatch, capsys):
     lines = out.splitlines()
     assert any(line.startswith("ok ") for line in lines), out
     assert any(line.startswith("FAIL ") for line in lines), out
+
+
+# ---------------------------------------------------------------------------
+# --no-gps-lag
+# ---------------------------------------------------------------------------
+
+def test_cli_no_gps_lag(tmp_path, monkeypatch, capsys):
+    # SPEC: normalize CLI — --no-gps-lag writes gps_lag_source "disabled"
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    raw = _raw_dir(tmp_path)
+    csv = _write_raw_csv(raw / "Log-20260101-200000 Ridge.csv", _raw_columns())
+
+    rc = main([str(csv), "--track", "ridge", "--out", str(tmp_path / "out"), "--no-gps-lag"])
+    capsys.readouterr()
+    assert rc == 0
+    laps = pd.read_csv(next((tmp_path / "out").glob("*/laps.csv")))
+    assert (laps["gps_lag_source"] == "disabled").all()
+    assert (laps["gps_lag_s"] == 0).all()

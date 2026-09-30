@@ -71,6 +71,7 @@ component under `lap_analyzer/cli/`:
 | Component | Module | What it owns |
 |---|---|---|
 | 1. Normalizer | `lap_analyzer.normalize` | CSV → tidy parquet + per-lap summary + per-lap dist rescaling |
+| — GPS lag correction | `lap_analyzer.gps_lag` | per-lap GPS speed + per-session position retiming at ingest (decision 7) |
 | 2. Track definition | `tracks/<track>.json` | corner ranges, anchors, reference, in `track_dist_m` units |
 | 2.5. Corner candidate scan | `lap_analyzer.corners` | lat-G peak detection (bootstrap-time seeding only) |
 | 3. Corner labeler | `lap_analyzer.labeler` | Maps-pin drift correction + centerline projection + transit table |
@@ -313,6 +314,86 @@ in `trajectory.py` come from. The trust model with its real numbers is in
 [GPS_TRUST.md](GPS_TRUST.md); the full narrative of the redesign — the dead ends, the
 39.79 s ghost, and the generalisable lessons — is in
 [DESIGN-JOURNEY.md](DESIGN-JOURNEY.md).
+
+### 7. GPS lag correction: speed and position, measured separately at ingest
+
+**What we do.** `lap_analyzer/gps_lag.py` estimates two GPS lags at `normalize`
+time and `normalize_dataframe` removes them before distance integration.
+
+*Speed* (`speed_mph_gps`): a per-lap τ_speed from cross-correlating it against
+`speed_mph` (OBD) on a 0.05 s grid over −0.3…1.5 s, parabola-refined, with
+`τ = peak_lag − OBD_HOLD_LEAD_S` (0.075 s, correcting for OBD's own
+sample-and-hold lead). Accepted at corr ≥ 0.97 with ≥ 30 s of >20 mph data;
+GPS-only sessions use an accelerometer estimate (`d(speed_mph_gps)/dt` vs
+`long_g`, corr ≥ 0.6). Fallback order: the lap's own estimate (`lap`/`accel`),
+then the session median (always for warmup/cooldown), then a default of 0.45 s;
+τ is blended linearly between lap midpoints.
+
+*Position* (lat, long, altitude, accuracy, sector, and the position-timed
+TrackAddict `Lap` counter): ONE τ_pos per session, measured directly — cumulative
+smoothed GPS path length against the OBD odometer, fit
+`S(t) ≈ a + k·D(t − τ) + c·t`, median over eligible inner laps (source `path`).
+GPS-only sessions and sessions with < 2 eligible laps fall back to
+`median(τ_speed − 0.12 s)` (source `offset`). Heading is left as logged.
+
+Both groups are re-timed by sample-and-hold, never interpolated, and
+`--no-gps-lag` is the exact identity. Provenance (`gps_lag_s`, `gps_lag_corr`,
+`gps_lag_source`, `gps_pos_lag_s`, `meta.gps_lag`, `method_version`
+`gps-lag-v3`) is written alongside — see [PIPELINE.md](PIPELINE.md).
+
+**Why two lags.** They are different channels with different latency: position
+lags ~0.15–0.18 s (session τ_pos median 0.18 s on both tracks; 93 sessions
+`path`, 14 `offset`) and the speed channel lags ~0.12 s more, from receiver
+smoothing. Lag is not larger under hard braking (braking zones measure the
+same as acceleration zones), so a single per-session τ_pos suffices. Position
+is not re-timed by the speed τ, and speed is not assumed to share position's
+clock.
+
+**How we got here.** The first design shifted position by the full speed lag;
+position then ran ahead of the car and PIR T1 collapsed. A
+`track_dist_m − dist_lap_m` regression appeared to show position was already on
+time, but was confounded: racing-line-vs-centerline length tracks speed. A
+direct path-length-vs-odometer measurement found the real ~0.15 s position lag.
+Using `τ_speed − 0.12 s` per session then over-corrected PIR (method mismatch),
+which is why τ_pos is now measured directly and the offset is only a fallback.
+
+**Effects.** Brake-point cross-lap scatter improves slightly (Ridge 15.0 →
+14.6 m, PIR 16.6 → 16.3 m median std); lap boundaries move earlier by τ_pos·v
+(~8 m at S/F speed); OBD events on `track_dist_m` move to their true position
+(~0.18·v). Because the corridor is built from positions it must be rebuilt after
+re-normalizing (order: normalize → label_corners → build-corridor →
+label_corners → flag_quality → build_corpus); the centerline is unchanged. For
+GPS-only sessions `speed_mph_gps` is the backbone, so speed re-timing keeps it on
+position's clock. See
+[GPS_TRUST.md](GPS_TRUST.md#input-calibration-gps-speed-and-position-are-re-timed-upstream).
+
+**Why sample-and-hold + seam-blended τ.** OBD itself arrives sample-and-held
+(hence `OBD_HOLD_LEAD_S`), so re-timing GPS the same way keeps the channels
+comparable sample-for-sample rather than introducing a smoothing mismatch.
+Blending τ_speed linearly across lap-time midpoints avoids a step that would
+replay a moment of GPS speed twice or skip one at every lap seam.
+
+**Why per-lap speed estimation with a conservative 0.97 cutoff.** τ_speed drifts
+lap to lap (a session median alone left residual lag), so per-lap estimation
+tracks it; a low correlation threshold would accept noisy peaks as measurements.
+
+**Acceptance.** `scripts/gps_lag_acceptance.py --baseline-root data_nolag
+--root data`: speed residual 90–91% within 0.05 s against a 95% target —
+**accepted-unmet**: low-correlation laps use the session median and an
+independent cross-check could not validate lowering the cutoff. Position
+residual +0.025 s on both tracks (PASS; partly self-referential, since it uses
+the same method). Trust battery PASS; `rank_eligible` Ridge +0.1 pp, PIR −1.1 pp
+(PASS). Per-corner PASS everywhere except **PIR T1, 80% → 66%, accepted-unmet
+2026-09-29**: the correction widens T1's odometer-vs-gate gap by ~5–7 m (entry
+~45 m/s, exit ~22 m/s), past T1's 8.1 m driven band, which was effectively tuned
+on lagged positions. Follow-up: recalibrate the trust layer's bands on corrected
+data (all corners, not T1 alone). Brake-point scatter PASS on both tracks.
+
+**Approaches we rejected:** shifting position by the speed τ (ran ahead, cost
+T1); inferring position lag from a `track_dist_m − dist_lap_m` regression
+(confounded by line length); `τ_speed − 0.12 s` as the primary position lag
+(over-corrected PIR); a single session-wide speed τ (left residual drift); a
+looser correlation cutoff (would accept noise as measurement).
 
 ---
 

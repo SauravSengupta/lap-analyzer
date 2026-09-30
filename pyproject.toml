@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "ruff>=0.5"]
+dev = ["pytest>=7", "ruff>=0.15,<0.16"]  # ruff 0.16 enables new default rules; bump deliberately
 
 [build-system]
 requires = ["hatchling"]

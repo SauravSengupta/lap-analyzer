@@ -66,6 +66,7 @@ python -m lap_analyzer.cli.normalize [csv] --track TRACK [--all] [--out DIR] [--
 | `--all` | Process every CSV in `data/raw/<track>/`. |
 | `--out` | Override the output directory (default `data/sessions/<track>/`). |
 | `--force` | Re-normalize even if outputs already exist. |
+| `--no-gps-lag` | Disable the GPS speed + position lag correction below (τ = 0, `gps_lag_source = "disabled"`; exact identity of pre-feature output). |
 
 Per-CSV status line is one of: `ok` (normalized), `skip` (already present, no
 `--force`), `excl` (listed in session notes with `exclude`), `gpsonly` (CSV has no
@@ -78,6 +79,45 @@ python -m lap_analyzer.cli.normalize "data/raw/ridge/Log-20260517-100304 ....csv
 # Re-normalize everything (e.g. after editing lap_length_internal_m)
 python -m lap_analyzer.cli.normalize --track ridge --all --force
 ```
+
+**GPS lag correction.** TrackAddict's GPS channels lag the car, and the two
+groups lag by different amounts, so `normalize` estimates and removes each
+separately (`lap_analyzer/gps_lag.py`, applied in `normalize_dataframe` before
+distance integration).
+
+- **Speed** (`speed_mph_gps`): a per-lap τ_speed from cross-correlating GPS
+  speed against OBD speed (0.05 s grid, −0.3…1.5 s, parabola-refined, minus
+  `OBD_HOLD_LEAD_S` 0.075 s; accepted at corr ≥ 0.97 with ≥ 30 s above 20 mph).
+  Typical ~0.45 s. With no OBD it falls to an accelerometer estimate
+  (`d(speed_mph_gps)/dt` vs `long_g`, corr ≥ 0.6). Fallback order: the lap's own
+  estimate (`lap` or `accel`), then `session` (median of accepted laps; always
+  used for warmup/cooldown), then `default` (0.45 s). τ is blended linearly
+  between lap midpoints so values never replay backward at seams.
+- **Position** (`lat`, `long`, `altitude_m`, `gps_accuracy_m`, sector, and the
+  TrackAddict `Lap` counter, which is position-timed): ONE τ_pos per session,
+  measured directly — cumulative smoothed GPS path length against the OBD
+  odometer, fit `S(t) ≈ a + k·D(t − τ) + c·t`, median over eligible inner laps
+  (source `path`). Sessions with fewer than 2 eligible laps, and GPS-only
+  sessions, fall back to `median(τ_speed − 0.12 s)` (source `offset`). Heading
+  is left as logged.
+
+Both groups are re-timed by sample-and-hold, never interpolated. Measured
+position lag is ~0.15–0.18 s (session median 0.18 s on both tracks: 93
+sessions `path`, 14 `offset`); the speed channel lags a further ~0.12 s beyond
+position (receiver smoothing). Lag is not larger under hard braking. Effects:
+lap boundaries move earlier by τ_pos·v (~8 m at S/F speed); OBD events on
+`track_dist_m` land at their true position (~0.18·v earlier); brake-point
+cross-lap scatter improves slightly. `--no-gps-lag` disables everything (τ = 0,
+source `disabled`) and is the exact identity. Provenance is written to
+`gps_lag_s` / `gps_lag_corr` / `gps_lag_source` / `gps_pos_lag_s` in
+`laps.csv`, per-row `gps_lag_s` / `gps_pos_lag_s` in `samples.parquet`, and a
+`gps_lag` block in `meta.json` (absent or an older `method_version` means a
+stale session — re-normalize). See [ARCHITECTURE.md](ARCHITECTURE.md)
+decision 7 for the design and its history, and
+[GPS_TRUST.md](GPS_TRUST.md#input-calibration-gps-speed-and-position-are-re-timed-upstream)
+for the trust-model consequences. **After re-normalizing, rebuild the trajectory
+corridor** (it is built from positions) — see the rebuild order under Common
+operations.
 
 ### `label_corners` — corner labels + per-corner-transit table
 
@@ -260,6 +300,8 @@ One row per sample. After `normalize`, the columns are:
 | `lat`, `long` | float | WGS84 |
 | `altitude_m` | float | |
 | `gps_accuracy_m` | float | |
+| `gps_lag_s` | float32 | per-row applied GPS speed lag τ_speed(t), seconds (see the GPS lag correction note above) |
+| `gps_pos_lag_s` | float32 | the session's position lag τ_pos, seconds (constant per session) |
 
 After `label_corners`, each `samples.parquet` gains:
 
@@ -288,7 +330,13 @@ One row per lap:
 `session_id, lap, lap_time_s, lap_dist_m, max_speed_mph, avg_speed_mph,
 max_rpm, max_lat_g, max_accel_g, max_decel_g, pct_wot, avg_throttle,
 pct_braking, coolant_min_f, coolant_max_f, iat_min_f, iat_max_f, is_clean,
-clean_reason`
+clean_reason, gps_lag_s, gps_lag_corr, gps_lag_source, gps_pos_lag_s`
+
+- `gps_lag_s` / `gps_lag_corr` / `gps_lag_source` — this lap's estimated GPS
+  speed lag τ_speed, its cross-correlation, and which fallback tier produced it
+  (`lap`, `session`, `accel`, `default`, or `disabled`).
+- `gps_pos_lag_s` — the session's single position lag τ_pos (same on every
+  lap of the session). See the GPS lag correction note under `normalize` above.
 
 - `lap_time_s` is measured start-crossing to next start-crossing (the final
   in-lap uses end-of-data minus its start).
@@ -307,6 +355,17 @@ n_clean_laps, sample_rate_hz, duration_s, best_lap, best_lap_time_s,
 throttle_max_observed, speed_max_obd_mph, rpm_max, coolant_min_f, coolant_max_f,
 iat_first_f, iat_max_f, trackaddict_start_finish, trackaddict_split_points,
 raw_csv_path`.
+
+A `gps_lag` block summarizes the session's GPS lag correction:
+`method_version` (`gps-lag-v3`), `session_median_s`, `n_lap, n_session,
+n_accel, n_default` (speed-lag counts per fallback tier), and the position lag:
+`pos_lag_s`, `pos_lag_source` (`path` or `offset`), `pos_lag_n_laps` (eligible
+laps behind a `path` estimate), `pos_speed_offset_s` (the 0.12 s offset used
+by the `offset` fallback). `session_median_s` is the median of the *applied*
+τ_speed over every lap in the session — including laps that fell back to the
+session median or an edge-lap default. Absent, or a `method_version` older
+than `gps-lag-v3`, means the session predates the current correction and is
+stale.
 
 ### `corners.parquet` — the analytical workhorse
 
@@ -372,6 +431,7 @@ python -m lap_analyzer.cli.normalize "data/raw/ridge/Log-20260517-100304 ....csv
 ```powershell
 $env:PYTHONPATH = "."
 python -m lap_analyzer.cli.normalize --track ridge --all
+python -m lap_analyzer.cli.label_corners --track ridge     # first pass: labels track_dist_m
 python -m lap_analyzer.trajectory build-corridor ridge     # refresh the trajectory corridor
 python -m lap_analyzer.cli.label_corners --track ridge     # corner transits on s_hat (2-phase)
 python -m lap_analyzer.cli.flag_quality --track ridge
@@ -382,7 +442,10 @@ python -m lap_analyzer.cli.build_corpus --track ridge
 every session's `samples.parquet` with `track_dist_m`, then builds/loads the
 per-track trajectory **corridor** (which reads those labeled samples), then builds
 every `corners.parquet` with transit positions on the corrected ruler `s_hat`.
-Running `build-corridor` first persists a fresh corridor so section-times and the
+The corridor is built from positions, so **re-normalizing (or changing the GPS
+lag correction) requires rebuilding it**: the order is normalize → label_corners
+→ build-corridor → label_corners → flag_quality → build_corpus. The centerline
+is unchanged by this. Running `build-corridor` persists a fresh corridor so section-times and the
 visualizer read the same one the corners were built on; if you skip it,
 `label_corners` builds an unsaved corridor on the fly (corners are still correct,
 but nothing is persisted for the other consumers).
