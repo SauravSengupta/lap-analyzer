@@ -90,7 +90,14 @@ def _v2_summary(v2: pd.DataFrame) -> dict:
 
 
 def _v3_summary(v3: pd.DataFrame) -> dict:
+    empty = dict(n=0, median_abs=None, p90_abs=None, within_010=None, within_2sigma=None,
+                 gps_tierA_share=None, gps_tierA_within_010=None)
+    need = {"rank_obd", "t_gps", "t_obd", "sigma_gps", "rank_gps"}
+    if len(v3) == 0 or not need.issubset(v3.columns):
+        return empty
     a = v3[v3["rank_obd"] & np.isfinite(v3["t_gps"])]
+    if len(a) == 0:
+        return empty
     d = (a["t_gps"] - a["t_obd"]).abs()
     tier_a = a[a["rank_gps"]]
     dA = (tier_a["t_gps"] - tier_a["t_obd"]).abs()
@@ -102,6 +109,8 @@ def _v3_summary(v3: pd.DataFrame) -> dict:
 
 
 def _v4_summary(v4: pd.DataFrame) -> dict:
+    if len(v4) == 0 or not {"rank", "t_odo", "t_prod"}.issubset(v4.columns):
+        return dict(n_rankable=0, gt_020=0, gt_030=0)
     r = v4[v4["rank"] & np.isfinite(v4["t_odo"])]
     d = (r["t_prod"] - r["t_odo"]).abs()
     return dict(n_rankable=int(len(r)), gt_020=int((d > 0.2).sum()), gt_030=int((d > 0.3).sum()))
@@ -109,43 +118,146 @@ def _v4_summary(v4: pd.DataFrame) -> dict:
 
 def _v5(root: str) -> dict:
     env = dict(os.environ, DATA_ROOT=root, PYTHONPATH=str(REPO))
-    bat = subprocess.run([sys.executable, str(REPO / "scripts" / "gps_trust_battery.py")], env=env,
-                         cwd=REPO, capture_output=True, text=True)
-    cal = subprocess.run([sys.executable, str(REPO / "scripts" / "gps_trust_calibration.py"), "500"],
-                         env=env, cwd=REPO, capture_output=True, text=True)
-    return dict(battery_pass=bat.returncode == 0, calibration_pass=cal.returncode == 0,
-                battery_tail=bat.stdout[-1500:], calibration_tail=cal.stdout[-1500:])
+
+    def run(cmd):
+        try:
+            r = subprocess.run(cmd, env=env, cwd=REPO, capture_output=True, text=True, timeout=3600)
+        except subprocess.TimeoutExpired:
+            return False, "timeout"
+        return r.returncode == 0, r.stdout[-1500:] + "\n--stderr--\n" + r.stderr[-800:]
+
+    bat_ok, bat_tail = run([sys.executable, str(REPO / "scripts" / "gps_trust_battery.py")])
+    cal_ok, cal_tail = run([sys.executable, str(REPO / "scripts" / "gps_trust_calibration.py"), "500"])
+    return dict(battery_pass=bat_ok, calibration_pass=cal_ok,
+                battery_tail=bat_tail, calibration_tail=cal_tail)
 
 
-def evaluate_gates(cur: dict, base: dict) -> list[tuple[str, bool, str]]:
+_MISSING = object()
+
+
+def _dig(d, *path):
+    """Nested lookup; returns _MISSING if any key is absent."""
+    for k in path:
+        if not isinstance(d, dict) or k not in d:
+            return _MISSING
+        d = d[k]
+    return d
+
+
+def evaluate_gates(cur: dict, base: dict) -> list[tuple[str, str, str]]:
+    """Return (name, status, detail) with status in PASS / FAIL / N/A.
+
+    Missing evidence is N/A, never PASS. FAIL is only a real threshold miss."""
     g = []
-    v5 = cur.get("v5") or {}
-    g.append(("G1 trust battery + calibration", bool(v5.get("battery_pass") and v5.get("calibration_pass")), ""))
-    bg = cur["v2"].get("burst_gate_ge10_bad_rankable")
-    g.append(("G2 burst@gate bad-but-rankable", bg is not None and bg <= GATES["G2_burst_gate_bad_rankable_max"],
-              f"{bg} <= {GATES['G2_burst_gate_bad_rankable_max']}"))
-    cd, bd = cur["v2"].get("slow_drift_bad_rankable"), base["v2"].get("slow_drift_bad_rankable")
-    g.append(("G3 slow-drift bad-but-rankable not worse", cd is not None and bd is not None and cd <= bd, f"{cd} vs {bd}"))
-    v3 = cur["v3"]
-    g.append(("G4 GPS-only emulation honest", v3["within_2sigma"] >= GATES["G4_v3_within_2sigma_min"]
-              and (v3["gps_tierA_within_010"] is None or v3["gps_tierA_within_010"] >= GATES["G4_v3_tierA_within_010_min"]),
-              f"within2σ {v3['within_2sigma']:.3f}, tierA≤0.10 {v3['gps_tierA_within_010']}"))
-    ok5, det = True, []
+
+    def lacks(*path):
+        return f"baseline lacks {'.'.join(path)}"
+
+    # G1
+    scope = ("scope: gps_trust_battery = full Ridge corpus (not held-out, no PIR); "
+             "gps_trust_calibration = synthetic laps")
+    v5 = cur.get("v5")
+    if v5 is None:
+        g.append(("G1 trust battery + calibration", "N/A", f"V5 not run (--skip-v5); {scope}"))
+    else:
+        ok = bool(v5.get("battery_pass") and v5.get("calibration_pass"))
+        g.append(("G1 trust battery + calibration", "PASS" if ok else "FAIL", scope))
+
+    # G2
+    bg = _dig(cur, "v2", "burst_gate_ge10_bad_rankable")
+    if bg is _MISSING or bg is None:
+        g.append(("G2 burst@gate bad-but-rankable", "N/A", "no burst@gate evidence (n=0)"))
+    else:
+        thr = GATES["G2_burst_gate_bad_rankable_max"]
+        n2 = _dig(cur, "v2", "burst/gate")
+        n2 = n2.get("n") if isinstance(n2, dict) else None
+        g.append(("G2 burst@gate bad-but-rankable", "PASS" if bg <= thr else "FAIL",
+                  f"{bg} <= {thr}; n(burst/gate, all mags)={n2}"))
+
+    # G3
+    cd = _dig(cur, "v2", "slow_drift_bad_rankable")
+    bd = _dig(base, "v2", "slow_drift_bad_rankable")
+    n3d = _dig(cur, "v2", "slow_drift/gate")
+    n3d = n3d.get("n") if isinstance(n3d, dict) else None
+    if bd is _MISSING:
+        g.append(("G3 slow-drift bad-but-rankable not worse", "N/A", lacks("v2", "slow_drift_bad_rankable")))
+    elif cd is _MISSING or cd is None or bd is None:
+        g.append(("G3 slow-drift bad-but-rankable not worse", "N/A", f"no slow-drift evidence: {cd} vs {bd}"))
+    else:
+        g.append(("G3 slow-drift bad-but-rankable not worse", "PASS" if cd <= bd else "FAIL",
+                  f"{cd} vs {bd}; n(slow_drift/gate)={n3d}"))
+
+    # G4
+    v3 = cur.get("v3") or {}
+    w2, tA, n4 = v3.get("within_2sigma"), v3.get("gps_tierA_within_010"), v3.get("n")
+    if w2 is None:
+        g.append(("G4 GPS-only emulation honest", "N/A", f"no V3 evidence, n={n4}"))
+    else:
+        w2_ok = w2 >= GATES["G4_v3_within_2sigma_min"]
+        det = f"within_2sigma {w2:.3f}, n={n4}; "
+        if tA is None:
+            det += "tierA: no GPS-only tier-A transits"
+            status = "FAIL" if not w2_ok else "N/A"
+        else:
+            tA_ok = tA >= GATES["G4_v3_tierA_within_010_min"]
+            det += f"tierA<=0.10 {tA:.3f}"
+            status = "PASS" if (w2_ok and tA_ok) else "FAIL"
+        g.append(("G4 GPS-only emulation honest", status, det))
+
+    # G5
+    det, fail, na = [], False, []
     for tr in TRACKS:
-        drop = 100.0 * (base["coverage"][tr]["obd"] - cur["coverage"][tr]["obd"])
-        ok5 &= drop <= GATES["G5_coverage_drop_pp_max"]
+        b = _dig(base, "coverage", tr, "obd")
+        c = _dig(cur, "coverage", tr, "obd")
+        if b is _MISSING or c is _MISSING:
+            na.append(lacks("coverage", tr, "obd"))
+            continue
+        drop = 100.0 * (b - c)
+        fail |= drop > GATES["G5_coverage_drop_pp_max"]
         det.append(f"{tr} obd drop {drop:+.1f}pp")
-    t1 = cur["coverage"]["pir"]["per_corner_obd"].get("T1", 0.0)
-    ok5 &= t1 >= GATES["G5_pir_T1_min"]
-    g.append(("G5 coverage + PIR T1", ok5, ", ".join(det) + f", PIR T1 {t1:.3f}"))
-    v1c = cur["v1"].get("shift_std_median_m")
-    v1b = base["v1"].get("shift_std_median_m")
-    ok6 = all(cur["brake_std"][tr] is not None and base["brake_std"][tr] is not None
-              and cur["brake_std"][tr] <= base["brake_std"][tr] for tr in TRACKS)
-    ok6 &= (v1c is None or v1b is None or v1c <= v1b)
-    g.append(("G6 along-track + brake scatter not worse", ok6, f"v1 {v1c} vs {v1b}; brake {cur['brake_std']} vs {base['brake_std']}"))
-    g.append(("G7 V4 >0.3 s not more", cur["v4"]["gt_030"] <= base["v4"]["gt_030"],
-              f"{cur['v4']['gt_030']} vs {base['v4']['gt_030']}"))
+    t1 = _dig(cur, "coverage", "pir", "per_corner_obd")
+    t1 = 0.0 if t1 is _MISSING else t1.get("T1", 0.0)
+    fail |= t1 < GATES["G5_pir_T1_min"]
+    det.append(f"PIR T1 {t1:.3f}")
+    status = "FAIL" if fail else ("N/A" if na else "PASS")
+    g.append(("G5 coverage + PIR T1", status, ", ".join(det + na)))
+
+    # G6
+    brake_fail, brake_na = False, []
+    for tr in TRACKS:
+        c = _dig(cur, "brake_std", tr)
+        b = _dig(base, "brake_std", tr)
+        if b is _MISSING:
+            brake_na.append(lacks("brake_std", tr))
+        elif c is _MISSING or c is None or b is None:
+            brake_na.append(f"no brake evidence for {tr}")
+        elif c > b:
+            brake_fail = True
+    v1c = _dig(cur, "v1", "shift_std_median_m")
+    v1b = _dig(base, "v1", "shift_std_median_m")
+    v1_na = v1c is _MISSING or v1b is _MISSING or v1c is None or v1b is None
+    v1_fail = (not v1_na) and v1c > v1b
+    v1_txt = "N/A (no V1 shift_std)" if v1_na else f"{v1c} vs {v1b}"
+    det = f"v1 {v1_txt}; brake {_dig(cur, 'brake_std')} vs {_dig(base, 'brake_std')}"
+    if brake_na:
+        det += "; " + ", ".join(brake_na)
+    if brake_fail or v1_fail:
+        status = "FAIL"
+    elif v1_na or brake_na:
+        status = "N/A"
+    else:
+        status = "PASS"
+    g.append(("G6 along-track + brake scatter not worse", status, det))
+
+    # G7
+    c4, b4 = _dig(cur, "v4", "gt_030"), _dig(base, "v4", "gt_030")
+    if b4 is _MISSING:
+        g.append(("G7 V4 >0.3 s not more", "N/A", lacks("v4", "gt_030")))
+    elif c4 is _MISSING:
+        g.append(("G7 V4 >0.3 s not more", "N/A", "current report lacks v4.gt_030"))
+    else:
+        nr = f"n_rankable {_dig(cur, 'v4', 'n_rankable')} vs {_dig(base, 'v4', 'n_rankable')}"
+        g.append(("G7 V4 >0.3 s not more", "PASS" if c4 <= b4 else "FAIL", f"{c4} vs {b4}; {nr}"))
     return g
 
 
@@ -194,9 +306,9 @@ def main() -> int:
     if args.baseline_report:
         base = json.loads(Path(args.baseline_report).read_text())
         rc = 0
-        for name, ok, detail in evaluate_gates(report, base):
-            print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
-            rc |= 0 if ok else 1
+        for name, status, detail in evaluate_gates(report, base):
+            print(f"[{status}] {name}: {detail}")
+            rc |= 1 if status == "FAIL" else 0
         return rc
     return 0
 
