@@ -83,9 +83,11 @@ def _v2_summary(v2: pd.DataFrame) -> dict:
     short = burst[burst["n_fix"] <= 8]                     # G2 is defined on 0.4–1 s bursts
     long_ = burst[burst["n_fix"] > 8]                      # 1–2 s: reported (long-run capture), not gated
     out["burst_gate_ge10_bad_rankable"] = float(short["bad_rankable"].mean()) if len(short) else None
+    out["burst_gate_ge10_n"] = int(len(short))
     out["long_burst_gate_ge10_bad_rankable"] = float(long_["bad_rankable"].mean()) if len(long_) else None
     drift = v2[v2["kind"] == "slow_drift"]
     out["slow_drift_bad_rankable"] = float(drift["bad_rankable"].mean()) if len(drift) else None
+    out["slow_drift_n"] = int(len(drift))
     return out
 
 
@@ -169,23 +171,21 @@ def evaluate_gates(cur: dict, base: dict) -> list[tuple[str, str, str]]:
         g.append(("G2 burst@gate bad-but-rankable", "N/A", "no burst@gate evidence (n=0)"))
     else:
         thr = GATES["G2_burst_gate_bad_rankable_max"]
-        n2 = _dig(cur, "v2", "burst/gate")
-        n2 = n2.get("n") if isinstance(n2, dict) else None
+        n2 = (cur.get("v2") or {}).get("burst_gate_ge10_n", "?")
         g.append(("G2 burst@gate bad-but-rankable", "PASS" if bg <= thr else "FAIL",
-                  f"{bg} <= {thr}; n(burst/gate, all mags)={n2}"))
+                  f"{bg} <= {thr}; n={n2}"))
 
     # G3
     cd = _dig(cur, "v2", "slow_drift_bad_rankable")
     bd = _dig(base, "v2", "slow_drift_bad_rankable")
-    n3d = _dig(cur, "v2", "slow_drift/gate")
-    n3d = n3d.get("n") if isinstance(n3d, dict) else None
+    n3d = (cur.get("v2") or {}).get("slow_drift_n", "?")
     if bd is _MISSING:
         g.append(("G3 slow-drift bad-but-rankable not worse", "N/A", lacks("v2", "slow_drift_bad_rankable")))
     elif cd is _MISSING or cd is None or bd is None:
         g.append(("G3 slow-drift bad-but-rankable not worse", "N/A", f"no slow-drift evidence: {cd} vs {bd}"))
     else:
         g.append(("G3 slow-drift bad-but-rankable not worse", "PASS" if cd <= bd else "FAIL",
-                  f"{cd} vs {bd}; n(slow_drift/gate)={n3d}"))
+                  f"{cd} vs {bd}; n={n3d}"))
 
     # G4
     v3 = cur.get("v3") or {}
@@ -216,10 +216,13 @@ def evaluate_gates(cur: dict, base: dict) -> list[tuple[str, str, str]]:
         fail |= drop > GATES["G5_coverage_drop_pp_max"]
         det.append(f"{tr} obd drop {drop:+.1f}pp")
     t1 = _dig(cur, "coverage", "pir", "per_corner_obd")
-    t1 = 0.0 if t1 is _MISSING else t1.get("T1", 0.0)
-    fail |= t1 < GATES["G5_pir_T1_min"]
-    det.append(f"PIR T1 {t1:.3f}")
-    status = "FAIL" if fail else ("N/A" if na else "PASS")
+    t1_missing = not isinstance(t1, dict) or "T1" not in t1
+    if t1_missing:
+        det.append("PIR T1 missing")
+    else:
+        fail |= t1["T1"] < GATES["G5_pir_T1_min"]
+        det.append(f"PIR T1 {t1['T1']:.3f}")
+    status = "FAIL" if fail else ("N/A" if (na or t1_missing) else "PASS")
     g.append(("G5 coverage + PIR T1", status, ", ".join(det + na)))
 
     # G6

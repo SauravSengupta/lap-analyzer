@@ -88,3 +88,21 @@ def test_summaries_tolerate_empty_frames():
     tv = _tv()
     assert tv._v3_summary(pd.DataFrame())["n"] == 0
     assert tv._v4_summary(pd.DataFrame())["n_rankable"] == 0
+
+
+def test_g2_detail_prints_burst_gate_denominator():
+    tv = _tv()
+    cur = _report()
+    cur["v2"]["burst_gate_ge10_n"] = 37
+    g2 = next(x for x in tv.evaluate_gates(cur, _report()) if x[0].startswith("G2"))
+    assert g2[1] == "PASS"
+    assert g2[2].endswith("n=37"), g2[2]
+
+
+def test_g5_missing_pir_t1_is_na_not_fail():
+    tv = _tv()
+    cur, base = _report(), _report()
+    cur["coverage"]["pir"]["per_corner_obd"] = {"T2": 0.95}
+    g5 = next(x for x in tv.evaluate_gates(cur, base) if x[0].startswith("G5"))
+    assert g5[1] == "N/A", g5
+    assert "PIR T1 missing" in g5[2]
