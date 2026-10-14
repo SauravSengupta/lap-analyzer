@@ -162,3 +162,16 @@ def test_register_profiles_recovers_a_planted_shift():
     assert lap2["shift"].median() == pytest.approx(7.0, abs=1.0)
     others = R[(R["lap"] != 2) & (R["corr"] > 0.6)]
     assert others["shift"].abs().median() <= 1.0
+
+
+def test_register_profiles_plant_m_self_test_recovers_shift():
+    # SPEC W0/V1 self-test: plant_m shifts only the lap under test, so the recovered shift
+    # equals plant_m (planting on every lap would cancel against the reference).
+    vc = _vc()
+    rng = np.random.default_rng(0)
+    base = pd.Series(rng.normal(0, 1, 1200)).rolling(5, center=True, min_periods=1).mean().to_numpy()
+    laps = np.array([base + rng.normal(0, 0.05, base.size) for _ in range(6)])
+    R = vc.register_profiles(laps, win=120, max_shift=25, step=40, min_corr=0.6, plant_m=7.0)
+    hi = R[R["corr"] > 0.6]
+    assert len(hi) > 10
+    assert hi["shift"].median() == pytest.approx(7.0, abs=1.0)
