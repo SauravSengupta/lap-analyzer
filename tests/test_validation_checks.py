@@ -190,6 +190,8 @@ def test_runners_emit_documented_columns(sample_data_root):
                    np.random.default_rng(1), trials_per_lap=3)
     assert {"kind", "where", "mag_m", "err_s", "rank", "caught"} <= set(v2.columns)
     assert set(v2["kind"]) <= set(vc.V2_KINDS)
+    assert len(v2) > 0, "at least one fault must be planted on a clean lap"
+    assert np.isfinite(v2["err_s"]).all()
     v3 = vc.run_v3(ctx, laps)
     assert {"t_obd", "rank_obd", "t_gps", "sigma_gps", "rank_gps"} <= set(v3.columns)
     v4 = vc.run_v4(ctx, laps)

@@ -299,10 +299,6 @@ V2_BAD_ERR_S = 0.05         # 2026-10-10, spec §W0 V2: "bad-but-rankable" = |er
 V2_DRIFT_AMPS_M = (20.0, 30.0, 40.0)   # 2026-10-10, spec §W0 V2 slow drift 20-40 m over ~150 m
 
 
-def _timing(g, ctx, a, b):
-    return section_timing(estimate_trajectory(g, ctx.corridor, ctx.frame), a, b, ctx.corridor)
-
-
 def run_v2(ctx, laps, ref, rng: np.random.Generator, trials_per_lap: int = 6) -> pd.DataFrame:
     """Plant one fault per trial on a clean lap inside a section that is rankable on the
     unfaulted lap; truth = that lap's unfaulted section time."""
