@@ -77,3 +77,71 @@ def test_gps_only_emulation_drops_obd_and_keeps_lap_length():
     assert h["dist_lap_m"].max() == pytest.approx(1500.0)
     assert np.all(np.diff(h["dist_lap_m"].to_numpy()) >= 0)
     assert g["speed_mph"].notna().all()   # input untouched
+
+
+class _IdentityRef:
+    """Stub ReferenceIndex: track_dist = metres east of lon0 (frame x)."""
+    def __init__(self, frame):
+        self.frame = frame
+
+    def lookup(self, lat, lon):
+        x, _ = self.frame.to_xy(lat, lon)
+        return np.asarray(x, float), np.zeros(len(x))
+
+
+def _frame():
+    from lap_analyzer.gates import TrackFrame
+    return TrackFrame.from_centerline(pd.DataFrame({"lat": [45.0, 45.0], "long": [-122.0, -121.99]}))
+
+
+def _east_lap(n=80, v=40.0, hz=8.0):
+    fr = _frame()
+    t = np.arange(n) / hz
+    x = v * t
+    lat = np.full(n, fr.lat0)
+    lon = fr.lon0 + x / fr.m_per_deg_lon
+    return pd.DataFrame({"t": t, "lat": lat, "long": lon, "track_dist_m": x,
+                         "gps_drift_lat_m": 0.0, "gps_drift_lon_m": 0.0}), fr
+
+
+def test_plant_offset_moves_exactly_the_target_rows():
+    # SPEC W0/V2: planting moves only the requested rows, by exactly the requested vector,
+    # and re-projects their track_dist_m; every other row is untouched.
+    vc = _vc()
+    g, fr = _east_lap()
+    rows = np.zeros(len(g), bool)
+    rows[10:14] = True
+    dx = np.full(len(g), 12.0)
+    dy = np.full(len(g), -5.0)
+    h = vc.plant_offset(g, rows, dx, dy, fr, _IdentityRef(fr))
+    x0, y0 = fr.to_xy(g["lat"], g["long"])
+    x1, y1 = fr.to_xy(h["lat"], h["long"])
+    assert np.allclose(x1[rows] - x0[rows], 12.0, atol=1e-6)
+    assert np.allclose(y1[rows] - y0[rows], -5.0, atol=1e-6)
+    assert np.allclose(h["track_dist_m"].to_numpy()[rows], g["track_dist_m"].to_numpy()[rows] + 12.0, atol=1e-6)
+    assert h.loc[~rows].equals(g.loc[~rows])
+
+
+def test_burst_rows_covers_n_fixes_and_their_held_rows():
+    vc = _vc()
+    g, _ = _east_lap(n=20)
+    g.loc[5, ["lat", "long"]] = g.loc[4, ["lat", "long"]].to_numpy()  # row 5 holds fix 4
+    m = vc.burst_rows(g, start_fix=3, n_fix=2)   # fixes at rows 3 and 4 (4 is held through row 5)
+    assert m.tolist()[:7] == [False, False, False, True, True, True, False]
+
+
+def test_slow_drift_is_smooth_bounded_and_local():
+    # SPEC W0/V2: slow drift is a sin² bump of the requested amplitude, perpendicular to
+    # travel, confined to ±half_len_m of the centre.
+    vc = _vc()
+    from lap_analyzer.trajectory import CALIB_VERSION, Corridor
+    g, _ = _east_lap(n=120)
+    nb = 60
+    corr = Corridor(s_bin=np.arange(nb) * 10.0, e_lo=np.full(nb, -15.0), e_hi=np.full(nb, 15.0),
+                    tx=np.ones(nb), ty=np.zeros(nb), gx=np.zeros(nb), gy=np.zeros(nb),
+                    kappa_signed=np.zeros(nb), meta={"calib_version": CALIB_VERSION})
+    rows, dx, dy = vc.slow_drift_offsets(g, center_m=300.0, amp_m=20.0, corridor=corr, half_len_m=75.0)
+    s = g["track_dist_m"].to_numpy()
+    assert rows.any() and not rows[np.abs(s - 300.0) > 75.0].any()
+    assert np.allclose(dx[rows], 0.0, atol=1e-9)               # eastbound → offset is pure north/south
+    assert np.max(np.abs(dy[rows])) == pytest.approx(20.0, abs=0.5)

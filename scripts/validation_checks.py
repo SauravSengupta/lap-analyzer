@@ -140,3 +140,53 @@ def clean_laps(ctx: TrackCtx, session_ids: list[str], max_laps: int | None = Non
             n += 1
             if max_laps is not None and n >= max_laps:
                 return
+
+
+# --- V2 fault planting ------------------------------------------------------
+
+from lap_analyzer.centerline import M_PER_DEG_LAT  # noqa: E402
+
+
+def plant_offset(g: pd.DataFrame, rows: np.ndarray, dx_m: np.ndarray, dy_m: np.ndarray,
+                 frame: TrackFrame, ref) -> pd.DataFrame:
+    """Copy of g with the `rows` positions moved by (dx_m, dy_m) metres (east, north) and
+    their track_dist_m re-projected through `ref.lookup` on drift-corrected coordinates,
+    exactly as the labeler would have projected those fixes."""
+    h = g.copy()
+    rows = np.asarray(rows, dtype=bool)
+    lat = h["lat"].to_numpy(dtype=float).copy()
+    lon = h["long"].to_numpy(dtype=float).copy()
+    lat[rows] += np.asarray(dy_m, float)[rows] / M_PER_DEG_LAT
+    lon[rows] += np.asarray(dx_m, float)[rows] / frame.m_per_deg_lon
+    dlat = h["gps_drift_lat_m"].to_numpy(dtype=float) / M_PER_DEG_LAT
+    dlon = h["gps_drift_lon_m"].to_numpy(dtype=float) / frame.m_per_deg_lon
+    td = h["track_dist_m"].to_numpy(dtype=float).copy()
+    if rows.any():
+        td[rows] = ref.lookup(lat[rows] - dlat[rows], lon[rows] - dlon[rows])[0]
+    h["lat"], h["long"], h["track_dist_m"] = lat, lon, td
+    return h
+
+
+def burst_rows(g: pd.DataFrame, start_fix: int, n_fix: int) -> np.ndarray:
+    """Bool mask of every row holding fixes start_fix .. start_fix+n_fix-1 (a fix's rows
+    run until the next fresh fix)."""
+    fr = fix_rows(g["lat"], g["long"])
+    ends = np.append(fr[1:], len(g))
+    m = np.zeros(len(g), dtype=bool)
+    for j in range(start_fix, min(start_fix + n_fix, len(fr))):
+        m[fr[j]:ends[j]] = True
+    return m
+
+
+def slow_drift_offsets(g: pd.DataFrame, center_m: float, amp_m: float, corridor,
+                       half_len_m: float = 75.0):
+    """A T8-style slow lateral excursion: amp_m·sin²(π·u) along the corridor's left normal
+    for rows within ±half_len_m of center_m (u = 0..1 across that window). Returns
+    (rows mask, dx_m, dy_m) arrays aligned to g."""
+    s = g["track_dist_m"].to_numpy(dtype=float)
+    u = (s - (center_m - half_len_m)) / (2.0 * half_len_m)
+    rows = np.isfinite(u) & (u >= 0.0) & (u <= 1.0)
+    bump = np.where(rows, np.sin(np.pi * np.clip(u, 0.0, 1.0)) ** 2, 0.0) * amp_m
+    b = corridor.bin_index(s)
+    nx, ny = -corridor.ty[b], corridor.tx[b]            # unit left normal of travel
+    return rows, bump * nx, bump * ny
