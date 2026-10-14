@@ -7,6 +7,10 @@ optionally compares against a baseline report and evaluates the acceptance gates
   python scripts/trust_validation.py --root data --label w0-baseline
   python scripts/trust_validation.py --root data --label w1 --baseline-report docs/superpowers/artifacts/trust-validation/w0-baseline.json
 
+Pairing: every report records its `population` (held sessions + evaluated laps). A run
+with --baseline-report evaluates exactly the baseline's population (not today's
+lap_reliable_traj selection), so G3/G7 compare the same laps; they are N/A otherwise.
+
 Spec: docs/superpowers/specs/2026-10-10-sensor-fusion-rethink-design.md §W0 + gates.
 """
 from __future__ import annotations
@@ -36,19 +40,25 @@ GATES = {
 }
 
 
-def _coverage(held: set) -> dict:
+def _held_corners(tr: str, held: set) -> pd.DataFrame:
+    """Held-out, non-reference transits of one track's corpus corners table."""
     from lap_analyzer.config import corpus_dir
+    c = pd.read_parquet(corpus_dir() / f"{tr}_corners.parquet")
+    c = c[~c.get("is_reference", pd.Series(False, index=c.index)).fillna(False).astype(bool)]
+    return c[[(tr, s) in held for s in c["session_id"]]]
+
+
+def _coverage(held: set) -> dict:
     out = {}
     for tr in TRACKS:
-        c = pd.read_parquet(corpus_dir() / f"{tr}_corners.parquet")
-        c = c[~c.get("is_reference", pd.Series(False, index=c.index)).fillna(False).astype(bool)]
-        c = c[[(tr, s) in held for s in c["session_id"]]]
+        c = _held_corners(tr, held)
         obd = c[c["obd_present"]]
         out[tr] = dict(
             all=float(c["rank_eligible"].mean()),
             obd=float(obd["rank_eligible"].mean()),
             gps_only=float(c.loc[~c["obd_present"], "rank_eligible"].mean()) if (~c["obd_present"]).any() else None,
             per_corner_obd={k: float(v) for k, v in obd.groupby("corner_id")["rank_eligible"].mean().items()},
+            per_corner_all={k: float(v) for k, v in c.groupby("corner_id")["rank_eligible"].mean().items()},
             jump_flagged_transit_share=(float((c["gps_jump_n"] > 0).mean()) if "gps_jump_n" in c else None),
             n=int(len(c)))
     return out
@@ -56,12 +66,10 @@ def _coverage(held: set) -> dict:
 
 def _brake_std(held: set) -> dict:
     """gps_lag P3 rule: per corner std of brake_on_dist_m over pace decile ≤ 3 and
-    transit_reliable rows (≥ 10 rows), median over corners."""
-    from lap_analyzer.config import corpus_dir
+    transit_reliable rows (≥ 10 rows), median over corners. Reference laps excluded."""
     out = {}
     for tr in TRACKS:
-        c = pd.read_parquet(corpus_dir() / f"{tr}_corners.parquet")
-        c = c[[(tr, s) in held for s in c["session_id"]]]
+        c = _held_corners(tr, held)
         c = c[(c["lap_pace_decile"] <= 3) & c["transit_reliable"].fillna(False).astype(bool)]
         per = c.groupby("corner_id")["brake_on_dist_m"].agg(["count", "std"])
         per = per[per["count"] >= 10]
@@ -71,19 +79,24 @@ def _brake_std(held: set) -> dict:
 
 def _v2_summary(v2: pd.DataFrame) -> dict:
     from validation_checks import V2_BAD_ERR_S
-    v2 = v2.copy()
+    if "planted" not in v2.columns:
+        v2 = v2.assign(planted=True, batch="mixed")
+    batches = {b: dict(n_attempted=int(len(g)), n_skipped=int((~g["planted"].astype(bool)).sum()))
+               for b, g in v2.groupby("batch")}
+    v2 = v2[v2["planted"].astype(bool)].copy()
     v2["abs_err"] = v2["err_s"].abs()
-    v2["bad_rankable"] = (v2["abs_err"] > V2_BAD_ERR_S) & v2["rank"]
-    out = {}
+    v2["bad_rankable"] = (v2["abs_err"] > V2_BAD_ERR_S) & v2["rank"].astype(bool)
+    out = {"batches": batches}
     for (kind, where), g in v2.groupby(["kind", "where"]):
         out[f"{kind}/{where}"] = dict(
             n=int(len(g)), caught=float(g["caught"].mean()) if g["caught"].notna().any() else None,
             err_p90=float(g["abs_err"].quantile(0.9)), bad_rankable=float(g["bad_rankable"].mean()))
     burst = v2[(v2["kind"] == "burst") & (v2["where"] == "gate") & (v2["mag_m"] >= 10)]
-    short = burst[burst["n_fix"] <= 8]                     # G2 is defined on 0.4–1 s bursts
+    short = burst[burst["n_fix"] <= 8]                     # G2 is defined on 0.4–1 s bursts (g2 + mixed)
     long_ = burst[burst["n_fix"] > 8]                      # 1–2 s: reported (long-run capture), not gated
     out["burst_gate_ge10_bad_rankable"] = float(short["bad_rankable"].mean()) if len(short) else None
     out["burst_gate_ge10_n"] = int(len(short))
+    out["burst_gate_ge10_n_skipped"] = batches.get("g2", {}).get("n_skipped", 0)
     out["long_burst_gate_ge10_bad_rankable"] = float(long_["bad_rankable"].mean()) if len(long_) else None
     drift = v2[v2["kind"] == "slow_drift"]
     out["slow_drift_bad_rankable"] = float(drift["bad_rankable"].mean()) if len(drift) else None
@@ -112,10 +125,12 @@ def _v3_summary(v3: pd.DataFrame) -> dict:
 
 def _v4_summary(v4: pd.DataFrame) -> dict:
     if len(v4) == 0 or not {"rank", "t_odo", "t_prod"}.issubset(v4.columns):
-        return dict(n_rankable=0, gt_020=0, gt_030=0)
+        return dict(n_rankable=0, gt_020=0, gt_030=0, gt_030_rate=None)
     r = v4[v4["rank"] & np.isfinite(v4["t_odo"])]
     d = (r["t_prod"] - r["t_odo"]).abs()
-    return dict(n_rankable=int(len(r)), gt_020=int((d > 0.2).sum()), gt_030=int((d > 0.3).sum()))
+    n, gt_030 = int(len(r)), int((d > 0.3).sum())
+    return dict(n_rankable=n, gt_020=int((d > 0.2).sum()), gt_030=gt_030,
+                gt_030_rate=gt_030 / n if n else None)
 
 
 def _v5(root: str) -> dict:
@@ -146,6 +161,26 @@ def _dig(d, *path):
     return d
 
 
+def _finite(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and bool(np.isfinite(x))
+
+
+def _population_key(rep: dict):
+    pop = rep.get("population")
+    if not isinstance(pop, dict) or "held" not in pop or "laps" not in pop:
+        return None
+    return (sorted(tuple(x) for x in pop["held"]), sorted(tuple(x) for x in pop["laps"]))
+
+
+def same_population(cur: dict, base: dict) -> bool:
+    """True only when both reports record a population and they are identical."""
+    k = _population_key(cur)
+    return k is not None and k == _population_key(base)
+
+
+POP_DIFF = "populations differ — re-run with --baseline-report"
+
+
 def evaluate_gates(cur: dict, base: dict) -> list[tuple[str, str, str]]:
     """Return (name, status, detail) with status in PASS / FAIL / N/A.
 
@@ -172,14 +207,18 @@ def evaluate_gates(cur: dict, base: dict) -> list[tuple[str, str, str]]:
     else:
         thr = GATES["G2_burst_gate_bad_rankable_max"]
         n2 = (cur.get("v2") or {}).get("burst_gate_ge10_n", "?")
+        sk2 = (cur.get("v2") or {}).get("burst_gate_ge10_n_skipped", "?")
         g.append(("G2 burst@gate bad-but-rankable", "PASS" if bg <= thr else "FAIL",
-                  f"{bg} <= {thr}; n={n2}"))
+                  f"{bg} <= {thr}; n_skipped={sk2}; n={n2}"))
 
     # G3
     cd = _dig(cur, "v2", "slow_drift_bad_rankable")
     bd = _dig(base, "v2", "slow_drift_bad_rankable")
     n3d = (cur.get("v2") or {}).get("slow_drift_n", "?")
-    if bd is _MISSING:
+    paired = same_population(cur, base)
+    if not paired:
+        g.append(("G3 slow-drift bad-but-rankable not worse", "N/A", POP_DIFF))
+    elif bd is _MISSING:
         g.append(("G3 slow-drift bad-but-rankable not worse", "N/A", lacks("v2", "slow_drift_bad_rankable")))
     elif cd is _MISSING or cd is None or bd is None:
         g.append(("G3 slow-drift bad-but-rankable not worse", "N/A", f"no slow-drift evidence: {cd} vs {bd}"))
@@ -190,6 +229,8 @@ def evaluate_gates(cur: dict, base: dict) -> list[tuple[str, str, str]]:
     # G4
     v3 = cur.get("v3") or {}
     w2, tA, n4 = v3.get("within_2sigma"), v3.get("gps_tierA_within_010"), v3.get("n")
+    shA = v3.get("gps_tierA_share")
+    nA = round(shA * n4) if _finite(shA) and _finite(n4) else "?"
     if w2 is None:
         g.append(("G4 GPS-only emulation honest", "N/A", f"no V3 evidence, n={n4}"))
     else:
@@ -200,7 +241,7 @@ def evaluate_gates(cur: dict, base: dict) -> list[tuple[str, str, str]]:
             status = "FAIL" if not w2_ok else "N/A"
         else:
             tA_ok = tA >= GATES["G4_v3_tierA_within_010_min"]
-            det += f"tierA<=0.10 {tA:.3f}"
+            det += f"tierA<=0.10 {tA:.3f}, n_tierA={nA}"
             status = "PASS" if (w2_ok and tA_ok) else "FAIL"
         g.append(("G4 GPS-only emulation honest", status, det))
 
@@ -212,16 +253,22 @@ def evaluate_gates(cur: dict, base: dict) -> list[tuple[str, str, str]]:
         if b is _MISSING or c is _MISSING:
             na.append(lacks("coverage", tr, "obd"))
             continue
+        if not (_finite(b) and _finite(c)):
+            na.append(f"{tr} obd coverage not finite ({c} vs {b})")
+            continue
         drop = 100.0 * (b - c)
         fail |= drop > GATES["G5_coverage_drop_pp_max"]
         det.append(f"{tr} obd drop {drop:+.1f}pp")
     t1 = _dig(cur, "coverage", "pir", "per_corner_obd")
-    t1_missing = not isinstance(t1, dict) or "T1" not in t1
+    t1all = _dig(cur, "coverage", "pir", "per_corner_all")
+    t1all_v = t1all.get("T1") if isinstance(t1all, dict) else None
+    t1all_txt = f"{t1all_v:.3f}" if _finite(t1all_v) else "n/a"
+    t1_missing = not isinstance(t1, dict) or not _finite(t1.get("T1"))
     if t1_missing:
-        det.append("PIR T1 missing")
+        det.append(f"PIR T1 missing (obd=n/a all={t1all_txt})")
     else:
         fail |= t1["T1"] < GATES["G5_pir_T1_min"]
-        det.append(f"PIR T1 {t1['T1']:.3f}")
+        det.append(f"PIR T1 obd={t1['T1']:.3f} all={t1all_txt}")
     status = "FAIL" if fail else ("N/A" if (na or t1_missing) else "PASS")
     g.append(("G5 coverage + PIR T1", status, ", ".join(det + na)))
 
@@ -252,15 +299,19 @@ def evaluate_gates(cur: dict, base: dict) -> list[tuple[str, str, str]]:
         status = "PASS"
     g.append(("G6 along-track + brake scatter not worse", status, det))
 
-    # G7
-    c4, b4 = _dig(cur, "v4", "gt_030"), _dig(base, "v4", "gt_030")
-    if b4 is _MISSING:
-        g.append(("G7 V4 >0.3 s not more", "N/A", lacks("v4", "gt_030")))
-    elif c4 is _MISSING:
-        g.append(("G7 V4 >0.3 s not more", "N/A", "current report lacks v4.gt_030"))
+    # G7 — rate of rankable V4 transits off by > 0.3 s, not more than the baseline's
+    c4, b4 = _dig(cur, "v4", "gt_030_rate"), _dig(base, "v4", "gt_030_rate")
+    counts = (f"gt_030 {_dig(cur, 'v4', 'gt_030')} vs {_dig(base, 'v4', 'gt_030')}; "
+              f"n_rankable {_dig(cur, 'v4', 'n_rankable')} vs {_dig(base, 'v4', 'n_rankable')}")
+    if not paired:
+        g.append(("G7 V4 >0.3 s rate not more", "N/A", POP_DIFF))
+    elif b4 is _MISSING:
+        g.append(("G7 V4 >0.3 s rate not more", "N/A", lacks("v4", "gt_030_rate")))
+    elif not (_finite(c4) and _finite(b4)):
+        g.append(("G7 V4 >0.3 s rate not more", "N/A", f"no rankable V4 evidence: {c4} vs {b4}; {counts}"))
     else:
-        nr = f"n_rankable {_dig(cur, 'v4', 'n_rankable')} vs {_dig(base, 'v4', 'n_rankable')}"
-        g.append(("G7 V4 >0.3 s not more", "PASS" if c4 <= b4 else "FAIL", f"{c4} vs {b4}; {nr}"))
+        g.append(("G7 V4 >0.3 s rate not more", "PASS" if c4 <= b4 else "FAIL",
+                  f"rate {c4:.4f} vs {b4:.4f}; {counts}"))
     return g
 
 
@@ -269,7 +320,8 @@ def main() -> int:
     p.add_argument("--root", default="data")
     p.add_argument("--label", required=True)
     p.add_argument("--baseline-report")
-    p.add_argument("--max-laps", type=int, default=40)
+    p.add_argument("--max-laps", type=int, default=None,
+                   help="per-track cap (laps taken in hash order); default: every clean held-out lap")
     p.add_argument("--skip-v5", action="store_true")
     p.add_argument("--seed", type=int, default=20261010)
     args = p.parse_args()
@@ -278,22 +330,37 @@ def main() -> int:
     import validation_checks as vc
     from lap_analyzer.labeler import build_reference_index, load_track
 
-    sessions = pd.concat([vc.list_sessions(tr) for tr in TRACKS], ignore_index=True)
-    split = vc.session_split(sessions)
-    held = {k for k, v in split.items() if v == "held"}
-    rng = np.random.default_rng(args.seed)
-    v2s, v3s, v4s = [], [], []
+    base = json.loads(Path(args.baseline_report).read_text()) if args.baseline_report else None
+    base_pop = (base or {}).get("population")
+    if base_pop:
+        # Paired run: evaluate exactly the baseline's held set and laps.
+        held = {(t, s) for t, s in base_pop["held"]}
+        if args.max_laps is not None:
+            print("note: --max-laps ignored — population fixed by the baseline report")
+    else:
+        sessions = pd.concat([vc.list_sessions(tr) for tr in TRACKS], ignore_index=True)
+        split = vc.session_split(sessions)
+        held = {k for k, v in split.items() if v == "held"}
+    v2s, v3s, v4s, pop_laps, n_missing = [], [], [], [], 0
     for tr in TRACKS:
         ctx = vc.TrackCtx.load(tr)
-        sids = [s for (t, s) in held if t == tr]
-        laps = list(vc.clean_laps(ctx, sids, max_laps=args.max_laps))
-        v2s.append(vc.run_v2(ctx, laps, build_reference_index(load_track(tr)), rng))
+        if base_pop:
+            laps, miss = vc.load_laps(ctx, [(s, lap) for t, s, lap in base_pop["laps"] if t == tr])
+            n_missing += miss
+        else:
+            sids = [s for (t, s) in held if t == tr]
+            laps = list(vc.clean_laps(ctx, sids, max_laps=args.max_laps))
+        pop_laps += [[tr, sid, lap] for sid, lap, _ in laps]
+        v2s.append(vc.run_v2(ctx, laps, build_reference_index(load_track(tr)), args.seed))
         v3s.append(vc.run_v3(ctx, laps))
         v4s.append(vc.run_v4(ctx, laps))
     v1 = vc.run_v1("pir", [s for (t, s) in held if t == "pir"])
     v1ok = v1[v1["valid"]] if len(v1) else v1
     report = dict(
         label=args.label, root=args.root, n_sessions_held=len(held),
+        population=dict(held=sorted([t, s] for t, s in held), laps=sorted(pop_laps)),
+        population_source="baseline" if base_pop else "selected",
+        population_missing_laps=n_missing,
         coverage=_coverage(held), brake_std=_brake_std(held),
         v1=dict(sessions=int(len(v1)), valid=int(len(v1ok)),
                 shift_std_median_m=float(v1ok["shift_std_median_m"].median()) if len(v1ok) else None),
@@ -304,14 +371,17 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out = OUT_DIR / f"{args.label}.json"
     out.write_text(json.dumps(report, indent=2, default=str))
-    print(json.dumps({k: v for k, v in report.items() if k != "v5"}, indent=2, default=str))
+    print(json.dumps({k: v for k, v in report.items() if k not in ("v5", "population")}, indent=2, default=str))
+    print(f"population: {len(report['population']['held'])} held sessions, "
+          f"{len(pop_laps)} laps ({report['population_source']}; {n_missing} missing)")
     print(f"report: {out}")
-    if args.baseline_report:
-        base = json.loads(Path(args.baseline_report).read_text())
-        rc = 0
+    if base is not None:
+        rc, counts = 0, {"PASS": 0, "FAIL": 0, "N/A": 0}
         for name, status, detail in evaluate_gates(report, base):
             print(f"[{status}] {name}: {detail}")
+            counts[status] += 1
             rc |= 1 if status == "FAIL" else 0
+        print(f"gates: {counts['PASS']} PASS, {counts['FAIL']} FAIL, {counts['N/A']} N/A")
         return rc
     return 0
 
