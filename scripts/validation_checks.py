@@ -112,34 +112,70 @@ class TrackCtx:
                    bounds=section_bounds(tdef))
 
 
+def lap_hash(session_id: str, lap: int) -> int:
+    """Stable per-lap ordering key, sha1("sid|lap") — interleaves sessions (no age bias)."""
+    return int(hashlib.sha1(f"{session_id}|{lap}".encode()).hexdigest(), 16)
+
+
+def _lap_frame(s: pd.DataFrame, lap: int) -> pd.DataFrame:
+    return s[s["lap"] == lap].sort_values("t", kind="stable").reset_index(drop=True)
+
+
 def clean_laps(ctx: TrackCtx, session_ids: list[str], max_laps: int | None = None
                ) -> Iterator[tuple[str, int, pd.DataFrame]]:
     """(session_id, lap, time-sorted lap samples) for OBD laps at ≥ MIN_FIX_RATE_HZ whose
-    corners.parquet marks them lap_reliable_traj. Deterministic order; stops at max_laps."""
-    n = 0
+    corners.parquet marks them lap_reliable_traj. Deterministic order. Without max_laps
+    every clean lap is yielded (session order); with a cap, laps are taken in lap_hash
+    order across sessions so the cap does not favour the oldest sessions."""
+    cand: list[tuple[str, int]] = []
     for sid in sorted(session_ids):
-        sd = sessions_dir(ctx.track) / sid
-        cp = sd / "corners.parquet"
+        cp = sessions_dir(ctx.track) / sid / "corners.parquet"
         if not cp.exists():
             continue
         c = pd.read_parquet(cp)
         if "lap_reliable_traj" not in c or not c["obd_present"].any():
             continue
         good = sorted(set(c.loc[c["lap_reliable_traj"].fillna(False).astype(bool) & c["obd_present"], "lap"]))
-        s = _read_traj_samples(sd / "samples.parquet")
+        cand += [(sid, int(lap)) for lap in good]
+    if max_laps is not None:
+        cand.sort(key=lambda x: lap_hash(*x))
+    cache: dict[str, pd.DataFrame | None] = {}
+    n = 0
+    for sid, lap in cand:
+        if sid not in cache:
+            cache[sid] = _read_traj_samples(sessions_dir(ctx.track) / sid / "samples.parquet")
+        s = cache[sid]
         if s is None:
             continue
-        for lap in good:
-            g = s[s["lap"] == lap].sort_values("t", kind="stable").reset_index(drop=True)
-            if len(g) < MIN_LAP_ROWS:
-                continue
-            dur = float(g["t"].iloc[-1] - g["t"].iloc[0])
-            if dur <= 0 or len(fix_rows(g["lat"], g["long"])) / dur < MIN_FIX_RATE_HZ:
-                continue
-            yield sid, int(lap), g
-            n += 1
-            if max_laps is not None and n >= max_laps:
-                return
+        g = _lap_frame(s, lap)
+        if len(g) < MIN_LAP_ROWS:
+            continue
+        dur = float(g["t"].iloc[-1] - g["t"].iloc[0])
+        if dur <= 0 or len(fix_rows(g["lat"], g["long"])) / dur < MIN_FIX_RATE_HZ:
+            continue
+        yield sid, lap, g
+        n += 1
+        if max_laps is not None and n >= max_laps:
+            return
+
+
+def load_laps(ctx: TrackCtx, pairs) -> tuple[list[tuple[str, int, pd.DataFrame]], int]:
+    """Exactly the listed (session_id, lap) laps — a fixed (baseline) population, loaded
+    regardless of the current lap_reliable_traj. Returns (laps, n_missing): a lap whose
+    samples are missing or empty is skipped and counted, never substituted."""
+    out, missing = [], 0
+    cache: dict[str, pd.DataFrame | None] = {}
+    for sid, lap in pairs:
+        if sid not in cache:
+            sp = sessions_dir(ctx.track) / sid / "samples.parquet"
+            cache[sid] = _read_traj_samples(sp) if sp.exists() else None
+        s = cache[sid]
+        g = _lap_frame(s, int(lap)) if s is not None else None
+        if g is None or len(g) == 0:
+            missing += 1
+            continue
+        out.append((sid, int(lap), g))
+    return out, missing
 
 
 # --- V2 fault planting ------------------------------------------------------
@@ -180,21 +216,25 @@ def burst_rows(g: pd.DataFrame, start_fix: int, n_fix: int) -> np.ndarray:
 
 def slow_drift_offsets(g: pd.DataFrame, center_m: float, amp_m: float, corridor,
                        half_len_m: float = 75.0):
-    """A T8-style slow lateral excursion: amp_m·sin²(π·u) along the corridor's left normal
-    for rows within ±half_len_m of center_m (u = 0..1 across that window). Returns
-    (rows mask, dx_m, dy_m) arrays aligned to g."""
+    """A T8-style slow excursion: amp_m·sin²(π·u) for rows within ±half_len_m of center_m
+    (u = 0..1 across that window), along ONE fixed direction — the corridor's unit left
+    normal at center_m, held constant over the whole window. On a curved section a fixed
+    direction is no longer perpendicular to travel away from the centre, so the faulted
+    path shortens/lengthens the arc like real Mode-4 drift (arc compression), instead of
+    sliding parallel to the corridor. Positive amp → +left normal. Returns (rows mask,
+    dx_m, dy_m) arrays aligned to g."""
     s = g["track_dist_m"].to_numpy(dtype=float)
     u = (s - (center_m - half_len_m)) / (2.0 * half_len_m)
     rows = np.isfinite(u) & (u >= 0.0) & (u <= 1.0)
     bump = np.where(rows, np.sin(np.pi * np.clip(u, 0.0, 1.0)) ** 2, 0.0) * amp_m
-    b = corridor.bin_index(s)
-    nx, ny = -corridor.ty[b], corridor.tx[b]            # unit left normal of travel
+    b0 = int(corridor.bin_index(np.array([center_m]))[0])
+    nx, ny = -float(corridor.ty[b0]), float(corridor.tx[b0])   # unit left normal at the centre
     return rows, bump * nx, bump * ny
 
 
 # --- V1 Accel-Z road-profile ruler -------------------------------------------
 
-from lap_analyzer.config import APP_ROOT  # noqa: E402
+from lap_analyzer.config import raw_dir  # noqa: E402
 
 Z_HIGHPASS_M = 25           # 2026-10-01, running-mean high-pass on the 1 m grid (prototype m2b_zreg)
 V1_PLANT_M = 7.0            # 2026-10-01, self-test shift; prototype recovered 7.0 m in 4/4 sessions
@@ -238,7 +278,7 @@ def zprofiles(track: str, session_id: str, laps: list[int], grid_len_m: float) -
     """High-passed Accel-Z per lap on a 1 m track_dist_m grid, using only rows where the
     raw Accel Z value changed (fresh samples). None if the raw CSV is missing or its row
     count does not match samples.parquet (rows are joined positionally)."""
-    raw = sorted((APP_ROOT / "data" / "raw" / track).glob(f"Log-{session_id}*.csv"))
+    raw = sorted(raw_dir(track).glob(f"Log-{session_id}*.csv"))
     if not raw:
         return None
     r = pd.read_csv(raw[0], comment="#", usecols=["Accel Z"])
@@ -297,55 +337,93 @@ V2_MAGS_M = (5.0, 10.0, 15.0, 20.0, 30.0)
 V2_GATE_WINDOW_M = 25.0     # 2026-10-10, gate placement: first faulted fix within ±25 m of a gate (jd_plant_gate)
 V2_BAD_ERR_S = 0.05         # 2026-10-10, spec §W0 V2: "bad-but-rankable" = |error| > 0.05 s and tier A
 V2_DRIFT_AMPS_M = (20.0, 30.0, 40.0)   # 2026-10-10, spec §W0 V2 slow drift 20-40 m over ~150 m
+G2_MAGS_M = (10.0, 15.0, 20.0, 30.0)   # 2026-10-13, G2 targeted batch: bursts ≥ 10 m at a gate
+G2_N_FIX = (3, 8)                      # 2026-10-13, G2 is defined on 0.4–1 s bursts (3..8 fixes at 8 Hz)
+G2_TRIALS_PER_LAP = 4       # 2026-10-13, ~120-130 held clean laps × 4 → ≥ 200 planted G2 trials after skips
+V2_COLUMNS = ["track", "session_id", "lap", "batch", "trial", "corner_id", "kind", "where", "mag_m",
+              "n_fix", "planted", "skip_reason", "err_s", "rank", "caught"]
 
 
-def run_v2(ctx, laps, ref, rng: np.random.Generator, trials_per_lap: int = 6) -> pd.DataFrame:
-    """Plant one fault per trial on a clean lap inside a section that is rankable on the
-    unfaulted lap; truth = that lap's unfaulted section time."""
-    out = []
+def trial_rng(track: str, session_id: str, lap: int, seed: int, batch: str = "", trial: int = 0
+              ) -> np.random.Generator:
+    """Generator seeded from a stable hash of (track, sid, lap, seed, batch, trial): a
+    trial's draws depend neither on which other laps are in the run (or their order) nor
+    on whether an earlier trial on the same lap was skipped."""
+    h = hashlib.sha1(f"{track}|{session_id}|{lap}|{seed}|{batch}|{trial}".encode()).hexdigest()[:8]
+    return np.random.default_rng(int(h, 16))
+
+
+def _v2_trial(ctx, ref, g, base, fr, s_fix, rng, *, g2: bool) -> dict:
+    """One planted fault inside a section that is rankable on the unfaulted lap. A trial
+    that cannot be planted returns planted=False with a skip_reason (counted, not dropped)."""
     cids = list(ctx.bounds)
+    cid = cids[int(rng.integers(len(cids)))]
+    a, b = ctx.bounds[cid]
+    row = dict(corner_id=cid, kind=None, where=None, mag_m=np.nan, n_fix=0, planted=False,
+               skip_reason="", err_s=np.nan, rank=False, caught=np.nan)
+    st0 = section_timing(base, a, b, ctx.corridor)
+    if not st0.rank_eligible:
+        row["skip_reason"] = "unrankable"
+        return row
+    if g2:
+        kind, where = "burst", "gate"
+    else:
+        kind = V2_KINDS[int(rng.integers(len(V2_KINDS)))]
+        where = "gate" if rng.random() < 0.5 else "mid"
+    row.update(kind=kind, where=where)
+    if kind == "slow_drift":
+        mag = float(V2_DRIFT_AMPS_M[int(rng.integers(len(V2_DRIFT_AMPS_M)))])
+        center = 0.5 * (a + b) if where == "mid" else (a if rng.random() < 0.5 else b)
+        rows, dx, dy = slow_drift_offsets(g, center, mag * (1 if rng.random() < 0.5 else -1),
+                                          ctx.corridor)
+        n_fix = int(np.isin(fr, np.where(rows)[0]).sum())
+    else:
+        if g2:
+            mag = float(G2_MAGS_M[int(rng.integers(len(G2_MAGS_M)))])
+            n_fix = int(rng.integers(G2_N_FIX[0], G2_N_FIX[1] + 1))
+        else:
+            mag = float(V2_MAGS_M[int(rng.integers(len(V2_MAGS_M)))])
+            n_fix = 1 if kind == "spike" else int(rng.integers(3, 17))   # 0.4–2 s at 8 Hz
+        if where == "gate":
+            gate = a if rng.random() < 0.5 else b
+            cand = np.where(np.abs(s_fix - gate) < V2_GATE_WINDOW_M)[0]
+        else:
+            cand = np.where(np.abs(s_fix - 0.5 * (a + b)) < 0.3 * (b - a))[0]
+        cand = cand[(cand >= 3) & (cand + n_fix < len(fr) - 3)]
+        row.update(mag_m=mag, n_fix=n_fix)
+        if not len(cand):
+            row["skip_reason"] = "no_candidate_fix"
+            return row
+        rows = burst_rows(g, int(cand[int(rng.integers(len(cand)))]), n_fix)
+        ang = rng.uniform(0.0, 2.0 * np.pi)
+        dx = np.full(len(g), mag * np.cos(ang))
+        dy = np.full(len(g), mag * np.sin(ang))
+    h = plant_offset(g, rows, dx, dy, ctx.frame, ref)
+    traj = estimate_trajectory(h, ctx.corridor, ctx.frame)
+    st = section_timing(traj, a, b, ctx.corridor)
+    caught = (float(not traj.evidence[rows].any()) if kind != "slow_drift" else float("nan"))
+    row.update(mag_m=mag, n_fix=n_fix, planted=True, err_s=st.time_s - st0.time_s,
+               rank=bool(st.rank_eligible), caught=caught)
+    return row
+
+
+def run_v2(ctx, laps, ref, seed: int, trials_per_lap: int = 6,
+           g2_trials_per_lap: int = G2_TRIALS_PER_LAP) -> pd.DataFrame:
+    """Plant one fault per trial on a clean lap inside a section that is rankable on the
+    unfaulted lap; truth = that lap's unfaulted section time. Two batches per lap:
+    'mixed' (random kind/where/mag) and 'g2' (bursts ≥ 10 m, 3..8 fixes, at a gate).
+    Every attempted trial is a row; skipped ones have planted=False + skip_reason."""
+    out = []
     for sid, lap, g in laps:
         base = estimate_trajectory(g, ctx.corridor, ctx.frame)
         fr = fix_rows(g["lat"], g["long"])
         s_fix = g["track_dist_m"].to_numpy()[fr]
-        for _ in range(trials_per_lap):
-            cid = cids[int(rng.integers(len(cids)))]
-            a, b = ctx.bounds[cid]
-            st0 = section_timing(base, a, b, ctx.corridor)
-            if not st0.rank_eligible:
-                continue
-            kind = V2_KINDS[int(rng.integers(len(V2_KINDS)))]
-            where = "gate" if rng.random() < 0.5 else "mid"
-            if kind == "slow_drift":
-                mag = float(V2_DRIFT_AMPS_M[int(rng.integers(len(V2_DRIFT_AMPS_M)))])
-                center = 0.5 * (a + b) if where == "mid" else (a if rng.random() < 0.5 else b)
-                rows, dx, dy = slow_drift_offsets(g, center, mag * (1 if rng.random() < 0.5 else -1),
-                                                  ctx.corridor)
-                n_fix = int(np.isin(fr, np.where(rows)[0]).sum())
-            else:
-                mag = float(V2_MAGS_M[int(rng.integers(len(V2_MAGS_M)))])
-                n_fix = 1 if kind == "spike" else int(rng.integers(3, 17))   # 0.4–2 s at 8 Hz
-                if where == "gate":
-                    gate = a if rng.random() < 0.5 else b
-                    cand = np.where(np.abs(s_fix - gate) < V2_GATE_WINDOW_M)[0]
-                else:
-                    cand = np.where(np.abs(s_fix - 0.5 * (a + b)) < 0.3 * (b - a))[0]
-                cand = cand[(cand >= 3) & (cand + n_fix < len(fr) - 3)]
-                if not len(cand):
-                    continue
-                rows = burst_rows(g, int(cand[int(rng.integers(len(cand)))]), n_fix)
-                ang = rng.uniform(0.0, 2.0 * np.pi)
-                dx = np.full(len(g), mag * np.cos(ang))
-                dy = np.full(len(g), mag * np.sin(ang))
-            h = plant_offset(g, rows, dx, dy, ctx.frame, ref)
-            traj = estimate_trajectory(h, ctx.corridor, ctx.frame)
-            st = section_timing(traj, a, b, ctx.corridor)
-            caught = (float(not traj.evidence[rows].any()) if kind != "slow_drift" else float("nan"))
-            out.append(dict(track=ctx.track, session_id=sid, lap=lap, corner_id=cid, kind=kind,
-                            where=where, mag_m=mag, n_fix=n_fix, err_s=st.time_s - st0.time_s,
-                            rank=bool(st.rank_eligible), caught=caught))
-    return pd.DataFrame(out, columns=["track", "session_id", "lap", "corner_id", "kind", "where",
-                                      "mag_m", "n_fix", "err_s", "rank", "caught"])
+        for batch, n_trials in (("mixed", trials_per_lap), ("g2", g2_trials_per_lap)):
+            for i in range(n_trials):
+                rng = trial_rng(ctx.track, sid, lap, seed, batch, i)
+                row = _v2_trial(ctx, ref, g, base, fr, s_fix, rng, g2=batch == "g2")
+                out.append(dict(track=ctx.track, session_id=sid, lap=lap, batch=batch, trial=i, **row))
+    return pd.DataFrame(out, columns=V2_COLUMNS)
 
 
 def run_v3(ctx, laps) -> pd.DataFrame:
