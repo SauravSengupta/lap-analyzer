@@ -145,3 +145,20 @@ def test_slow_drift_is_smooth_bounded_and_local():
     assert rows.any() and not rows[np.abs(s - 300.0) > 75.0].any()
     assert np.allclose(dx[rows], 0.0, atol=1e-9)               # eastbound → offset is pure north/south
     assert np.max(np.abs(dy[rows])) == pytest.approx(20.0, abs=0.5)
+
+
+def test_register_profiles_recovers_a_planted_shift():
+    # SPEC W0/V1 self-test: a known along-track shift of one lap's road profile is
+    # recovered by registration (the ruler reports itself INVALID otherwise).
+    vc = _vc()
+    rng = np.random.default_rng(0)
+    base = pd.Series(rng.normal(0, 1, 1200)).rolling(5, center=True, min_periods=1).mean().to_numpy()
+    laps = np.array([base + rng.normal(0, 0.05, base.size) for _ in range(6)])
+    shifted = laps.copy()
+    shifted[2] = np.interp(np.arange(base.size) - 7, np.arange(base.size), laps[2])  # lap 2 is +7 m late
+    R = vc.register_profiles(shifted, win=120, max_shift=25, step=40, min_corr=0.6)
+    lap2 = R[(R["lap"] == 2) & (R["corr"] > 0.6)]
+    assert len(lap2) > 10
+    assert lap2["shift"].median() == pytest.approx(7.0, abs=1.0)
+    others = R[(R["lap"] != 2) & (R["corr"] > 0.6)]
+    assert others["shift"].abs().median() <= 1.0

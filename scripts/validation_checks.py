@@ -190,3 +190,95 @@ def slow_drift_offsets(g: pd.DataFrame, center_m: float, amp_m: float, corridor,
     b = corridor.bin_index(s)
     nx, ny = -corridor.ty[b], corridor.tx[b]            # unit left normal of travel
     return rows, bump * nx, bump * ny
+
+
+# --- V1 Accel-Z road-profile ruler -------------------------------------------
+
+from lap_analyzer.config import APP_ROOT  # noqa: E402
+
+Z_HIGHPASS_M = 25           # 2026-10-01, running-mean high-pass on the 1 m grid (prototype m2b_zreg)
+V1_PLANT_M = 7.0            # 2026-10-01, self-test shift; prototype recovered 7.0 m in 4/4 sessions
+V1_PLANT_TOL_M = 1.0        # 2026-10-10, spec §W0 V1: planted shift must come back within ±1 m
+
+
+def register_profiles(P: np.ndarray, win: int = 120, max_shift: int = 25, step: int = 40,
+                      min_corr: float = 0.6, plant_m: float = 0.0) -> pd.DataFrame:
+    """Register each lap's profile against the leave-one-out median of the others, in
+    `win`-metre windows every `step` m, over integer shifts ±max_shift. Returns one row
+    per (window, lap) with the best correlation and shift (metres; + = the lap's profile
+    sits later along track). `plant_m` shifts every lap first (self-test)."""
+    P = np.asarray(P, dtype=float)
+    if plant_m:
+        idx = np.arange(P.shape[1])
+        P = np.array([np.interp(idx - plant_m, idx, p, left=np.nan, right=np.nan) for p in P])
+    out = []
+    for c0 in range(win // 2, P.shape[1] - win // 2, step):
+        a, b = c0 - win // 2, c0 + win // 2
+        for i in range(len(P)):
+            ref = np.nanmedian(np.delete(P, i, axis=0), axis=0)[a:b]
+            if np.isnan(ref).any() or ref.std() < 0.03:
+                continue
+            best = (-1.0, 0)
+            for sh in range(-max_shift, max_shift + 1):
+                if a + sh < 0 or b + sh > P.shape[1]:
+                    continue
+                x = P[i, a + sh:b + sh]
+                if np.isnan(x).any() or x.std() == 0:
+                    continue
+                cc = float(np.corrcoef(x, ref)[0, 1])
+                if cc > best[0]:
+                    best = (cc, sh)
+            out.append((c0, i, best[0], best[1]))
+    return pd.DataFrame(out, columns=["win", "lap", "corr", "shift"])
+
+
+def zprofiles(track: str, session_id: str, laps: list[int], grid_len_m: float) -> np.ndarray | None:
+    """High-passed Accel-Z per lap on a 1 m track_dist_m grid, using only rows where the
+    raw Accel Z value changed (fresh samples). None if the raw CSV is missing or its row
+    count does not match samples.parquet (rows are joined positionally)."""
+    raw = sorted((APP_ROOT / "data" / "raw" / track).glob(f"Log-{session_id}*.csv"))
+    if not raw:
+        return None
+    r = pd.read_csv(raw[0], comment="#", usecols=["Accel Z"])
+    s = pd.read_parquet(sessions_dir(track) / session_id / "samples.parquet",
+                        columns=["t", "lap", "track_dist_m"])
+    if len(r) != len(s):
+        return None
+    s["az"] = r["Accel Z"].to_numpy(dtype=float)
+    s["fresh"] = r["Accel Z"].diff().ne(0).to_numpy()
+    grid = np.arange(0.0, grid_len_m, 1.0)
+    P = []
+    for lap in laps:
+        g = s[(s["lap"] == lap) & s["fresh"] & s["track_dist_m"].notna()].sort_values("t")
+        sd = g["track_dist_m"].to_numpy()
+        ok = np.concatenate([[True], np.diff(sd) > 0])
+        z = pd.Series(np.interp(grid, sd[ok], g["az"].to_numpy()[ok], left=np.nan, right=np.nan))
+        P.append((z - z.rolling(Z_HIGHPASS_M, center=True, min_periods=5).mean()).to_numpy())
+    return np.array(P)
+
+
+def run_v1(track: str, session_ids: list[str], grid_len_m: float = 4200.0) -> pd.DataFrame:
+    """Per session: cross-lap shift std at well-registered windows + the planted self-test."""
+    rows = []
+    for sid in sorted(session_ids):
+        cp = sessions_dir(track) / sid / "corners.parquet"
+        if not cp.exists():
+            continue
+        c = pd.read_parquet(cp)
+        laps = sorted(set(c.loc[c["lap_reliable_traj"].fillna(False).astype(bool), "lap"]))
+        if len(laps) < 4:
+            continue
+        P = zprofiles(track, sid, laps, grid_len_m)
+        if P is None:
+            continue
+        R = register_profiles(P)
+        hi = R[R["corr"] > 0.6]
+        w = hi.groupby("win")["shift"].agg(["size", "std"])
+        w = w[w["size"] >= max(4, len(laps) // 2)]
+        Rp = register_profiles(P, plant_m=V1_PLANT_M)
+        rec = float(Rp.loc[Rp["corr"] > 0.6, "shift"].median()) if len(Rp) else float("nan")
+        rows.append(dict(session_id=sid, n_laps=len(laps), n_windows=len(w),
+                         shift_std_median_m=float(w["std"].median()) if len(w) else float("nan"),
+                         planted_recovered_m=rec,
+                         valid=bool(np.isfinite(rec) and abs(rec - V1_PLANT_M) <= V1_PLANT_TOL_M)))
+    return pd.DataFrame(rows)
