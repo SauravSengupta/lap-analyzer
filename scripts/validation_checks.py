@@ -286,3 +286,93 @@ def run_v1(track: str, session_ids: list[str], grid_len_m: float = 4200.0) -> pd
                          planted_recovered_m=rec,
                          valid=bool(np.isfinite(rec) and abs(rec - V1_PLANT_M) <= V1_PLANT_TOL_M)))
     return pd.DataFrame(rows)
+
+
+# --- V2 / V3 / V4 runners ------------------------------------------------------
+
+from lap_analyzer.trajectory import estimate_trajectory, section_timing  # noqa: E402
+
+V2_KINDS = ("spike", "burst", "slow_drift")
+V2_MAGS_M = (5.0, 10.0, 15.0, 20.0, 30.0)
+V2_GATE_WINDOW_M = 25.0     # 2026-10-10, gate placement: first faulted fix within ±25 m of a gate (jd_plant_gate)
+V2_BAD_ERR_S = 0.05         # 2026-10-10, spec §W0 V2: "bad-but-rankable" = |error| > 0.05 s and tier A
+V2_DRIFT_AMPS_M = (20.0, 30.0, 40.0)   # 2026-10-10, spec §W0 V2 slow drift 20-40 m over ~150 m
+
+
+def _timing(g, ctx, a, b):
+    return section_timing(estimate_trajectory(g, ctx.corridor, ctx.frame), a, b, ctx.corridor)
+
+
+def run_v2(ctx, laps, ref, rng: np.random.Generator, trials_per_lap: int = 6) -> pd.DataFrame:
+    """Plant one fault per trial on a clean lap inside a section that is rankable on the
+    unfaulted lap; truth = that lap's unfaulted section time."""
+    out = []
+    cids = list(ctx.bounds)
+    for sid, lap, g in laps:
+        base = estimate_trajectory(g, ctx.corridor, ctx.frame)
+        fr = fix_rows(g["lat"], g["long"])
+        s_fix = g["track_dist_m"].to_numpy()[fr]
+        for _ in range(trials_per_lap):
+            cid = cids[int(rng.integers(len(cids)))]
+            a, b = ctx.bounds[cid]
+            st0 = section_timing(base, a, b, ctx.corridor)
+            if not st0.rank_eligible:
+                continue
+            kind = V2_KINDS[int(rng.integers(len(V2_KINDS)))]
+            where = "gate" if rng.random() < 0.5 else "mid"
+            if kind == "slow_drift":
+                mag = float(V2_DRIFT_AMPS_M[int(rng.integers(len(V2_DRIFT_AMPS_M)))])
+                center = 0.5 * (a + b) if where == "mid" else (a if rng.random() < 0.5 else b)
+                rows, dx, dy = slow_drift_offsets(g, center, mag * (1 if rng.random() < 0.5 else -1),
+                                                  ctx.corridor)
+                n_fix = int(np.isin(fr, np.where(rows)[0]).sum())
+            else:
+                mag = float(V2_MAGS_M[int(rng.integers(len(V2_MAGS_M)))])
+                n_fix = 1 if kind == "spike" else int(rng.integers(3, 17))   # 0.4–2 s at 8 Hz
+                if where == "gate":
+                    gate = a if rng.random() < 0.5 else b
+                    cand = np.where(np.abs(s_fix - gate) < V2_GATE_WINDOW_M)[0]
+                else:
+                    cand = np.where(np.abs(s_fix - 0.5 * (a + b)) < 0.3 * (b - a))[0]
+                cand = cand[(cand >= 3) & (cand + n_fix < len(fr) - 3)]
+                if not len(cand):
+                    continue
+                rows = burst_rows(g, int(cand[int(rng.integers(len(cand)))]), n_fix)
+                ang = rng.uniform(0.0, 2.0 * np.pi)
+                dx = np.full(len(g), mag * np.cos(ang))
+                dy = np.full(len(g), mag * np.sin(ang))
+            h = plant_offset(g, rows, dx, dy, ctx.frame, ref)
+            traj = estimate_trajectory(h, ctx.corridor, ctx.frame)
+            st = section_timing(traj, a, b, ctx.corridor)
+            caught = (float(not traj.evidence[rows].any()) if kind != "slow_drift" else float("nan"))
+            out.append(dict(track=ctx.track, session_id=sid, lap=lap, corner_id=cid, kind=kind,
+                            where=where, mag_m=mag, n_fix=n_fix, err_s=st.time_s - st0.time_s,
+                            rank=bool(st.rank_eligible), caught=caught))
+    return pd.DataFrame(out, columns=["track", "session_id", "lap", "corner_id", "kind", "where",
+                                      "mag_m", "n_fix", "err_s", "rank", "caught"])
+
+
+def run_v3(ctx, laps) -> pd.DataFrame:
+    out = []
+    for sid, lap, g in laps:
+        t_o = estimate_trajectory(g, ctx.corridor, ctx.frame)
+        t_g = estimate_trajectory(gps_only_emulation(g), ctx.corridor, ctx.frame)
+        for cid, (a, b) in ctx.bounds.items():
+            so = section_timing(t_o, a, b, ctx.corridor)
+            sg = section_timing(t_g, a, b, ctx.corridor)
+            out.append(dict(track=ctx.track, session_id=sid, lap=lap, corner_id=cid,
+                            t_obd=so.time_s, rank_obd=bool(so.rank_eligible),
+                            t_gps=sg.time_s, sigma_gps=sg.sigma_s, rank_gps=bool(sg.rank_eligible)))
+    return pd.DataFrame(out)
+
+
+def run_v4(ctx, laps) -> pd.DataFrame:
+    out = []
+    for sid, lap, g in laps:
+        traj = estimate_trajectory(g, ctx.corridor, ctx.frame)
+        for cid, (a, b) in ctx.bounds.items():
+            st = section_timing(traj, a, b, ctx.corridor)
+            out.append(dict(track=ctx.track, session_id=sid, lap=lap, corner_id=cid,
+                            t_prod=st.time_s, rank=bool(st.rank_eligible),
+                            t_odo=odometer_section_time(g, a, b)))
+    return pd.DataFrame(out)

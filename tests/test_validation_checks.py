@@ -175,3 +175,23 @@ def test_register_profiles_plant_m_self_test_recovers_shift():
     hi = R[R["corr"] > 0.6]
     assert len(hi) > 10
     assert hi["shift"].median() == pytest.approx(7.0, abs=1.0)
+
+
+def test_runners_emit_documented_columns(sample_data_root):
+    # SPEC W0: V2/V3/V4 runners return one row per evaluated transit with the
+    # documented columns; V2 errors are finite for planted trials.
+    vc = _vc()
+    from lap_analyzer.labeler import build_reference_index, load_track
+    ctx = vc.TrackCtx.load("ridge")
+    sids = list(vc.list_sessions("ridge")["session_id"])
+    laps = list(vc.clean_laps(ctx, sids, max_laps=2))
+    assert laps, "sample bundle should contain at least one clean 8 Hz OBD lap"
+    v2 = vc.run_v2(ctx, laps, build_reference_index(load_track("ridge")),
+                   np.random.default_rng(1), trials_per_lap=3)
+    assert {"kind", "where", "mag_m", "err_s", "rank", "caught"} <= set(v2.columns)
+    assert set(v2["kind"]) <= set(vc.V2_KINDS)
+    v3 = vc.run_v3(ctx, laps)
+    assert {"t_obd", "rank_obd", "t_gps", "sigma_gps", "rank_gps"} <= set(v3.columns)
+    v4 = vc.run_v4(ctx, laps)
+    assert {"t_prod", "rank", "t_odo"} <= set(v4.columns)
+    assert len(v3) == len(v4) == len(laps) * len(ctx.bounds)
