@@ -456,3 +456,19 @@ def test_calibration_line_offset_is_rankable_and_true():
         st = section_timing(traj, a, b, ctx.corr)
         errs.append(abs(st.time_s - truth))
     assert np.median(errs) < 0.10   # follows the real line, not shrunk to OBD
+
+
+def test_synthetic_calibration_track_lat_g_matches_geometry():
+    # SPEC (trajectory per-mode calibration): the synthetic track obeys the canonical
+    # convention — lat_g > 0 is a RIGHT turn, i.e. the path heading decreases (clockwise)
+    # where lat_g > 0. The jump detector integrates heading from lat_g, so a sign
+    # mismatch would make every synthetic arc look like a GPS jump.
+    cal = _load_calibration_module()
+    ctx = cal._Ctx.synthetic()
+    rng = np.random.default_rng(0)
+    lap, _, _, _ = cal.make_synth_lap("clean", rng, ctx)
+    x, y = ctx.frame.to_xy(lap["lat"].to_numpy(), lap["long"].to_numpy())
+    heading = np.unwrap(np.arctan2(np.gradient(y), np.gradient(x)))
+    turning = lap["lat_g"].to_numpy() > 0.05
+    assert turning.any()
+    assert np.median(np.gradient(heading)[turning]) < 0      # clockwise where lat_g > 0
