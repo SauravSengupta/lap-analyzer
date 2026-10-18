@@ -472,3 +472,93 @@ def test_synthetic_calibration_track_lat_g_matches_geometry():
     turning = lap["lat_g"].to_numpy() > 0.05
     assert turning.any()
     assert np.median(np.gradient(heading)[turning]) < 0      # clockwise where lat_g > 0
+
+
+# ===========================================================================
+# W1 jump detector (spec 2026-10-10 sensor-fusion rethink §W1)
+# ===========================================================================
+
+def _arc_lap(make_lap_samples, spike_at=None, spike_m=15.0, lat_g_scale=1.0):
+    """8 Hz lap: 3 s straight east then a right-hand R=150 m arc at 40 m/s, positions
+    analytic; optional single-fix spike north at row `spike_at`."""
+    from lap_analyzer.centerline import M_PER_DEG_LAT
+    from lap_analyzer.gates import TrackFrame
+    frame = TrackFrame.from_centerline(pd.DataFrame({"lat": [45.0, 45.0], "long": [-122.0, -121.99]}))
+    v, R, hz = 40.0, 150.0, 8.0
+    t = np.arange(0.0, 12.0, 1.0 / hz)
+    n = len(t)
+    x, y, lg = np.empty(n), np.empty(n), np.zeros(n)
+    for i, ti in enumerate(t):
+        if ti <= 3.0:
+            x[i], y[i] = v * ti, 0.0
+        else:
+            u = ti - 3.0
+            x[i] = 120.0 + R * np.sin(v / R * u)
+            y[i] = -R + R * np.cos(v / R * u)
+            lg[i] = v * v / R / 9.80665 * lat_g_scale
+    if spike_at is not None:
+        y[spike_at] += spike_m
+    s = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
+    lap = make_lap_samples(
+        n=n, t=t, dist_lap_m=v * t, track_dist_m=s, speed_mph=v / 0.44704,
+        speed_mph_gps=v / 0.44704, lat_g=lg,
+        lat=frame.lat0 + y / M_PER_DEG_LAT, long=frame.lon0 + x / frame.m_per_deg_lon,
+        gps_drift_lat_m=0.0, gps_drift_lon_m=0.0)
+    return lap, frame
+
+
+def test_jump_detector_removes_spike_from_evidence(make_lap_samples):
+    # SPEC W1: a 15 m single-fix spike is flagged and removed from the evidence mask;
+    # the audit records report it.
+    from lap_analyzer.trajectory import estimate_trajectory
+    lap, frame = _arc_lap(make_lap_samples, spike_at=60)
+    traj = estimate_trajectory(lap, _straight_corridor(n=300), frame)
+    assert traj.jump_fix is not None and traj.jump_fix[60]
+    assert not traj.evidence[60]
+    checks = {c["name"]: c for c in traj.checks}
+    assert checks["jump_flagged_fixes"]["value"] >= 1
+    assert checks["jump_checked_fixes"]["value"] > 0
+
+
+def test_jump_detector_quiet_on_consistent_lap(make_lap_samples):
+    # SPEC W1: consistent sensors → no flags, and the trajectory is identical to the
+    # detector-disabled result (the stage only removes evidence it flags).
+    import lap_analyzer.trajectory as T
+    lap, frame = _arc_lap(make_lap_samples)
+    corr = _straight_corridor(n=300)
+    a = T.estimate_trajectory(lap, corr, frame)
+    assert not a.jump_fix.any()
+    old = T.JUMP_THRESH_M
+    try:
+        T.JUMP_THRESH_M = float("inf")
+        b = T.estimate_trajectory(lap, corr, frame)
+    finally:
+        T.JUMP_THRESH_M = old
+    assert np.array_equal(a.s_hat, b.s_hat) and np.array_equal(a.sigma_m, b.sigma_m)
+
+
+def test_jump_detector_never_flags_without_lat_g(make_lap_samples):
+    # SPEC W1: disabled (never flags) when lat_g is flat — it cannot judge.
+    from lap_analyzer.trajectory import estimate_trajectory
+    lap, frame = _arc_lap(make_lap_samples, spike_at=60, lat_g_scale=0.0)
+    traj = estimate_trajectory(lap, _straight_corridor(n=300), frame)
+    assert traj.jump_fix is None or not traj.jump_fix.any()
+
+
+def test_jump_detector_keeps_s_hat_monotone(make_lap_samples):
+    from lap_analyzer.trajectory import estimate_trajectory
+    lap, frame = _arc_lap(make_lap_samples, spike_at=60, spike_m=40.0)
+    traj = estimate_trajectory(lap, _straight_corridor(n=300), frame)
+    assert np.all(np.diff(traj.s_hat) >= -1e-9)
+
+
+def test_jump_detector_does_not_judge_through_missing_speed(make_lap_samples):
+    # SPEC W1: missing OBD speed around a fix means the detector cannot judge it, so a
+    # spike there is NOT flagged (NaN speed must not be papered over by the MIN_SPEED floor).
+    from lap_analyzer.trajectory import estimate_trajectory
+    lap, frame = _arc_lap(make_lap_samples, spike_at=60)
+    lap = lap.copy()
+    lap.loc[lap.index[58:63], "speed_mph"] = np.nan
+    traj = estimate_trajectory(lap, _straight_corridor(n=300), frame)
+    assert traj.jump_fix is not None and not traj.jump_fix[60]
+    assert np.all(np.diff(traj.s_hat) >= -1e-9)
