@@ -48,13 +48,15 @@ def path_shape(t, v_mps, lat_g) -> np.ndarray:
 
 
 def _rigid_fit(A: np.ndarray, B: np.ndarray, w: np.ndarray):
-    """Weighted Procrustes: rotation R and translation T minimising Σw|R·a + T − b|²."""
+    """Weighted 2-D rigid fit (closed form): rotation R and translation T minimising
+    Σw|R·a + T − b|²."""
     w = w / w.sum()
     ma, mb = w @ A, w @ B
-    H = ((A - ma) * w[:, None]).T @ (B - mb)
-    U, _, Vt = np.linalg.svd(H)
-    d = 1.0 if np.linalg.det(Vt.T @ U.T) >= 0 else -1.0
-    R = Vt.T @ np.diag([1.0, d]) @ U.T
+    a, b = A - ma, B - mb
+    th = np.arctan2(np.sum(w * (a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0])),
+                    np.sum(w * (a[:, 0] * b[:, 0] + a[:, 1] * b[:, 1])))
+    c, s = np.cos(th), np.sin(th)
+    R = np.array([[c, -s], [s, c]])
     return R, mb - R @ ma
 
 
@@ -95,6 +97,8 @@ def fix_residuals(t, v_mps, lat_g, x, y, fix_idx) -> np.ndarray:
         for _ in range(JUMP_IRLS_ITERS):
             R, T = _rigid_fit(A, B, w)
             r = np.hypot(*((A @ R.T + T) - B).T)
+            if np.all(r <= JUMP_HUBER_M):   # next weights all 1 -> identical refit
+                break
             w = np.where(r <= JUMP_HUBER_M, 1.0, JUMP_HUBER_M / np.maximum(r, 1e-9))
         res[n] = float(np.hypot(*((R @ P[i] + T) - F[i])))
     return res
