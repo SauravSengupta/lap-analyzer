@@ -62,13 +62,16 @@ def fix_residuals(t, v_mps, lat_g, x, y, fix_idx) -> np.ndarray:
     """Per fix in `fix_idx` (row indices into t/x/y, time-ordered): distance in metres
     from the sensor path rigidly fitted (Huber IRLS) to the OTHER fixes within
     ±JUMP_WIN_S. NaN where not evaluable: lat_g missing or all zero, v < JUMP_MIN_SPEED_MPS
-    at the fix, non-finite position, or fewer than JUMP_MIN_NB neighbours."""
+    at the fix, non-finite position, fewer than JUMP_MIN_NB neighbours, or any non-finite
+    lat_g or speed sample within ±JUMP_WIN_S of the fix (never judged on a zero-filled path)."""
     fix_idx = np.asarray(fix_idx, dtype=int)
     res = np.full(len(fix_idx), np.nan)
-    lg = np.asarray(lat_g, dtype=float)
-    if len(fix_idx) == 0 or not np.isfinite(lg).any() or np.nanmax(np.abs(lg)) == 0.0:
+    lg_raw = np.asarray(lat_g, dtype=float)
+    if len(fix_idx) == 0 or not np.isfinite(lg_raw).any() or np.nanmax(np.abs(lg_raw)) == 0.0:
         return res
     t = np.asarray(t, dtype=float)
+    bad = ~np.isfinite(lg_raw) | ~np.isfinite(np.asarray(v_mps, dtype=float))
+    lg = np.nan_to_num(lg_raw)
     v = np.nan_to_num(np.asarray(v_mps, dtype=float))
     P = path_shape(t, v, lg)
     F = np.column_stack([np.asarray(x, dtype=float), np.asarray(y, dtype=float)])
@@ -76,6 +79,10 @@ def fix_residuals(t, v_mps, lat_g, x, y, fix_idx) -> np.ndarray:
     tf = t[fix_idx]
     for n, i in enumerate(fix_idx):
         if v[i] < JUMP_MIN_SPEED_MPS or not good[n]:
+            continue
+        rlo = np.searchsorted(t, tf[n] - JUMP_WIN_S, side="left")
+        rhi = np.searchsorted(t, tf[n] + JUMP_WIN_S, side="right")
+        if bad[rlo:rhi].any():
             continue
         lo = np.searchsorted(tf, tf[n] - JUMP_WIN_S, side="left")
         hi = np.searchsorted(tf, tf[n] + JUMP_WIN_S, side="right")

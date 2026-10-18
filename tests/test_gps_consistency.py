@@ -75,6 +75,33 @@ def test_planted_burst_is_flagged():
     assert np.all(res[50:56] > 6.0)
 
 
+def test_partial_nan_inputs_are_not_judged():
+    # Contract: NaN (never a judgement) when it cannot judge. A missing lat_g or speed
+    # sample inside a fix's ±JUMP_WIN_S window must not be zero-filled into the sensor
+    # path and scored; fixes whose window is clean stay finite and small.
+    t, v, lg, x, y = _right_arc()
+    fr = np.arange(len(t))
+
+    lg2 = lg.copy()
+    lg2[40:43] = np.nan
+    res = fix_residuals(t, v, lg2, x, y, fr)
+    near = np.min(np.abs(t[:, None] - t[40:43][None, :]), axis=1) <= 1.5
+    far = np.min(np.abs(t[:, None] - t[40:43][None, :]), axis=1) >= 3.0
+    assert near.any() and far.any()
+    assert np.isnan(res[near]).all()
+    assert np.isfinite(res[far]).all()
+    assert np.nanmax(res[far]) < 1.0
+
+    v2 = v.copy()
+    v2[70] = np.nan
+    res = fix_residuals(t, v2, lg, x, y, fr)
+    near = np.abs(t - t[70]) <= 1.5
+    far = np.abs(t - t[70]) >= 3.0
+    assert np.isnan(res[near]).all()
+    assert np.isfinite(res[far]).all()
+    assert np.nanmax(res[far]) < 1.0
+
+
 def test_disabled_conditions_return_nan():
     # SPEC W1: never flags when it cannot judge — flat lat_g, slow car, too few neighbours.
     t, v, lg, x, y = _right_arc()
