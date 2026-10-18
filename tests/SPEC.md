@@ -400,6 +400,7 @@ pd.read_csv(.../laps.csv), track, "<sid>", "<YYYY-MM-DD>")`.
   per-lap drift columns are pulled from the lap's first sample. Assert
   clean-lap-only and the presence of `session_id, date, lap, corner_id` + drift
   columns.
+- `gps_jump_n` (int ≥ 0): jump-detector-flagged fixes whose `s_hat` lies inside the transit's ranking section `[a, b]` (0 when the detector did not run).
 
 ---
 
@@ -722,6 +723,14 @@ corridor-weighted, slope-bounded smooth of the offset evidence
 - **Extra Trajectory field `e_lat`** (per time-sorted sample): the drift-corrected
   signed lateral offset from the smoothed centerline (metres, + = left of travel),
   or NaN where the lap has no usable `lat`/`long`. Consumed by the consistency net.
+- **`jump_fix`** (W1, spec 2026-10-10): per time-sorted sample, `True` at the row of each
+  GPS fix the jump detector flagged; `None` when the detector did not run (no
+  `lat`/`long`/`lat_g`, or a `rescale_invalid` lap). Flagged fixes — and the rows that
+  hold them — are removed from `evidence` BEFORE the δ̂ fit; nothing is reconstructed.
+  The detector never flags when `lat_g` is all-zero/missing, below 10 m/s, or with fewer
+  than 6 neighbour fixes within ±1.5 s (1 Hz GPS). A lap with no flags yields exactly
+  the trajectory it would without the detector. Audit records `jump_checked_fixes`,
+  `jump_flagged_fixes`, `jump_longest_run`, `jump_gps_odo` are appended to `checks`.
 
 ## trajectory.section_timing
 
@@ -784,6 +793,20 @@ corridor so CI enforces the property without the (gitignored) corpus. The
 `line_offset` mode doubles as the R4 discrimination check: a genuine in-corridor,
 odometer-consistent tight line is recovered accurately (the estimator follows the
 real δ), not shrunk toward the OBD backbone.
+
+---
+
+## gps_consistency.fix_residuals
+
+Import: `from lap_analyzer.gps_consistency import fix_residuals, fresh_fix_rows, path_shape`.
+`fix_residuals(t, v_mps, lat_g, x, y, fix_idx) -> ndarray` — per fix, the distance (m)
+from the GPS-independent path shape (odometer speed + yaw = −lat_g·g/v, canonical
+lat_g + = right turn) robustly and rigidly fitted to the OTHER fixes within ±1.5 s.
+- Consistent sensors on a curved path → residuals well under 1 m.
+- A single displaced fix gets a large residual while its neighbours stay small (robust fit).
+- NaN (never a judgement) when lat_g is missing or all zero, v < 10 m/s at the fix, the
+  fix position is non-finite, or fewer than 6 neighbour fixes exist.
+- Computes numbers only; the flag threshold lives in `trajectory.py`.
 
 ---
 

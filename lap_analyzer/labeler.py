@@ -492,6 +492,10 @@ def build_session_corners(
             transit["section_sigma_t_s"] = round(st.sigma_s, 3) if np.isfinite(st.sigma_s) else np.nan
             transit["section_status"] = st.status
             transit["rank_eligible"] = bool(st.rank_eligible)
+            # Jump-detector flags inside this transit's ranking section (W1 diagnostic).
+            transit["gps_jump_n"] = (
+                int(np.sum(traj.jump_fix & (traj.s_hat >= a) & (traj.s_hat <= b)))
+                if traj.jump_fix is not None else 0)
             transit["session_id"] = session_id
             transit["date"] = date
             transit["lap"] = lap_num
