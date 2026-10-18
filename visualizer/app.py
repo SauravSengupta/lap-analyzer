@@ -107,7 +107,8 @@ _fix_dropdown_overflow()
 # v7 (2026-07-12, gps-trust PR 3): envelope bins on trajectory s_hat (monotone by
 # construction), so drop_gps_glitches is retired here — glitch samples land at
 # their honest s_hat instead of needing to be dropped.
-_GLITCH_FILTER_VERSION = 7
+# v8 (2026-10-17, W1): s_hat now excludes fixes the jump detector drops from evidence.
+_GLITCH_FILTER_VERSION = 8
 
 
 @st.cache_resource(show_spinner="loading trajectory corridor (one-time)")

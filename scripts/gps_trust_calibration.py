@@ -71,7 +71,7 @@ class _Ctx:
         from lap_analyzer.trajectory import CALIB_VERSION, Corridor
         ds, L, R = 2.0, 1500.0, 200.0
         s = np.arange(0.0, L, ds)
-        kap = np.where((s >= 500.0) & (s < 800.0), 1.0 / R, 0.0)   # left arc
+        kap = np.where((s >= 500.0) & (s < 800.0), 1.0 / R, 0.0)   # right arc
         theta = -np.cumsum(kap) * ds
         x = np.cumsum(np.cos(theta)) * ds
         y = np.cumsum(np.sin(theta)) * ds
