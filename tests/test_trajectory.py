@@ -232,6 +232,7 @@ def test_estimate_trajectory_rescale_invalid_is_prior_only(make_lap_samples):
                            track_dist_m=np.linspace(0, 2000, 200) + 700.0)  # +700m offset
     traj = estimate_trajectory(lap, corr, frame)
     assert traj.status == "rescale_invalid"
+    assert traj.jump_fix is None          # detector does not run on prior-only laps
     assert np.allclose(traj.delta_hat, 0.0)
     assert np.all(np.diff(traj.s_hat) >= -1e-9)
 
@@ -562,3 +563,18 @@ def test_jump_detector_does_not_judge_through_missing_speed(make_lap_samples):
     traj = estimate_trajectory(lap, _straight_corridor(n=300), frame)
     assert traj.jump_fix is not None and not traj.jump_fix[60]
     assert np.all(np.diff(traj.s_hat) >= -1e-9)
+
+
+def test_jump_detector_runs_on_gps_only_lap(make_lap_samples):
+    # SPEC W1: with no OBD speed the detector still runs on GPS-odometer speed and is
+    # flagged as such (jump_gps_odo == 1.0).
+    from lap_analyzer.trajectory import estimate_trajectory
+    lap, frame = _arc_lap(make_lap_samples, spike_at=60)
+    lap = lap.copy()
+    lap["speed_mph"] = np.nan
+    traj = estimate_trajectory(lap, _straight_corridor(n=300), frame)
+    assert traj.status == "gps_backbone"
+    assert traj.jump_fix is not None and traj.jump_fix[60]
+    assert not traj.evidence[60]
+    checks = {c["name"]: c for c in traj.checks}
+    assert checks["jump_gps_odo"]["value"] == 1.0
