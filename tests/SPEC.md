@@ -400,7 +400,8 @@ pd.read_csv(.../laps.csv), track, "<sid>", "<YYYY-MM-DD>")`.
   per-lap drift columns are pulled from the lap's first sample. Assert
   clean-lap-only and the presence of `session_id, date, lap, corner_id` + drift
   columns.
-- `gps_jump_n` (int ≥ 0): jump-detector-flagged fixes whose `s_hat` lies inside the transit's ranking section `[a, b]` (0 when the detector did not run).
+- `gps_jump_n` (int ≥ 0): jump-detector-flagged fixes whose `s_hat` lies inside the
+  transit's ranking section `[a, b]` (0 when the detector did not run).
 
 ---
 
@@ -731,6 +732,11 @@ corridor-weighted, slope-bounded smooth of the offset evidence
   than 6 neighbour fixes within ±1.5 s (1 Hz GPS). A lap with no flags yields exactly
   the trajectory it would without the detector. Audit records `jump_checked_fixes`,
   `jump_flagged_fixes`, `jump_longest_run`, `jump_gps_odo` are appended to `checks`.
+  The detector receives a speed array that keeps NaN where speed is missing (it is never
+  floored to the backbone's minimum speed), so fixes near missing speed are not judged.
+  On OBD laps the odometer speed is scaled by the lap's median GPS/OBD speed ratio
+  (samples > 15 m/s, ≥ 50 samples, else 1). `jump_gps_odo` is 1.0 on GPS-only laps
+  (GPS speed as the distance source) and 0.0 otherwise.
 
 ## trajectory.section_timing
 
@@ -804,8 +810,9 @@ from the GPS-independent path shape (odometer speed + yaw = −lat_g·g/v, canon
 lat_g + = right turn) robustly and rigidly fitted to the OTHER fixes within ±1.5 s.
 - Consistent sensors on a curved path → residuals well under 1 m.
 - A single displaced fix gets a large residual while its neighbours stay small (robust fit).
-- NaN (never a judgement) when lat_g is missing or all zero, v < 10 m/s at the fix, the
-  fix position is non-finite, or fewer than 6 neighbour fixes exist.
+- NaN (never a judgement) when lat_g is missing or all zero, any lat_g or speed sample
+  within ±1.5 s of the fix is non-finite (a fix is never judged on a zero-filled path),
+  v < 10 m/s at the fix, the fix position is non-finite, or fewer than 6 neighbour fixes exist.
 - Computes numbers only; the flag threshold lives in `trajectory.py`.
 
 ---
