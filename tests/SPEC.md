@@ -735,7 +735,7 @@ corridor-weighted, slope-bounded smooth of the offset evidence
   The detector receives a speed array that keeps NaN where speed is missing (it is never
   floored to the backbone's minimum speed), so fixes near missing speed are not judged.
   On OBD laps the odometer speed is scaled by the lap's median GPS/OBD speed ratio
-  (samples > 15 m/s, ≥ 50 samples, else 1). `jump_gps_odo` is 1.0 on GPS-only laps
+  (over samples where both speeds are finite and > 15 m/s; ≥ 50 such samples, else 1). `jump_gps_odo` is 1.0 on GPS-only laps
   (GPS speed as the distance source) and 0.0 otherwise.
 
 ## trajectory.section_timing
