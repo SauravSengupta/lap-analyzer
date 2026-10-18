@@ -48,3 +48,6 @@ scripts/*.png
 
 # GPS-lag A/B baseline root (scripts/gps_lag_acceptance.py)
 data_nolag/
+
+# Trust-validation A/B baseline root (scripts/trust_validation.py)
+data_base/
