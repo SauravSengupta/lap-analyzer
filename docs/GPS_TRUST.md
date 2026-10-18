@@ -88,6 +88,21 @@ physically impossible-short**, and one verified T3 ghost read **39.79 s stamped
 `timing_reliable=True`** (honest ≈5.2 s) because the old flag and value came from
 different passes.
 
+**Short bursts are caught by the car's own motion (jump detector, 2026-10).** Before
+the δ̂ fit, every GPS fix is compared with the path shape the GPS-independent sensors
+give over ±1.5 s — OBD odometer distance plus heading from lateral g (yaw =
+−lat_g·g/v) — rigidly fitted to the neighbouring fixes
+(`lap_analyzer/gps_consistency.py`). A fix more than `JUMP_THRESH_M` (4.8 m: clean-lap
+p99.9 of 3.82 m + 1 m) off that path is dropped from evidence, and σ grows through the
+gap term — nothing is reconstructed. It never judges a fix it can't: no lat_g, slow
+car, missing speed nearby, or too few neighbours (1 Hz GPS). This catches the 5–30 m
+spikes and 0.4–1 s bursts that the Hampel/backstop filters (15 m floor) pass. On
+planted faults at section boundaries, wrong-but-rankable bursts fell from 41.5% to
+1.0% and planted slow drift from 13.0% to 7.9%, with tier-A coverage unchanged; about
+5% of transits carry at least one flagged fix (`gps_jump_n`). It cannot see drift
+slower than ~1.5 s — the phone logs no gyro and lat_g heading drifts 8–20°/min — so
+Mode 4 stays with the σ-nets below.
+
 ### The three physical σ-nets (Mode 4)
 
 No scalar threshold separates a Mode-4 fake short path from a genuine tight racing

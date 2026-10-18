@@ -65,12 +65,14 @@ class _Ctx:
     @classmethod
     def synthetic(cls):
         """A self-contained straight-arc-straight track + corridor (no real data):
-        analytic κ (=1/R in the arc), a ±12m envelope, one section over the arc."""
+        analytic κ (=1/R in the arc), a ±12m envelope, one section over the arc. The arc
+        is a RIGHT turn (θ decreasing), so κ_signed > 0 and lat_g > 0 agree with the
+        canonical convention (+ = right) used by real data and the jump detector."""
         from lap_analyzer.trajectory import CALIB_VERSION, Corridor
         ds, L, R = 2.0, 1500.0, 200.0
         s = np.arange(0.0, L, ds)
-        kap = np.where((s >= 500.0) & (s < 800.0), 1.0 / R, 0.0)   # left arc
-        theta = np.cumsum(kap) * ds
+        kap = np.where((s >= 500.0) & (s < 800.0), 1.0 / R, 0.0)   # right arc
+        theta = -np.cumsum(kap) * ds
         x = np.cumsum(np.cos(theta)) * ds
         y = np.cumsum(np.sin(theta)) * ds
         lat0, lon0 = 45.0, -122.0

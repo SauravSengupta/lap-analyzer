@@ -386,7 +386,7 @@ spatial reliability flag reads them. Identity and core metrics (written by
 | Input timing (offset from corner start) | `throttle_lift_dist_m, brake_on_dist_m, brake_off_dist_m, throttle_return_dist_m, wot_dist_m` |
 | Aggregate inputs | `mean_throttle_norm, pct_wot, mean_lat_g, pct_braking` |
 | Mapping quality (raw-projection frame) | `track_dist_offset_med_m, track_dist_offset_max_m` |
-| Trajectory σ | `traj_sigma_max_m` (widest per-sample `s_hat` σ inside the box; high → prior/gap-carried placement), `section_sigma_t_s` (section-timing σ_t for this corner's ranking window), `section_status` (`ok` / `no_coverage` / `rescale_invalid`), `rank_eligible` (A-tier: `section_sigma_t_s ≤ 0.10 s` AND `section_status == ok`) |
+| Trajectory σ | `traj_sigma_max_m` (widest per-sample `s_hat` σ inside the box; high → prior/gap-carried placement), `section_sigma_t_s` (section-timing σ_t for this corner's ranking window), `section_status` (`ok` / `no_coverage` / `rescale_invalid`), `rank_eligible` (A-tier: `section_sigma_t_s ≤ 0.10 s` AND `section_status == ok`), `gps_jump_n` (GPS fixes in this corner's ranking window that the jump detector flagged and dropped from evidence — they disagreed with the odometer + lat_g path by > `JUMP_THRESH_M`) |
 | Per-lap drift | `gps_drift_lat_m, gps_drift_lon_m, gps_drift_n_anchors, gps_drift_disagreement_m` |
 | Sample refs | `sample_idx_start, sample_idx_end` (into the session's `samples.parquet`) |
 

@@ -771,3 +771,20 @@ def test_build_session_corners_file_writes_traj_sigma(sample_data_root, tmp_path
     assert "traj_sigma_max_m" in corners.columns
     # σ is a non-negative distance (metres) on every emitted transit.
     assert (corners["traj_sigma_max_m"] >= 0).all()
+
+
+def test_build_session_corners_emits_gps_jump_n(sample_data_root):
+    # SPEC labeler.build_session_corners: every transit carries gps_jump_n — the count of
+    # jump-detector-flagged fixes inside its ranking section (int ≥ 0).
+    import pandas as pd
+
+    from lap_analyzer.analysis import load_samples
+    from lap_analyzer.config import sessions_dir
+    from lap_analyzer.labeler import build_session_corners, load_track
+    sid = "20260517-100304"
+    s = load_samples("ridge", sid)
+    laps = pd.read_csv(sessions_dir("ridge") / sid / "laps.csv")
+    df = build_session_corners(s, laps, load_track("ridge"), sid, "2026-05-17")
+    assert "gps_jump_n" in df.columns
+    assert (df["gps_jump_n"] >= 0).all()
+    assert df["gps_jump_n"].dtype.kind in "iu"

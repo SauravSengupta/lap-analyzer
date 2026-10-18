@@ -27,6 +27,7 @@ from .analysis import load_centerline
 from .centerline import M_PER_DEG_LAT
 from .config import corpus_dir, sessions_dir
 from .gates import TrackFrame, _smoothed_tangent
+from .gps_consistency import fix_residuals, fresh_fix_rows
 
 # --- provenance-carrying constants (design R9) ------------------------------
 CORRIDOR_BIN_M = 10.0          # 2026-07-11, canonical 10m corridor bin (design §4.1)
@@ -336,6 +337,16 @@ SIGMA_FIT_CAP_M = 15.0       # 2026-07-11, cap on SE_fit before combining (proto
 SIGMA_FLOOR_OBD_M = 1.0      # 2026-07-11, σ floor with OBD backbone (design §Uncertainty)
 SIGMA_FLOOR_GPS_M = 3.0      # 2026-07-11, σ floor on GPS-only backbone (design §Architecture)
 
+# --- jump detector (W1, spec 2026-10-10 sensor-fusion rethink) ----------------
+# A fix whose residual vs the odometer + lat_g path shape (gps_consistency) exceeds
+# JUMP_THRESH_M is removed from the evidence mask; σ then grows through σ_gap. Nothing
+# is reconstructed. Threshold rule: clean-lap residual p99.9 + 1 m on the calibration
+# split (scripts/derive_jump_threshold.py). Derived 2026-10-17: p99.9 = 3.82 m (178 calibration
+# laps, 170k fixes) → 4.8 m; the all-corpus prototype gave 5.1 m → 6.0 m (2026-10-10).
+JUMP_THRESH_M = 4.8  # 2026-10-17, rule p99.9+1.0 m of clean residuals (calibration split: 178 laps, 170139 fixes, p99.9 = 3.82 m)
+JUMP_SCALE_MIN_MPS = 15.0    # 2026-10-10, samples above this set the per-lap GPS/OBD speed scale k (median 0.987)
+JUMP_SCALE_MIN_N = 50        # 2026-10-10, min samples for k; else k = 1
+
 # --- section-timing constants (Stage 2, item 5) -----------------------------
 # ρ for the correlation-aware section variance Var(T)=[σ_A²+σ_B²−2ρσ_Aσ_B]/(v_A v_B)
 # (judge-mandated; independence is wrong-signed for Mode 4). Fitted 2026-07-12 as
@@ -379,6 +390,7 @@ class Trajectory:
     knot_sigma: np.ndarray      # σ at each knot (metres)
     e_lat: np.ndarray | None = None  # drift-corrected signed lateral offset per sample
     checks: list = field(default_factory=list)  # structured audit records (R12)
+    jump_fix: np.ndarray | None = None  # per sample: True at each fix flagged by the jump detector (W1); None = not run
 
     def time_at(self, s: float):
         """(t, sigma_t) at ruler position s, or None if s is outside the lap's
@@ -405,6 +417,41 @@ def _check(name, value, threshold, ok):
             "threshold": round(float(threshold), 3), "pass": bool(ok)}
 
 
+def _jump_residuals(g: pd.DataFrame, frame: TrackFrame, v_backbone: np.ndarray, has_obd: bool):
+    """(fix row indices, residual metres) for one time-sorted lap, or None when the lap
+    has no position / lat_g columns. Positions are drift-corrected (a per-lap constant,
+    harmless to the rigid fit, applied for consistency with every other consumer). On
+    OBD laps the odometer speed is scaled by the lap's median GPS/OBD speed ratio.
+    v_backbone must keep NaN where speed is missing (the detector then cannot judge)."""
+    if not {"lat", "long", "lat_g"} <= set(g.columns):
+        return None
+    lat = g["lat"].to_numpy(dtype=float)
+    lon = g["long"].to_numpy(dtype=float)
+    fr = fresh_fix_rows(lat, lon)
+    if "gps_drift_lat_m" in g:
+        lat = lat - g["gps_drift_lat_m"].to_numpy(dtype=float) / M_PER_DEG_LAT
+        lon = lon - g["gps_drift_lon_m"].to_numpy(dtype=float) / frame.m_per_deg_lon
+    x, y = frame.to_xy(lat, lon)
+    v = np.asarray(v_backbone, dtype=float)
+    if has_obd and "speed_mph_gps" in g:
+        vg = g["speed_mph_gps"].to_numpy(dtype=float) * MPH_TO_MPS
+        with np.errstate(invalid="ignore"):
+            m = (np.isfinite(vg) & np.isfinite(v)
+                 & (v > JUMP_SCALE_MIN_MPS) & (vg > JUMP_SCALE_MIN_MPS))
+        if m.sum() >= JUMP_SCALE_MIN_N:
+            v = v * float(np.median(vg[m] / v[m]))
+    res = fix_residuals(g["t"].to_numpy(dtype=float), v, g["lat_g"].to_numpy(dtype=float), x, y, fr)
+    return fr, res
+
+
+def _longest_true_run(flags: np.ndarray) -> int:
+    best = run = 0
+    for f in flags:
+        run = run + 1 if f else 0
+        best = max(best, run)
+    return best
+
+
 def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
                         frame: TrackFrame) -> Trajectory:
     """Robust corridor-weighted, slope-bounded δ̂ smooth + honest per-sample σ.
@@ -421,8 +468,8 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
 
     obd = g["speed_mph"].to_numpy(dtype=float)
     has_obd = bool(np.isfinite(obd).any())
-    v = (obd if has_obd else g["speed_mph_gps"].to_numpy(dtype=float)) * MPH_TO_MPS
-    v = np.where(np.isfinite(v), v, MIN_SPEED_MPS)
+    v_raw = (obd if has_obd else g["speed_mph_gps"].to_numpy(dtype=float)) * MPH_TO_MPS
+    v = np.where(np.isfinite(v_raw), v_raw, MIN_SPEED_MPS)
 
     # Drift-corrected signed lateral offset for EVERY sample (R5) — the consistency
     # net reads it even on prior-only laps; NaN where the lap carries no position.
@@ -455,12 +502,33 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     ev = ok & keep
     if ev.any():
         ev &= np.abs(delta - np.median(delta[ev])) < EVIDENCE_BACKSTOP_M
+
+    # --- Step 1b: jump detector (W1) — drop fixes inconsistent with the car's own
+    # short-horizon motion (odometer + lat_g). Removal only; nothing reconstructed.
+    jump_fix = None
+    jr = _jump_residuals(g, frame, v_raw, has_obd)
+    if jr is not None:
+        fr, res = jr
+        flag = np.nan_to_num(res, nan=0.0) > JUMP_THRESH_M
+        jump_fix = np.zeros(n, dtype=bool)
+        jump_rows = np.zeros(n, dtype=bool)
+        ends = np.append(fr[1:], n)
+        for j in np.where(flag)[0]:
+            jump_fix[fr[j]] = True
+            jump_rows[fr[j]:ends[j]] = True
+        ev &= ~jump_rows
+        n_checked = int(np.isfinite(res).sum())
+        checks.append(_check("jump_checked_fixes", n_checked, 0.0, n_checked > 0))
+        checks.append(_check("jump_flagged_fixes", int(flag.sum()), JUMP_THRESH_M, True))
+        checks.append(_check("jump_longest_run", _longest_true_run(flag), 0.0, True))
+        checks.append(_check("jump_gps_odo", float(not has_obd), 0.0, True))
     checks.append(_check("evidence_fraction", ev.mean(), 0.0, ev.any()))
 
     # No usable GPS evidence → prior-only (OBD/GPS backbone; nothing dropped)
     if not ev.any():
         return _prior_only_trajectory(t, dl, v, backbone_status, corridor, checks,
-                                      sigma_floor=sigma_floor, e_lat=e_lat_all)
+                                      sigma_floor=sigma_floor, e_lat=e_lat_all,
+                                      jump_fix=jump_fix)
 
     # --- Step 2: corridor weighting (the Mode-4 discriminator) ---
     e_lat = e_lat_all
@@ -473,7 +541,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     knots = np.arange(dl.min(), dl.max(), KNOT_SPACING_M)
     if len(knots) < 2:
         return _prior_only_trajectory(t, dl, v, backbone_status, corridor, checks,
-                                      sigma_floor=sigma_floor)
+                                      sigma_floor=sigma_floor, jump_fix=jump_fix)
     dh, se, _neff = _knot_fit(dl[ev], delta[ev], w_env[ev], knots)
     slope_bound = _slope_bound(knots, dl, v, g["lat_g"].to_numpy(dtype=float), corridor, td)
     dh, clip_mag = _rate_limit(dh, slope_bound, knots)
@@ -485,11 +553,11 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     s_hat = np.maximum.accumulate(dl + d_smp)
     return Trajectory(t=t, s_hat=s_hat, sigma_m=np.interp(dl, knots, sig), delta_hat=d_smp,
                       dl=dl, v=v, evidence=ev, status=backbone_status, knots=knots,
-                      knot_sigma=sig, e_lat=e_lat_all, checks=checks)
+                      knot_sigma=sig, e_lat=e_lat_all, checks=checks, jump_fix=jump_fix)
 
 
 def _prior_only_trajectory(t, dl, v, status, corridor, checks,
-                           sigma_floor=SIGMA_FLOOR_OBD_M, e_lat=None):
+                           sigma_floor=SIGMA_FLOOR_OBD_M, e_lat=None, jump_fix=None):
     """δ̂ ≡ 0 (OBD/GPS backbone), σ = the tapered δ=0 prior — reproduces the
     OBD-anchored fallback in the zero-GPS-evidence limit (design R6)."""
     dl = dl.astype(float)
@@ -499,7 +567,7 @@ def _prior_only_trajectory(t, dl, v, status, corridor, checks,
     return Trajectory(t=t, s_hat=s_hat, sigma_m=np.interp(dl, knots, sig),
                       delta_hat=np.zeros(len(dl)), dl=dl, v=v,
                       evidence=np.zeros(len(dl), bool), status=status, knots=knots,
-                      knot_sigma=sig, e_lat=e_lat, checks=checks)
+                      knot_sigma=sig, e_lat=e_lat, checks=checks, jump_fix=jump_fix)
 
 
 def _lap_lateral_offset(g: pd.DataFrame, corridor: Corridor, frame: TrackFrame,
