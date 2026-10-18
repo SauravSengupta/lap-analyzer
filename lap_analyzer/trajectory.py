@@ -343,7 +343,7 @@ SIGMA_FLOOR_GPS_M = 3.0      # 2026-07-11, σ floor on GPS-only backbone (design
 # is reconstructed. Threshold rule: clean-lap residual p99.9 + 1 m on the calibration
 # split (scripts/derive_jump_threshold.py). Prototype value: p99.9 = 5.1 m on 198k
 # fixes / 207 laps → 6.0 m (2026-10-10).
-JUMP_THRESH_M = 6.0
+JUMP_THRESH_M = 4.8  # 2026-10-17, rule p99.9+1.0 m of clean residuals (calibration split: 178 laps, 170139 fixes, p99.9 = 3.82 m)
 JUMP_SCALE_MIN_MPS = 15.0    # 2026-10-10, samples above this set the per-lap GPS/OBD speed scale k (median 0.987)
 JUMP_SCALE_MIN_N = 50        # 2026-10-10, min samples for k; else k = 1
 
