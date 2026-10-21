@@ -709,10 +709,10 @@ class SectionTiming:
     checks: list = field(default_factory=list)  # structured audit records (R12)
 
 
-def _tier(sigma_s: float, cap_b: bool = False) -> str:
+def _tier(sigma_s: float) -> str:
     if not np.isfinite(sigma_s):
         return "C"
-    if sigma_s <= TIER_A_S and not cap_b:
+    if sigma_s <= TIER_A_S:
         return "A"
     if sigma_s <= TIER_B_S:
         return "B"
@@ -812,7 +812,7 @@ def section_timing(traj: Trajectory, dist_a: float, dist_b: float,
                          abs(time_s - obd_time) <= tol))
 
     status = "rescale_invalid" if traj.status == "rescale_invalid" else "ok"
-    tier = _tier(sigma_s, cap_b=(traj.status == "gps_backbone"))
+    tier = _tier(sigma_s)
     rank_eligible = (tier == "A") and (status == "ok")
     return SectionTiming(time_s, sigma_s, t_a, t_b, driven, status, tier,
                          rank_eligible, checks)

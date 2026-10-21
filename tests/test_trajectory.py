@@ -386,15 +386,19 @@ def test_section_timing_rescale_invalid_emits_value_not_rankable(make_lap_sample
     assert st.rank_eligible is False
 
 
-def test_section_timing_gps_backbone_caps_at_B():
-    # SPEC (reserved §9.3): a gps_backbone trajectory never reaches tier A even when
-    # its σ would otherwise qualify.
+def test_section_timing_gps_backbone_earns_tier_by_sigma():
+    # SPEC (W3, spec 2026-10-10; replaces reserved §9.3 cap with user approval): a
+    # gps_backbone trajectory is tiered by its own σ like any other — tight σ reaches A,
+    # wide σ does not. Its status stays 'gps_backbone' as provenance.
     from lap_analyzer.trajectory import section_timing
-    traj = _straight_trajectory(sigma0=0.5, v=40.0, length=2500.0)
-    object.__setattr__(traj, "status", "gps_backbone")
-    st = section_timing(traj, 500.0, 1000.0, _straight_corridor(n=300))
-    assert st.tier in ("B", "C")
-    assert st.rank_eligible is False
+    tight = _straight_trajectory(sigma0=0.5, v=40.0, length=2500.0)
+    object.__setattr__(tight, "status", "gps_backbone")
+    st = section_timing(tight, 500.0, 1000.0, _straight_corridor(n=300))
+    assert st.tier == "A" and st.rank_eligible is True
+    wide = _straight_trajectory(sigma0=20.0, v=40.0, length=2500.0)
+    object.__setattr__(wide, "status", "gps_backbone")
+    st2 = section_timing(wide, 500.0, 1000.0, _straight_corridor(n=300))
+    assert st2.rank_eligible is False
 
 
 def test_section_timing_emits_all_three_net_checks():

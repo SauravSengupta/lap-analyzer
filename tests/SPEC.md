@@ -780,7 +780,7 @@ on one lap's estimate, and reports honest per-section σ with three physical σ-
   - **speed-consistency tripwire:** `|time_s − obd_anchored_time|` vs
     `(|δ_a|+|δ_b|)/v̄ + 0.2s` — a **diagnostic** check record only, never inflates.
 - **Derived tiers (never stored booleans):** `A` if `sigma_s ≤ 0.10`, `B` if
-  `≤ 0.30`, else `C`. A `gps_backbone` trajectory caps at `B` (reserved §9.3).
+  `≤ 0.30`, else `C`. A `gps_backbone` (GPS-only) trajectory is tiered by its own σ like any other (W3, 2026-10; the former tier-B cap is retired — dropping OBD changes tier-A section times by a median 0.006 s). Its wider σ floor `SIGMA_FLOOR_GPS_M` still applies.
   `rank_eligible == (tier == 'A' and status == 'ok')`.
 - **Structured checks (R12):** every row carries records `{name, value, threshold,
   pass}` for at least the driven-band, consistency, and speed-consistency nets, so a
