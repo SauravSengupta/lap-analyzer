@@ -386,8 +386,10 @@ the same method). Trust battery PASS; `rank_eligible` Ridge +0.1 pp, PIR −1.1 
 (PASS). Per-corner PASS everywhere except **PIR T1, 80% → 66%, accepted-unmet
 2026-09-29**: the correction widens T1's odometer-vs-gate gap by ~5–7 m (entry
 ~45 m/s, exit ~22 m/s), past T1's 8.1 m driven band, which was effectively tuned
-on lagged positions. Done 2026-10 (W2): bands re-derived by rule on corrected
-data; PIR T1 0.874 → 0.951. Brake-point scatter PASS on both tracks.
+on lagged positions. Brake-point scatter PASS on both tracks (2026-09 result). Done
+2026-10 (W2): bands re-derived by rule on corrected data; PIR T1 held-out OBD
+rank-eligible 0.874 → 0.951 (different measure from the 80/66% above); brake-scatter
+gate accepted-unmet on PIR (+0.04 m).
 
 **Approaches we rejected:** shifting position by the speed τ (ran ahead, cost
 T1); inferring position lag from a `track_dist_m − dist_lap_m` regression

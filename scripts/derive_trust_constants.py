@@ -11,8 +11,11 @@ Rules (each the documented definition in trajectory.py):
   CONSISTENCY_STD_M    1.4826·MAD of the consistency residual, clean transits, pooled.
   SIGMA_PRIOR_MID_M    1.4826·MAD of δ̂ at mid-lap knots (≥ PRIOR_TAPER_M from both ends):
                        how far the OBD backbone wanders from GPS mid-lap.
-Clean = lap_reliable_traj OBD laps at ≥ 3 Hz fixes (validation_checks.clean_laps); robust
-statistics keep the residual contamination (e.g. a T8 fake) from widening anything.
+Clean = lap_reliable_traj OBD laps at ≥ 3 Hz fixes (validation_checks.clean_laps). Caveat:
+clean laps are tier-A under the CURRENT nets, so the dev/resid samples are truncated near
+the current bands (robust stats handle contamination, not truncation); a second pass
+after applying the constants shows the drift. Production centres both the consistency and
+prior nets on 0, so the printed medians must be near 0.
 
   $env:PYTHONPATH = "."; python scripts/derive_trust_constants.py
 """
@@ -108,12 +111,18 @@ def main() -> int:
     scale, floor = fit_band(per["heading"], per["bound"])
     cons = robust_std(trans["resid"])
     pm = robust_std(prior)
+    cons_med = float(np.nanmedian(trans["resid"]))
+    pm_med = float(np.nanmedian(prior))
+    r_a, n_a = np.asarray(rs, float), np.asarray(ns, float)
+    n_rho = int(np.sum(np.isfinite(r_a) & (n_a > 3) & (np.abs(r_a) < 1)))
     d = date.today()
     n_t, n_c = len(trans), len(per)
     print(f"transits={n_t} corners={n_c} gate-pairs={len(gates)} prior-knots={len(prior)}")
     print(per.round(2).to_string())
+    print(f"consistency resid: median {cons_med:+.2f} m, robust std {cons:.2f} m")
+    print(f"mid-lap delta-hat: median {pm_med:+.2f} m, robust std {pm:.2f} m")
     print("\nReplacement lines for lap_analyzer/trajectory.py:")
-    print(f"RHO_SECTION = {rho:.2f}  # {d}, Fisher-z mean gate-δ corr, {len(rs)} corners, calibration split (W2)")
+    print(f"RHO_SECTION = {rho:.2f}  # {d}, Fisher-z mean gate-δ corr, {n_rho} corners, calibration split (W2)")
     print(f"DRIVEN_BAND_HDG_SCALE = {scale:.1f}  # {d}, LSQ of per-corner robust |dev| bound vs ∫|κ|ds, {n_c} corners (W2)")
     print(f"DRIVEN_BAND_FLOOR_M = {floor:.1f}  # {d}, intercept of the same fit (W2)")
     print(f"CONSISTENCY_STD_M = {cons:.1f}  # {d}, 1.4826·MAD consistency resid, {n_t} clean transits (W2)")

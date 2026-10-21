@@ -130,12 +130,18 @@ production, always emitted as structured audit records (R12) in `checks_json`.
 (`scripts/derive_trust_constants.py`) on lag-corrected, jump-filtered data, calibration
 split only: `RHO_SECTION` 0.45 → 0.66 (Fisher-z mean gate-δ correlation, 28 corners);
 driven band `·6 + 7 m` → `·3.2 + 10.3 m` (least squares of per-corner robust bounds
-vs heading); `CONSISTENCY_STD_M` 6.6 → 5.1 m; `SIGMA_PRIOR_MID_M` 12.0 → 6.5 m. On
-held-out sessions PIR T1 OBD rank-eligible went 0.874 → 0.951 (all transits 0.756 →
-0.824) and burst-at-gate bad-but-rankable fell 41.5% → 4.3%. The trade-off: the flatter
-band slope gains low-heading corners (T1) but loses high-heading ones whose clean
-spread sits above the line (PIR T3, Ridge T12), so per-track tier-A coverage dipped
-~1.6 pp (PIR 0.913 → 0.896, Ridge 0.863 → 0.847).
+vs heading); `CONSISTENCY_STD_M` 6.6 → 5.1 m; `SIGMA_PRIOR_MID_M` 12.0 → 6.5 m. Held-out validation, W0 → W1 → W2:
+burst-at-gate (0.4–1 s, ≥10 m) bad-but-rankable 41.5% → 1.0% → 4.3% (the drop is W1's
+jump detector; W2 gave some back, still within the 5% gate); slow-drift
+bad-but-rankable 13.0% → 7.9% → 12.9% (W2 gave back most of W1's gain, still not worse
+than W0); PIR T1 OBD rank-eligible 0.874 → 0.951. The band rule is a central
+least-squares line through per-corner bounds, not an envelope, so roughly half the
+corners' clean 3σ bound sits above the band; that is the source of the coverage
+trade-off: per-track OBD tier-A coverage −1.6 pp (PIR 0.913 → 0.896, Ridge 0.863 →
+0.847). The brake-point scatter gate was missed on PIR (13.091 → 13.132 m, +0.04 m vs
+W0; Ridge 13.612 → 13.317 m): accepted-unmet by the user 2026-10-20. Likely (not
+proven) cause: the two σ-shrinking changes, `RHO_SECTION` 0.45 → 0.66 and
+`SIGMA_PRIOR_MID_M` 12 → 6.5.
 
 ## The four trust axes
 
