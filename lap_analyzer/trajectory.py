@@ -328,7 +328,9 @@ KNOT_SPACING_M = 10.0        # 2026-07-11, δ̂ knots every 10m of dist_lap_m (p
 BANDWIDTH_M = 60.0           # 2026-07-11, tricube bandwidth; curvature-adaptive is §9.2/PR1-T5 (prototype)
 SIGMA_MEAS_M = 3.0           # 2026-07-11, per-fix measurement σ floor (plan §6)
 SIGMA_PRIOR_END_M = 2.0      # 2026-07-11, δ=0 prior σ at lap ends (rescale pins them) (plan §6)
-SIGMA_PRIOR_MID_M = 12.0     # 2026-07-11, δ=0 prior σ mid-lap ≡ measured ±0.55s fallback noise (plan §6)
+# SIGMA_PRIOR_MID_M: δ=0 prior σ mid-lap. 2026-07-11 value 12.0 ≡ measured ±0.55s fallback noise (plan §6).
+# Re-derived by the same rule on lag-corrected, jump-filtered data (W2, spec 2026-10-10).
+SIGMA_PRIOR_MID_M = 6.5      # 2026-10-17, 1.4826·MAD mid-lap δ̂, 58233 knots (W2)
 PRIOR_TAPER_M = 200.0        # 2026-07-11, ends→mid prior taper length (prototype)
 SLOPE_BOUND_KAPPA = 20.0     # 2026-07-11, slope_bound = min(κ·this+0.10, 0.80) m/m (prototype/plan step 4)
 SLOPE_BOUND_FLOOR = 0.10     # 2026-07-11, straight-line offset-slope floor (plan §6 p95=0.111)
@@ -355,20 +357,25 @@ JUMP_SCALE_MIN_N = 50        # 2026-10-10, min samples for k; else k = 1
 # common-mode Mode-1 offset is positively correlated (T7 0.88, T14 0.79) so section
 # times sharpen, while Mode-4 corners go negative when the constant is removed
 # (T8 −0.50, T11 −0.21) — that widening is carried by the driven-band/consistency
-# σ-nets and validated per-mode by the R7 battery.
-RHO_SECTION = 0.45
-# driven-band net: band = (∫|κ| ds over [a,b])·6 + 7 m. The heading integral of the
-# corridor κ reproduces the plan §6 band_m table (heading_rad·6+7) within ~1m per
+# σ-nets and validated per-mode by the R7 battery. (2026-07 fit = 0.454; the live
+# value below is the 2026-10 re-derivation.)
+# Re-derived by the same rule on lag-corrected, jump-filtered data (W2, spec 2026-10-10).
+RHO_SECTION = 0.66  # 2026-10-17, Fisher-z mean gate-δ corr, 28 corners, calibration split (W2)
+# driven-band net: band = (∫|κ| ds over [a,b])·DRIVEN_BAND_HDG_SCALE + DRIVEN_BAND_FLOOR_M
+# (2026-07 derivation: ·6 + 7 m). The heading integral of the
+# corridor κ reproduced the plan §6 band_m table (heading_rad·6+7) within ~1m per
 # corner (verified 2026-07-12 vs corner_bounds_verdict.csv hdg_deg / baseline
 # heading_rad). NOTE: the §6 note's "max(…, clean p99.5+2 from all_rel_devs)" branch
 # does NOT bind — all_rel_devs is the contaminated *reliable* set (p99.5|dev| 35–67m),
 # so using it would widen the band 2–3× and let the T8 fakes (dev −31…−37m) pass,
 # defeating the net (a §9.7-forbidden widening). §6 band_m == heading formula; used.
-DRIVEN_BAND_HDG_SCALE = 6.0
-DRIVEN_BAND_FLOOR_M = 7.0
+# Re-derived by the same rule on lag-corrected, jump-filtered data (W2, spec 2026-10-10).
+DRIVEN_BAND_HDG_SCALE = 3.2  # 2026-10-17, LSQ of per-corner robust |dev| bound vs ∫|κ|ds, 28 corners (W2)
+DRIVEN_BAND_FLOOR_M = 10.3  # 2026-10-17, intercept of the same fit (W2)
 # line-length consistency net: resid = driven − [(b−a) + Σ κ_signed·e_left·Δs];
-# clean std 6.6m (design §Prototype / item 5). Inflate σ beyond ±2σ.
-CONSISTENCY_STD_M = 6.6
+# clean std was 6.6m in 2026-07 (design §Prototype / item 5). Inflate σ beyond ±2σ.
+# Re-derived by the same rule on lag-corrected, jump-filtered data (W2, spec 2026-10-10).
+CONSISTENCY_STD_M = 5.1  # 2026-10-17, 1.4826·MAD consistency resid, 2572 clean transits (W2)
 SPEED_CONSIST_TOL_S = 0.2     # 2026-07-11, speed-consistency slack (design tripwire)
 TIER_A_S = 0.10              # 2026-07-11, rankable σ_t ceiling (PROVISIONAL until R7, §9.1)
 TIER_B_S = 0.30             # 2026-07-11, shown-shaded σ_t ceiling (PROVISIONAL until R7, §9.1)

@@ -768,7 +768,7 @@ on one lap's estimate, and reports honest per-section σ with three physical σ-
   posterior σ at the two crossings and `ρ = RHO_SECTION` a corpus-fitted constant.
   A common-mode (Mode-1) offset error partly cancels; the three nets below then
   **inflate** σ (never reject — design R2):
-  - **driven-band net:** the per-section band `= (∫|κ| ds over [a,b])·6 + 7` metres
+  - **driven-band net:** the per-section band `= (∫|κ| ds over [a,b])·DRIVEN_BAND_HDG_SCALE + DRIVEN_BAND_FLOOR_M` metres
     (κ from the corridor, GPS-free); `excess = max(0, |driven_m − (b−a)| − band)`
     inflates σ by `excess / v̄` in quadrature. Evaluated at the **posterior**
     crossings, so a genuine tight line (in-band there) is untouched while on-ribbon
@@ -776,7 +776,7 @@ on one lap's estimate, and reports honest per-section σ with three physical σ-
   - **line-length consistency net:** `resid = driven_m − [(b−a) + Σ κ_signed·e_left·Δs]`
     over the section (does the lap's own lateral line explain its odometer
     shortening?); `excess = max(0, |resid| − 2·CONSISTENCY_STD_M)` inflates σ by
-    `excess / v̄`. `CONSISTENCY_STD_M = 6.6`. Always emitted as a check record.
+    `excess / v̄`. `CONSISTENCY_STD_M` (corpus-derived; see trajectory.py provenance). Always emitted as a check record.
   - **speed-consistency tripwire:** `|time_s − obd_anchored_time|` vs
     `(|δ_a|+|δ_b|)/v̄ + 0.2s` — a **diagnostic** check record only, never inflates.
 - **Derived tiers (never stored booleans):** `A` if `sigma_s ≤ 0.10`, `B` if
