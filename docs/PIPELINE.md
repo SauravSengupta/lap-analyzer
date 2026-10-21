@@ -464,6 +464,19 @@ python -m lap_analyzer.cli.flag_quality --track ridge
 python -m lap_analyzer.cli.build_corpus --track ridge
 ```
 
+**Re-derive trust constants / validate** (local; needs `data/`). Constants are set
+by rule, not by hand: `scripts/derive_trust_constants.py` (trust-net constants),
+`scripts/derive_jump_threshold.py` (GPS jump-detector threshold) and
+`scripts/derive_gps_sigma_floor.py` (`SIGMA_FLOOR_GPS_M`) print the replacement
+lines. `scripts/trust_validation.py` is the independent held-out validation report
+(planted faults, GPS-only emulation, odometer-only times), compared against a
+baseline report:
+
+```powershell
+$env:PYTHONPATH = "."
+python scripts/trust_validation.py --root data --label w3 --baseline-report docs/superpowers/artifacts/trust-validation/w0-baseline.json
+```
+
 **Annotate sessions** via `data/notes/<track>.json` — a flat map of
 `session_id → annotation`:
 

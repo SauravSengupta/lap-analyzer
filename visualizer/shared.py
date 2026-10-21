@@ -29,7 +29,8 @@ from lap_analyzer.config import tracks_dir
 # v12 (2026-07-13, gps-trust PR 5): dropped the v11 compat columns timing_gap_s and
 # timing_reliable (crossing_gap_s retired); rank_eligible is the rankability flag.
 # 13: W1 jump detector drops inconsistent GPS fixes from trajectory evidence (2026-10-17)
-_SECTION_TIMES_VERSION = 13
+# 14: W2 re-derived trust-net constants + W3 GPS-only laps earn tier by σ (σ floor 1.0 m) (2026-10-20)
+_SECTION_TIMES_VERSION = 14
 
 
 def current_track() -> str:

@@ -182,6 +182,20 @@ Quality **tiers are derived from σ, never stored as independent booleans**:
 > The 0.10 s / 0.30 s thresholds are **PROVISIONAL** pending a coverage/precision
 > sweep (design §9.1, reserved). Do not treat them as finalized.
 
+GPS-only (`gps_backbone`) laps are tiered by their own σ (since 2026-10, W3); there
+is no blanket tier-B cap. Evidence: dropping OBD from tier-A OBD laps changes section
+times by a median 0.006 s (p90 ≤ 0.033 s); the lower `SIGMA_FLOOR_GPS_M` (1.0 m,
+the smallest floor in a 0.5 m grid starting at the OBD floor at which GPS-only
+emulation is ≥ 95% within 2σ) keeps their σ honest. On the calibration split
+(2244 transits) emulation is 0.998 within 2σ, tier-A share 0.966, and 99.9% of
+tier-A transits within 0.10 s of the OBD answer; on held-out sessions 0.997 within
+2σ and 99.8% of 1816 emulated GPS-only tier-A transits within 0.10 s. Real GPS-only
+sessions go from 0% to 86.5% rank-eligible (PIR) and 81.9% (Ridge); overall tier-A
+coverage rises PIR 0.790 → 0.892, Ridge 0.808 → 0.845. Caveat: the floor rule is
+validated on emulated GPS-only laps (OBD laps with OBD channels removed); real
+GPS-only sessions may have worse GPS, and their driven-band "odometer" is GPS speed,
+so the nets are less independent there.
+
 Only tier-A (`rank_eligible`) transits win the "fastest through" benchmark — a
 Mode-3/4 or coarse-GPS lap has wide σ and is excluded (design R2: σ decides
 rankability), but it is surfaced with its estimate ± σ, never silently dropped.
