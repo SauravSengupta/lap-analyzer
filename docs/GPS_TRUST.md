@@ -115,16 +115,27 @@ rejects** (R2):
    clean-lap signed lateral offset. Evidence outside gets weight `exp(−(excess/5m)²)`.
    Catches off-ribbon drift (a T8 fake runs 18 m outside p2 → weight ≈2e-6) while
    leaving a genuine in-ribbon tight line untouched.
-2. **Driven-distance band** at the posterior crossings: `band = (∫|κ| ds)·6 + 7 m`;
+2. **Driven-distance band** at the posterior crossings: `band = (∫|κ| ds)·DRIVEN_BAND_HDG_SCALE + DRIVEN_BAND_FLOOR_M` (3.2 and 10.3 m since 2026-10);
    `excess = max(0, |driven − (b−a)| − band)` inflates σ by `excess/v̄`. Catches
    *on-ribbon but odometer-inconsistent* drift the envelope can't (a T8 fake that
    sits in-ribbon yet drove 209 m over a 222 m floor).
 3. **Line-length consistency residual**: does the lap's own lateral line explain its
    odometer shortening? `resid = driven − [(b−a) + Σ κ_signed·e_left·Δs]`; clean std
-   6.6 m. Catches a fake independently of the envelope.
+   `CONSISTENCY_STD_M` = 5.1 m (2026-10). Catches a fake independently of the envelope.
 
 Each net was demonstrated to catch a real case the others miss; all three run in
 production, always emitted as structured audit records (R12) in `checks_json`.
+
+**Re-derived 2026-10 (W2).** The constants were re-derived by their original rules
+(`scripts/derive_trust_constants.py`) on lag-corrected, jump-filtered data, calibration
+split only: `RHO_SECTION` 0.45 → 0.66 (Fisher-z mean gate-δ correlation, 28 corners);
+driven band `·6 + 7 m` → `·3.2 + 10.3 m` (least squares of per-corner robust bounds
+vs heading); `CONSISTENCY_STD_M` 6.6 → 5.1 m; `SIGMA_PRIOR_MID_M` 12.0 → 6.5 m. On
+held-out sessions PIR T1 OBD rank-eligible went 0.874 → 0.951 (all transits 0.756 →
+0.824) and burst-at-gate bad-but-rankable fell 41.5% → 4.3%. The trade-off: the flatter
+band slope gains low-heading corners (T1) but loses high-heading ones whose clean
+spread sits above the line (PIR T3, Ridge T12), so per-track tier-A coverage dipped
+~1.6 pp (PIR 0.913 → 0.896, Ridge 0.863 → 0.847).
 
 ## The four trust axes
 
