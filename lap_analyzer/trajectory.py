@@ -337,7 +337,9 @@ SLOPE_BOUND_FLOOR = 0.10     # 2026-07-11, straight-line offset-slope floor (pla
 SLOPE_BOUND_CAP = 0.80       # 2026-07-11, max plausible offset slope (prototype)
 SIGMA_FIT_CAP_M = 15.0       # 2026-07-11, cap on SE_fit before combining (prototype)
 SIGMA_FLOOR_OBD_M = 1.0      # 2026-07-11, σ floor with OBD backbone (design §Uncertainty)
-SIGMA_FLOOR_GPS_M = 3.0      # 2026-07-11, σ floor on GPS-only backbone (design §Architecture)
+# SIGMA_FLOOR_GPS_M: 2026-07-11 value 3.0 (design §Architecture). W3 rule: smallest floor in a 0.5 m grid
+# from 1.0 m (= the OBD floor; the grid does not go below it) with GPS-only emulation ≥95% within 2σ.
+SIGMA_FLOOR_GPS_M = 1.0      # 2026-10-20, smallest floor with GPS-only emulation ≥95% within 2σ (calibration split, 2244 transits, 0.998; W3)
 
 # --- jump detector (W1, spec 2026-10-10 sensor-fusion rethink) ----------------
 # A fix whose residual vs the odometer + lat_g path shape (gps_consistency) exceeds
