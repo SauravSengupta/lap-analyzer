@@ -695,3 +695,22 @@ def test_lap_index_with_track_joins_lap_time_and_clean(sample_data_root, ridge_c
     idx = lap_index(ridge_corpus, track="ridge")
     assert "lap_time_s" in idx.columns
     assert "is_clean" in idx.columns
+
+
+def test_read_traj_samples_carries_long_g_and_fills_nan_when_absent(tmp_path):
+    # SPEC (W3 amendment): the trajectory sample reader feeds long_g to the estimator
+    # (accel-speed check); a parquet without it gets an all-NaN column (unevaluable,
+    # never a fabricated 0 g).
+    from lap_analyzer.analysis import _read_traj_samples
+    n = 5
+    base = pd.DataFrame({"lap": 1, "t": np.arange(n) * 0.1, "track_dist_m": np.arange(n) * 4.0,
+                         "dist_lap_m": np.arange(n) * 4.0, "lat": 45.0, "long": -122.0,
+                         "lat_g": 0.0, "speed_mph": 80.0, "speed_mph_gps": 80.0})
+    with_lg = tmp_path / "a.parquet"
+    base.assign(long_g=np.linspace(-1, 1, n)).to_parquet(with_lg)
+    s = _read_traj_samples(with_lg)
+    assert np.allclose(s["long_g"].to_numpy(), np.linspace(-1, 1, n))
+    without = tmp_path / "b.parquet"
+    base.to_parquet(without)
+    s2 = _read_traj_samples(without)
+    assert "long_g" in s2.columns and s2["long_g"].isna().all()

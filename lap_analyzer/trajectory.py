@@ -381,6 +381,15 @@ CONSISTENCY_STD_M = 5.1  # 2026-10-17, 1.4826·MAD consistency resid, 2572 clean
 SPEED_CONSIST_TOL_S = 0.2     # 2026-07-11, speed-consistency slack (design tripwire)
 TIER_A_S = 0.10              # 2026-07-11, rankable σ_t ceiling (PROVISIONAL until R7, §9.1)
 TIER_B_S = 0.30             # 2026-07-11, shown-shaded σ_t ceiling (PROVISIONAL until R7, §9.1)
+# accel-speed check (W3 amendment, user decision 2026-10-22): on a GPS-only lap the
+# backbone odometer IS GPS speed, so no σ-net has an independent sensor. Compare the
+# backbone speed change across a section with ∫long_g·g dt; a gps_backbone section that
+# disagrees by more than the tolerance (or cannot be checked) is withheld from tier A.
+# Diagnostic only on OBD laps. Rule: p99 |resid| on the GPS-only emulation of clean
+# calibration-split OBD laps, rounded up to 0.1 m/s (scripts/derive_accel_speed_tol.py).
+ACCEL_SPEED_TOL_MPS = 3.0  # PLACEHOLDER — replaced by scripts/derive_accel_speed_tol.py (W3 amendment)
+ACCEL_MIN_COVERAGE = 0.9     # 2026-10-22, min finite-long_g share of samples in [t_a, t_b] to evaluate the check
+G_MPS2 = 9.80665             # standard gravity (exact), long_g [g] → m/s²
 
 
 @dataclass
@@ -400,6 +409,7 @@ class Trajectory:
     e_lat: np.ndarray | None = None  # drift-corrected signed lateral offset per sample
     checks: list = field(default_factory=list)  # structured audit records (R12)
     jump_fix: np.ndarray | None = None  # per sample: True at each fix flagged by the jump detector (W1); None = not run
+    long_g: np.ndarray | None = None  # per-sample longitudinal accel (g, + = accelerating), aligned with t; None = no column
 
     def time_at(self, s: float):
         """(t, sigma_t) at ruler position s, or None if s is outside the lap's
@@ -474,6 +484,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     dl = g["dist_lap_m"].to_numpy(dtype=float)
     td = g["track_dist_m"].to_numpy(dtype=float)
     checks = []
+    long_g = g["long_g"].to_numpy(dtype=float) if "long_g" in g.columns else None
 
     obd = g["speed_mph"].to_numpy(dtype=float)
     has_obd = bool(np.isfinite(obd).any())
@@ -497,7 +508,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     if abs(med_delta) > RESCALE_INVALID_M or not np.isfinite(med_delta):
         checks.append(_check("rescale_median_delta", med_delta, RESCALE_INVALID_M, False))
         return _prior_only_trajectory(t, dl, v, "rescale_invalid", corridor, checks,
-                                      e_lat=e_lat_all)
+                                      e_lat=e_lat_all, long_g=long_g)
 
     # --- Step 1: evidence extraction (fresh → snap-mask → Hampel) ---
     fresh = np.ones(n, bool)
@@ -537,7 +548,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     if not ev.any():
         return _prior_only_trajectory(t, dl, v, backbone_status, corridor, checks,
                                       sigma_floor=sigma_floor, e_lat=e_lat_all,
-                                      jump_fix=jump_fix)
+                                      jump_fix=jump_fix, long_g=long_g)
 
     # --- Step 2: corridor weighting (the Mode-4 discriminator) ---
     e_lat = e_lat_all
@@ -550,7 +561,8 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     knots = np.arange(dl.min(), dl.max(), KNOT_SPACING_M)
     if len(knots) < 2:
         return _prior_only_trajectory(t, dl, v, backbone_status, corridor, checks,
-                                      sigma_floor=sigma_floor, jump_fix=jump_fix)
+                                      sigma_floor=sigma_floor, jump_fix=jump_fix,
+                                      long_g=long_g)
     dh, se, _neff = _knot_fit(dl[ev], delta[ev], w_env[ev], knots)
     slope_bound = _slope_bound(knots, dl, v, g["lat_g"].to_numpy(dtype=float), corridor, td)
     dh, clip_mag = _rate_limit(dh, slope_bound, knots)
@@ -562,11 +574,13 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     s_hat = np.maximum.accumulate(dl + d_smp)
     return Trajectory(t=t, s_hat=s_hat, sigma_m=np.interp(dl, knots, sig), delta_hat=d_smp,
                       dl=dl, v=v, evidence=ev, status=backbone_status, knots=knots,
-                      knot_sigma=sig, e_lat=e_lat_all, checks=checks, jump_fix=jump_fix)
+                      knot_sigma=sig, e_lat=e_lat_all, checks=checks, jump_fix=jump_fix,
+                      long_g=long_g)
 
 
 def _prior_only_trajectory(t, dl, v, status, corridor, checks,
-                           sigma_floor=SIGMA_FLOOR_OBD_M, e_lat=None, jump_fix=None):
+                           sigma_floor=SIGMA_FLOOR_OBD_M, e_lat=None, jump_fix=None,
+                           long_g=None):
     """δ̂ ≡ 0 (OBD/GPS backbone), σ = the tapered δ=0 prior — reproduces the
     OBD-anchored fallback in the zero-GPS-evidence limit (design R6)."""
     dl = dl.astype(float)
@@ -576,7 +590,8 @@ def _prior_only_trajectory(t, dl, v, status, corridor, checks,
     return Trajectory(t=t, s_hat=s_hat, sigma_m=np.interp(dl, knots, sig),
                       delta_hat=np.zeros(len(dl)), dl=dl, v=v,
                       evidence=np.zeros(len(dl), bool), status=status, knots=knots,
-                      knot_sigma=sig, e_lat=e_lat, checks=checks, jump_fix=jump_fix)
+                      knot_sigma=sig, e_lat=e_lat, checks=checks, jump_fix=jump_fix,
+                      long_g=long_g)
 
 
 def _lap_lateral_offset(g: pd.DataFrame, corridor: Corridor, frame: TrackFrame,
@@ -750,6 +765,32 @@ def _consistency_resid(traj: Trajectory, corridor: Corridor, a: float, b: float,
     return driven - predicted
 
 
+def _accel_speed_resid(traj: Trajectory, t_a: float, t_b: float) -> float:
+    """resid = Δv_backbone − ∫long_g·g dt over [t_a, t_b] (m/s). On a gps_backbone lap
+    Δv_backbone is GPS speed, so this is the only independent-sensor check it has.
+    NaN when there is no long_g, the window holds < 2 samples, or fewer than
+    ACCEL_MIN_COVERAGE of its samples have finite long_g. Integrates over finite
+    samples only (NaN is never filled with 0); end points are linearly interpolated."""
+    lg = traj.long_g
+    if lg is None or not (t_b > t_a):
+        return np.nan
+    lg = np.asarray(lg, dtype=float)
+    t = traj.t
+    inside = (t >= t_a) & (t <= t_b)
+    n_in = int(inside.sum())
+    if n_in < 2:
+        return np.nan
+    fin = np.isfinite(lg)
+    if (fin & inside).sum() / n_in < ACCEL_MIN_COVERAGE:
+        return np.nan
+    tf, af = t[fin], lg[fin]
+    m = (tf > t_a) & (tf < t_b)
+    tt = np.concatenate([[t_a], tf[m], [t_b]])
+    aa = np.concatenate([[np.interp(t_a, tf, af)], af[m], [np.interp(t_b, tf, af)]])
+    dv_accel = float(np.sum(0.5 * (aa[1:] + aa[:-1]) * np.diff(tt))) * G_MPS2
+    return (traj.v_at(t_b) - traj.v_at(t_a)) - dv_accel
+
+
 def section_timing(traj: Trajectory, dist_a: float, dist_b: float,
                    corridor: Corridor) -> SectionTiming:
     """Time the section [dist_a, dist_b] on one lap's estimate; ALWAYS emit a row.
@@ -813,8 +854,18 @@ def section_timing(traj: Trajectory, dist_a: float, dist_b: float,
     checks.append(_check("speed_consistency_s", time_s - obd_time, tol,
                          abs(time_s - obd_time) <= tol))
 
+    # --- accel-speed check (W3 amendment): Δv_backbone vs ∫long_g. ALWAYS recorded;
+    # ENFORCED only on gps_backbone laps (no independent speed sensor), where a failed
+    # or unevaluable check withholds tier A (A → B; σ untouched). Diagnostic on OBD laps.
+    gps_only = traj.status == "gps_backbone"
+    a_resid = _accel_speed_resid(traj, t_a, t_b)
+    accel_ok = (abs(a_resid) <= ACCEL_SPEED_TOL_MPS) if np.isfinite(a_resid) else not gps_only
+    checks.append(_check("accel_speed_resid_mps", a_resid, ACCEL_SPEED_TOL_MPS, accel_ok))
+
     status = "rescale_invalid" if traj.status == "rescale_invalid" else "ok"
     tier = _tier(sigma_s)
+    if gps_only and not accel_ok and tier == "A":
+        tier = "B"
     rank_eligible = (tier == "A") and (status == "ok")
     return SectionTiming(time_s, sigma_s, t_a, t_b, driven, status, tier,
                          rank_eligible, checks)

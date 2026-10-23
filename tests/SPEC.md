@@ -737,6 +737,11 @@ corridor-weighted, slope-bounded smooth of the offset evidence
   On OBD laps the odometer speed is scaled by the lap's median GPS/OBD speed ratio
   (over samples where both speeds are finite and > 15 m/s; ≥ 50 such samples, else 1). `jump_gps_odo` is 1.0 on GPS-only laps
   (GPS speed as the distance source) and 0.0 otherwise.
+- **`long_g`** (W3 amendment, 2026-10-22): per time-sorted sample, the frame's `long_g`
+  column (phone longitudinal accel in g, + = accelerating), aligned with `t`; `None`
+  when the frame has no `long_g` column. Carried on every status (including prior-only
+  laps). Consumed by the section accel-speed check. The trajectory sample reader
+  (`analysis._read_traj_samples`) loads it, filling NaN when a parquet lacks it.
 
 ## trajectory.section_timing
 
@@ -782,6 +787,17 @@ on one lap's estimate, and reports honest per-section σ with three physical σ-
 - **Derived tiers (never stored booleans):** `A` if `sigma_s ≤ 0.10`, `B` if
   `≤ 0.30`, else `C`. A `gps_backbone` (GPS-only) trajectory is tiered by its own σ like any other (W3, 2026-10; the former tier-B cap is retired — dropping OBD changes tier-A section times by a median 0.006 s). Its wider σ floor `SIGMA_FLOOR_GPS_M` still applies.
   `rank_eligible == (tier == 'A' and status == 'ok')`.
+- **Accel-speed check (W3 amendment, 2026-10-22):** `resid = Δv_backbone − ∫long_g·g dt`
+  over `[t_a, t_b]` (m/s; Δv from `v_at`, trapezoid over finite `long_g` samples with
+  interpolated end points). A record `accel_speed_resid_mps` (threshold
+  `ACCEL_SPEED_TOL_MPS`, corpus-derived by `scripts/derive_accel_speed_tol.py`: p99
+  |resid| on the GPS-only emulation of clean calibration-split OBD laps) is ALWAYS
+  emitted. NaN when `long_g` is None, the window has < 2 samples, or fewer than
+  `ACCEL_MIN_COVERAGE` of its samples have finite `long_g` (NaN is never filled with 0).
+  **Enforced only on `gps_backbone` laps** (GPS speed is their odometer, so no other net
+  has an independent sensor): a failing OR NaN check withholds tier A (A → B; σ, value
+  and B/C unchanged), so the row is not rank-eligible. On OBD laps it is diagnostic only
+  (a NaN resid passes; tier and σ are never changed).
 - **Structured checks (R12):** every row carries records `{name, value, threshold,
   pass}` for at least the driven-band, consistency, and speed-consistency nets, so a
   post-mortem can read *why* a row is/ isn't rankable straight from the object.

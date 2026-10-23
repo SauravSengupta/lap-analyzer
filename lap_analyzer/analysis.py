@@ -110,7 +110,7 @@ def section_bounds(track_def: dict, pre_m: float = 50.0, post_cap_m: float = 250
 # OBD-dropout / drift-less sessions still estimate (design R5/R6). session_id, lap
 # come from the row context.
 _TRAJ_SAMPLE_COLS = ["lap", "t", "track_dist_m", "dist_lap_m", "lat", "long", "lat_g",
-                     "speed_mph", "speed_mph_gps", "gps_drift_lat_m", "gps_drift_lon_m"]
+                     "long_g", "speed_mph", "speed_mph_gps", "gps_drift_lat_m", "gps_drift_lon_m"]
 _SECTION_TIME_COLS = ["session_id", "lap", "corner_id", "section_time_s", "sigma_t_s",
                       "status", "driven_m", "rank_eligible", "checks_json"]
 _RANGE_TIME_COLS = [c for c in _SECTION_TIME_COLS if c != "corner_id"]
@@ -135,7 +135,7 @@ def _read_traj_samples(sp) -> pd.DataFrame | None:
                 s[c] = 0.0
             elif c == "speed_mph_gps":
                 s[c] = s.get("speed_mph", np.nan)
-            elif c == "speed_mph":
+            elif c in ("speed_mph", "long_g"):  # long_g absent → accel-speed check unevaluable
                 s[c] = np.nan
     return s.sort_values(["lap", "t"])
 

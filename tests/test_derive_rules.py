@@ -46,3 +46,22 @@ def test_fit_band_recovers_line():
     h = np.array([0.5, 1.0, 2.0, 3.0, 4.0])
     scale, floor = dr.fit_band(h, 6.0 * h + 7.0)
     assert scale == pytest.approx(6.0, abs=1e-9) and floor == pytest.approx(7.0, abs=1e-9)
+
+
+def _da():
+    scripts = str(Path(__file__).resolve().parents[1] / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    return importlib.import_module("derive_accel_speed_tol")
+
+
+def test_p99_ceil_is_p99_of_abs_rounded_up_to_tenth():
+    # W3 amendment rule: ACCEL_SPEED_TOL_MPS = p99 of |resid|, rounded UP to 0.1 m/s.
+    da = _da()
+    x = np.concatenate([np.linspace(-1.0, 1.0, 9900), np.full(100, 50.0)])
+    v = da.p99_ceil(x)
+    p = float(np.percentile(np.abs(x), 99))
+    assert v >= p and v - p < 0.1 + 1e-9
+    assert round(v * 10) == pytest.approx(v * 10, abs=1e-9)        # on the 0.1 grid
+    assert da.p99_ceil(np.full(100, 1.2)) == pytest.approx(1.2)      # exact grid value not bumped
+    assert da.p99_ceil([0.5, float("nan"), -0.5] * 50) == pytest.approx(0.5)   # NaN ignored, |.| taken
