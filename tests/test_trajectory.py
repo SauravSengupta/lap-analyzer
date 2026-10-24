@@ -394,13 +394,14 @@ def test_section_timing_gps_backbone_earns_tier_by_sigma():
     # wide σ does not. Its status stays 'gps_backbone' as provenance.
     from lap_analyzer.trajectory import section_timing
     # long_g ≡ 0 matches the constant speed, so the accel-speed check verifies the lap.
+    # A per-corner reference (0, 1) m/s lets the accel-speed check be evaluated.
     tight = _straight_trajectory(sigma0=0.5, v=40.0, length=2500.0, long_g=0.0)
     object.__setattr__(tight, "status", "gps_backbone")
-    st = section_timing(tight, 500.0, 1000.0, _straight_corridor(n=300))
+    st = section_timing(tight, 500.0, 1000.0, _straight_corridor(n=300), accel_ref=_REF)
     assert st.tier == "A" and st.rank_eligible is True
     wide = _straight_trajectory(sigma0=20.0, v=40.0, length=2500.0, long_g=0.0)
     object.__setattr__(wide, "status", "gps_backbone")
-    st2 = section_timing(wide, 500.0, 1000.0, _straight_corridor(n=300))
+    st2 = section_timing(wide, 500.0, 1000.0, _straight_corridor(n=300), accel_ref=_REF)
     assert st2.rank_eligible is False
 
 
@@ -431,6 +432,9 @@ def _decel_trajectory(status="gps_backbone", sigma0=0.5, v0=50.0, decel=0.5, n=6
         long_g=np.full(n, -decel / 9.80665))
 
 
+_REF = (0.0, 1.0)   # per-corner accel-speed reference (offset_mps, tol_mps) for the tests
+
+
 def _accel_check(st):
     recs = [c for c in st.checks if c["name"] == "accel_speed_resid_mps"]
     assert len(recs) == 1, "accel_speed_resid_mps must ALWAYS be emitted exactly once"
@@ -445,10 +449,10 @@ def test_accel_check_consistent_gps_backbone_keeps_tier_a():
     corr = _straight_corridor(n=300)
     flat = _straight_trajectory(sigma0=0.5, long_g=0.0)
     object.__setattr__(flat, "status", "gps_backbone")
-    st = section_timing(flat, 500.0, 1000.0, corr)
+    st = section_timing(flat, 500.0, 1000.0, corr, accel_ref=_REF)
     assert st.tier == "A" and st.rank_eligible is True
     assert _accel_check(st)["pass"] is True
-    st2 = section_timing(_decel_trajectory(), 500.0, 1000.0, corr)
+    st2 = section_timing(_decel_trajectory(), 500.0, 1000.0, corr, accel_ref=_REF)
     assert st2.tier == "A" and st2.rank_eligible is True
     assert _accel_check(st2)["pass"] is True
 
@@ -463,8 +467,8 @@ def test_accel_check_inconsistent_gps_backbone_withholds_tier_a():
     bad = _straight_trajectory(sigma0=0.5, long_g=-1.0)
     for tr in (good, bad):
         object.__setattr__(tr, "status", "gps_backbone")
-    st_good = section_timing(good, 500.0, 1000.0, corr)
-    st_bad = section_timing(bad, 500.0, 1000.0, corr)
+    st_good = section_timing(good, 500.0, 1000.0, corr, accel_ref=_REF)
+    st_bad = section_timing(bad, 500.0, 1000.0, corr, accel_ref=_REF)
     assert st_bad.tier == "B" and st_bad.rank_eligible is False
     assert _accel_check(st_bad)["pass"] is False
     assert st_bad.sigma_s == pytest.approx(st_good.sigma_s, rel=1e-12)
@@ -476,8 +480,10 @@ def test_accel_check_is_diagnostic_only_on_obd_laps():
     # recorded (pass False) but never changes tier or σ — OBD is the independent sensor.
     from lap_analyzer.trajectory import section_timing
     corr = _straight_corridor(n=300)
-    st_good = section_timing(_straight_trajectory(sigma0=0.5, long_g=0.0), 500.0, 1000.0, corr)
-    st = section_timing(_straight_trajectory(sigma0=0.5, long_g=-1.0), 500.0, 1000.0, corr)
+    st_good = section_timing(_straight_trajectory(sigma0=0.5, long_g=0.0), 500.0, 1000.0, corr,
+                             accel_ref=_REF)
+    st = section_timing(_straight_trajectory(sigma0=0.5, long_g=-1.0), 500.0, 1000.0, corr,
+                        accel_ref=_REF)
     assert st.tier == "A" and st.rank_eligible is True
     assert _accel_check(st)["pass"] is False
     assert st.sigma_s == pytest.approx(st_good.sigma_s, rel=1e-12)
@@ -492,10 +498,11 @@ def test_accel_check_unverifiable_gps_backbone_is_not_rankable():
     for lg in (None, np.nan):
         tr = _straight_trajectory(sigma0=0.5, long_g=lg)
         object.__setattr__(tr, "status", "gps_backbone")
-        st = section_timing(tr, 500.0, 1000.0, corr)
+        st = section_timing(tr, 500.0, 1000.0, corr, accel_ref=_REF)
         assert st.rank_eligible is False and st.tier != "A"
         assert _accel_check(st)["pass"] is False
-        obd = section_timing(_straight_trajectory(sigma0=0.5, long_g=lg), 500.0, 1000.0, corr)
+        obd = section_timing(_straight_trajectory(sigma0=0.5, long_g=lg), 500.0, 1000.0, corr,
+                             accel_ref=_REF)
         assert obd.tier == "A" and obd.rank_eligible is True
         assert _accel_check(obd)["pass"] is True
 
@@ -509,8 +516,63 @@ def test_accel_check_sparse_long_g_is_unverifiable():
     n_drop = int(np.ceil(len(idx) * (1 - ACCEL_MIN_COVERAGE))) + 2
     tr.long_g[idx[:n_drop]] = np.nan
     object.__setattr__(tr, "status", "gps_backbone")
-    st = section_timing(tr, 500.0, 1000.0, _straight_corridor(n=300))
+    st = section_timing(tr, 500.0, 1000.0, _straight_corridor(n=300), accel_ref=_REF)
     assert st.rank_eligible is False
+
+
+def test_accel_check_offset_is_applied_before_the_tolerance():
+    # SPEC (W3 amendment, per-corner reference 2026-10-24): each corner's residual is
+    # CENTRED on its clean-calibration median (grade-like bias) before the tolerance. A
+    # constant inconsistency equal to the corner's offset is that corner's normal → the
+    # centred value ≈ 0 → tier A kept. The same lap against a zero offset fails.
+    from lap_analyzer.trajectory import G_MPS2, section_timing
+    corr = _straight_corridor(n=300)
+    v, lg = 40.0, -0.01
+    tr = _straight_trajectory(sigma0=0.5, v=v, long_g=lg)
+    object.__setattr__(tr, "status", "gps_backbone")
+    # physics: constant speed, so resid = −∫long_g·g dt = −lg·g·(section duration)
+    offset = -lg * G_MPS2 * (1000.0 - 500.0) / v
+    tol = 0.2 * offset
+    st = section_timing(tr, 500.0, 1000.0, corr, accel_ref=(offset, tol))
+    rec = _accel_check(st)
+    assert st.tier == "A" and st.rank_eligible is True and rec["pass"] is True
+    assert abs(rec["value"]) <= tol                         # value recorded CENTRED
+    assert rec["raw"] == pytest.approx(offset, abs=0.01)    # raw resid kept for derivation
+    assert rec["threshold"] == pytest.approx(tol, abs=1e-3)
+    st0 = section_timing(tr, 500.0, 1000.0, corr, accel_ref=(0.0, tol))
+    assert st0.tier == "B" and st0.rank_eligible is False and _accel_check(st0)["pass"] is False
+
+
+def test_accel_check_without_reference_is_unverified():
+    # SPEC (W3 amendment): accel_ref=None (no per-corner reference — e.g. a multi-corner
+    # range, or a corner absent from the track's table) → the check cannot be judged:
+    # value = raw resid, threshold NaN. A gps_backbone lap is then unverified → tier A
+    # withheld; an OBD lap is unaffected (record passes).
+    from lap_analyzer.trajectory import section_timing
+    corr = _straight_corridor(n=300)
+    gps = _straight_trajectory(sigma0=0.5, long_g=0.0)
+    object.__setattr__(gps, "status", "gps_backbone")
+    st = section_timing(gps, 500.0, 1000.0, corr)
+    rec = _accel_check(st)
+    assert st.rank_eligible is False and st.tier != "A" and rec["pass"] is False
+    assert np.isnan(rec["threshold"]) and rec["value"] == pytest.approx(rec["raw"])
+    st_ref = section_timing(gps, 500.0, 1000.0, corr, accel_ref=_REF)
+    assert st.sigma_s == pytest.approx(st_ref.sigma_s, rel=1e-12)   # σ never touched
+    obd = section_timing(_straight_trajectory(sigma0=0.5, long_g=0.0), 500.0, 1000.0, corr)
+    assert obd.tier == "A" and obd.rank_eligible is True and _accel_check(obd)["pass"] is True
+
+
+def test_accel_ref_for_reads_the_track_table():
+    # SPEC: accel_ref_for(track_def, corner_id) reads the already-loaded track dict's
+    # `accel_speed_check.corners[corner_id]` → (offset_mps, tol_mps); None when the
+    # block or the corner is absent (no I/O).
+    from lap_analyzer.trajectory import accel_ref_for
+    td = {"corners": [{"id": "T1"}, {"id": "T2"}],
+          "accel_speed_check": {"provenance": "x",
+                                "corners": {"T1": {"offset_mps": -0.21, "tol_mps": 3.6, "n": 67}}}}
+    assert accel_ref_for(td, "T1") == pytest.approx((-0.21, 3.6))
+    assert accel_ref_for(td, "T2") is None
+    assert accel_ref_for({"corners": []}, "T1") is None
 
 
 def test_estimate_trajectory_carries_long_g(make_lap_samples):

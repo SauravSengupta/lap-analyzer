@@ -22,7 +22,7 @@ import pandas as pd
 
 from lap_analyzer.analysis import _corpus_trajectories, section_bounds
 from lap_analyzer.trajectory import (
-    DRIVEN_BAND_FLOOR_M, DRIVEN_BAND_HDG_SCALE, _section_heading_rad, section_timing,
+    DRIVEN_BAND_FLOOR_M, DRIVEN_BAND_HDG_SCALE, _section_heading_rad, accel_ref_for, section_timing,
 )
 
 ART = "docs/superpowers/artifacts/gps-trust-2026-07-11/"
@@ -45,7 +45,7 @@ def build_transits() -> pd.DataFrame:
             spd = g["speed_mph_gps"].to_numpy(dtype=float)
         for cid in CORNERS:
             a, b = bounds[cid]
-            st = section_timing(traj, a, b, corridor)
+            st = section_timing(traj, a, b, corridor, accel_ref=accel_ref_for(td, cid))
             band = _section_heading_rad(corridor, a, b) * DRIVEN_BAND_HDG_SCALE + DRIVEN_BAND_FLOOR_M
             m = (tdist >= a) & (tdist <= b) & np.isfinite(spd)
             mean_v = float(np.mean(spd[m])) if m.any() else np.nan

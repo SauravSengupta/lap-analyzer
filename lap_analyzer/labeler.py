@@ -67,6 +67,9 @@ class Track:
     calibration_anchors: list[CalibrationAnchor]
     reference_session_id: str
     reference_lap: int
+    # per-corner accel-speed reference table (tracks/{id}.json `accel_speed_check`,
+    # read with trajectory.accel_ref_for); None when the track has none yet.
+    accel_speed_check: dict | None = None
 
 
 def load_track(track_id: str) -> Track:
@@ -109,6 +112,7 @@ def load_track(track_id: str) -> Track:
         calibration_anchors=anchors,
         reference_session_id=ref_lap_info.get("session_id", ""),
         reference_lap=int(ref_lap_info.get("lap", 0)),
+        accel_speed_check=raw.get("accel_speed_check"),
     )
 
 
@@ -450,7 +454,7 @@ def build_session_corners(
     loaded on demand from the track here when omitted (single-session use / tests)."""
     from .analysis import load_centerline, section_bounds
     from .gates import TrackFrame
-    from .trajectory import section_timing
+    from .trajectory import accel_ref_for, section_timing
     if corridor is None or frame is None:
         from .analysis import _load_or_build_corridor
         if corridor is None:
@@ -464,6 +468,7 @@ def build_session_corners(
         "corners": [{"id": c.id, "start_m": c.start_m, "end_m": c.end_m}
                     for c in track.corners],
         "lap_length_internal_m": track.lap_length_m,
+        "accel_speed_check": track.accel_speed_check,
     }
     sec_bounds = section_bounds(track_def_lite)
     rows: list[dict] = []
@@ -488,7 +493,8 @@ def build_session_corners(
             # Section-timing verdict for this corner from the SAME trajectory (R1):
             # the A-tier rank_eligible quality.py reuses for transit_reliable_traj.
             a, b = sec_bounds[corner.id]
-            st = section_timing(traj, a, b, corridor)
+            st = section_timing(traj, a, b, corridor,
+                                accel_ref=accel_ref_for(track_def_lite, corner.id))
             transit["section_sigma_t_s"] = round(st.sigma_s, 3) if np.isfinite(st.sigma_s) else np.nan
             transit["section_status"] = st.status
             transit["rank_eligible"] = bool(st.rank_eligible)

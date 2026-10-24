@@ -176,13 +176,14 @@ def _corpus_trajectories(track: str):
             yield sid_dir.name, int(lap_n), g, corridor, traj
 
 
-def _section_row(traj, corridor, a: float, b: float):
+def _section_row(traj, corridor, a: float, b: float, accel_ref=None):
     """(section_time_s, sigma_t_s, status, driven_m, rank_eligible, checks_json)
-    for one (lap, section) — ALWAYS a row (design R10)."""
+    for one (lap, section) — ALWAYS a row (design R10). `accel_ref` is the section's
+    per-corner accel-speed reference (trajectory.accel_ref_for), None for none."""
     from .trajectory import section_timing
     if traj is None:
         return (np.nan, np.nan, "no_coverage", np.nan, False, "[]")
-    st = section_timing(traj, a, b, corridor)
+    st = section_timing(traj, a, b, corridor, accel_ref=accel_ref)
     return (st.time_s, st.sigma_s, st.status, st.driven_m, bool(st.rank_eligible),
             json.dumps(st.checks))
 
@@ -200,13 +201,16 @@ def section_times(
     a row is ALWAYS emitted (R10) with `status ∈ {ok, no_coverage, rescale_invalid}`
     and NaN value where uncomputable. Long-form columns:
     session_id, lap, corner_id, section_time_s, sigma_t_s, status, driven_m,
-    rank_eligible, checks_json (structured audit records, R12).
+    rank_eligible, checks_json (structured audit records, R12). Each corner is judged
+    against its own accel-speed reference from `track_def` (accel_ref_for).
     """
+    from .trajectory import accel_ref_for
     bounds = section_bounds(track_def, pre_m=pre_m, post_cap_m=post_cap_m)
+    refs = {cid: accel_ref_for(track_def, cid) for cid in bounds}
     rows: list[tuple] = []
     for sid, lap_n, g, corridor, traj in _corpus_trajectories(track):
         for cid, (a, b) in bounds.items():
-            val, sig, status, driven, rank, checks = _section_row(traj, corridor, a, b)
+            val, sig, status, driven, rank, checks = _section_row(traj, corridor, a, b, refs[cid])
             rows.append((sid, lap_n, cid, val, sig, status, driven, rank, checks))
     return pd.DataFrame(rows, columns=_SECTION_TIME_COLS)
 
@@ -393,11 +397,17 @@ def range_section_times(
     matches `section_times()` for that corner. Long-form columns match
     `section_times` minus `corner_id`: session_id, lap, section_time_s, sigma_t_s,
     status, driven_m, rank_eligible, checks_json.
+
+    The accel-speed reference is per corner: a single-corner range uses that corner's
+    (so it still matches `section_times`); a multi-corner range has none, so GPS-only
+    laps do not reach tier A on custom ranges (unverified, by design).
     """
+    from .trajectory import accel_ref_for
     a, b = section_range_bounds(track_def, from_id, to_id, pre_m, post_cap_m)
+    ref = accel_ref_for(track_def, from_id) if from_id == to_id else None
     rows: list[tuple] = []
     for sid, lap_n, g, corridor, traj in _corpus_trajectories(track):
-        val, sig, status, driven, rank, checks = _section_row(traj, corridor, a, b)
+        val, sig, status, driven, rank, checks = _section_row(traj, corridor, a, b, ref)
         rows.append((sid, lap_n, val, sig, status, driven, rank, checks))
     return pd.DataFrame(rows, columns=_RANGE_TIME_COLS)
 

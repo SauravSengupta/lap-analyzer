@@ -385,9 +385,13 @@ TIER_B_S = 0.30             # 2026-07-11, shown-shaded σ_t ceiling (PROVISIONAL
 # backbone odometer IS GPS speed, so no σ-net has an independent sensor. Compare the
 # backbone speed change across a section with ∫long_g·g dt; a gps_backbone section that
 # disagrees by more than the tolerance (or cannot be checked) is withheld from tier A.
-# Diagnostic only on OBD laps. Rule: p99 |resid| on the GPS-only emulation of clean
-# calibration-split OBD laps, rounded up to 0.1 m/s (scripts/derive_accel_speed_tol.py).
-ACCEL_SPEED_TOL_MPS = 3.0  # PLACEHOLDER — replaced by scripts/derive_accel_speed_tol.py (W3 amendment)
+# Diagnostic only on OBD laps. The reference is PER CORNER (user decision 2026-10-24:
+# clean residuals carry grade-like per-corner offsets and 10× different spreads, so one
+# pooled tolerance let the PIR T1 fake through). Each corner's (offset_mps, tol_mps) lives
+# in tracks/{track}.json `accel_speed_check.corners` — offset = median resid, tol = p99
+# |resid − offset| rounded up to 0.1 m/s, on the GPS-only emulation of clean
+# calibration-split OBD laps (scripts/derive_accel_speed_tol.py --write). Read with
+# accel_ref_for(); no reference → the check is unverified.
 ACCEL_MIN_COVERAGE = 0.9     # 2026-10-22, min finite-long_g share of samples in [t_a, t_b] to evaluate the check
 G_MPS2 = 9.80665             # standard gravity (exact), long_g [g] → m/s²
 
@@ -791,13 +795,27 @@ def _accel_speed_resid(traj: Trajectory, t_a: float, t_b: float) -> float:
     return (traj.v_at(t_b) - traj.v_at(t_a)) - dv_accel
 
 
+def accel_ref_for(track_def: dict, corner_id: str) -> tuple[float, float] | None:
+    """The corner's accel-speed reference (offset_mps, tol_mps) from an already-loaded
+    track definition's `accel_speed_check.corners` table; None when the block or the
+    corner is absent. No I/O."""
+    ent = ((track_def or {}).get("accel_speed_check") or {}).get("corners", {}).get(corner_id)
+    if not ent:
+        return None
+    return float(ent["offset_mps"]), float(ent["tol_mps"])
+
+
 def section_timing(traj: Trajectory, dist_a: float, dist_b: float,
-                   corridor: Corridor) -> SectionTiming:
+                   corridor: Corridor,
+                   accel_ref: tuple[float, float] | None = None) -> SectionTiming:
     """Time the section [dist_a, dist_b] on one lap's estimate; ALWAYS emit a row.
 
     The value (t at the monotone s_hat crossings) and its σ come from the same pass
     (R1). σ is correlation-aware, then inflated (never rejected) by the driven-band
     and line-length-consistency nets; the speed-consistency tripwire is diagnostic.
+    `accel_ref` = the section's (offset_mps, tol_mps) accel-speed reference
+    (accel_ref_for, for a single named corner); None = no reference, so a GPS-only
+    lap cannot be verified and is withheld from tier A.
     Design: docs/…/trajectory-design.md §Section timing; SPEC tests/SPEC.md.
     """
     s, t = traj.s_hat, traj.t
@@ -857,10 +875,19 @@ def section_timing(traj: Trajectory, dist_a: float, dist_b: float,
     # --- accel-speed check (W3 amendment): Δv_backbone vs ∫long_g. ALWAYS recorded;
     # ENFORCED only on gps_backbone laps (no independent speed sensor), where a failed
     # or unevaluable check withholds tier A (A → B; σ untouched). Diagnostic on OBD laps.
+    # The value is centred on the corner's reference offset; `raw` keeps the uncentred
+    # resid (what the derivation reads). No reference → unevaluable (threshold NaN).
     gps_only = traj.status == "gps_backbone"
     a_resid = _accel_speed_resid(traj, t_a, t_b)
-    accel_ok = (abs(a_resid) <= ACCEL_SPEED_TOL_MPS) if np.isfinite(a_resid) else not gps_only
-    checks.append(_check("accel_speed_resid_mps", a_resid, ACCEL_SPEED_TOL_MPS, accel_ok))
+    if accel_ref is None:
+        a_val, a_tol = a_resid, np.nan
+        accel_ok = not gps_only
+    else:
+        a_val, a_tol = a_resid - float(accel_ref[0]), float(accel_ref[1])
+        accel_ok = (abs(a_val) <= a_tol) if np.isfinite(a_val) else not gps_only
+    rec = _check("accel_speed_resid_mps", a_val, a_tol, accel_ok)
+    rec["raw"] = round(float(a_resid), 3)
+    checks.append(rec)
 
     status = "rescale_invalid" if traj.status == "rescale_invalid" else "ok"
     tier = _tier(sigma_s)

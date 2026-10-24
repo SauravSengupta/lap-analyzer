@@ -415,6 +415,34 @@ def test_range_section_times_new_schema(sample_data_root):
     assert df["session_id"].nunique() >= 2
 
 
+def _accel_thresholds(df) -> set:
+    out = set()
+    for cj in df["checks_json"]:
+        for c in json.loads(cj):
+            if c["name"] == "accel_speed_resid_mps":
+                out.add("nan" if c["threshold"] != c["threshold"] else c["threshold"])
+    return out
+
+
+def test_section_times_pass_each_corners_accel_reference(sample_data_root):
+    # SPEC (W3 amendment): section_times judges each corner against ITS reference from
+    # the track's accel_speed_check table; a corner without an entry has no reference
+    # (threshold NaN). range_section_times passes the corner's reference for a
+    # single-corner range and none for a multi-corner range.
+    from lap_analyzer.analysis import range_section_times, section_times
+    td = _ridge_track_def()
+    td["accel_speed_check"] = {"provenance": "test",
+                               "corners": {"T6": {"offset_mps": 0.5, "tol_mps": 7.7, "n": 50}}}
+    df = section_times("ridge", td)
+    ok = df[df["status"] != "no_coverage"]
+    assert _accel_thresholds(ok[ok["corner_id"] == "T6"]) == {7.7}
+    assert _accel_thresholds(ok[ok["corner_id"] == "T7"]) == {"nan"}
+    one = range_section_times("ridge", td, "T6", "T6")
+    assert _accel_thresholds(one[one["status"] != "no_coverage"]) == {7.7}
+    multi = range_section_times("ridge", td, "T6", "T7")
+    assert _accel_thresholds(multi[multi["status"] != "no_coverage"]) == {"nan"}
+
+
 # ---------------------------------------------------------------------------
 # section_range_bounds
 # ---------------------------------------------------------------------------

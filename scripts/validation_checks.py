@@ -23,7 +23,7 @@ from lap_analyzer.analysis import (
 )
 from lap_analyzer.config import sessions_dir, tracks_dir
 from lap_analyzer.gates import TrackFrame
-from lap_analyzer.trajectory import MPH_TO_MPS
+from lap_analyzer.trajectory import MPH_TO_MPS, accel_ref_for
 
 CAL_FRACTION = 0.6          # 2026-10-10, spec §W0 calibration share per (track, has_obd) stratum
 MIN_FIX_RATE_HZ = 3.0       # 2026-10-10, below this a session is "1 Hz" (4 Ridge sessions at ~1 Hz, rest ~6-8 Hz fresh)
@@ -103,13 +103,18 @@ class TrackCtx:
     corridor: object
     frame: TrackFrame
     bounds: dict
+    track_def: dict | None = None
 
     @classmethod
     def load(cls, track: str) -> TrackCtx:
-        tdef = json.loads((tracks_dir() / f"{track}.json").read_text())
+        tdef = json.loads((tracks_dir() / f"{track}.json").read_text(encoding="utf-8"))
         return cls(track=track, corridor=_load_or_build_corridor(track),
                    frame=TrackFrame.from_centerline(load_centerline(track)),
-                   bounds=section_bounds(tdef))
+                   bounds=section_bounds(tdef), track_def=tdef)
+
+    def accel_ref(self, corner_id: str):
+        """The corner's per-corner accel-speed reference (None when the track has none)."""
+        return accel_ref_for(self.track_def or {}, corner_id)
 
 
 def lap_hash(session_id: str, lap: int) -> int:
@@ -361,7 +366,8 @@ def _v2_trial(ctx, ref, g, base, fr, s_fix, rng, *, g2: bool) -> dict:
     a, b = ctx.bounds[cid]
     row = dict(corner_id=cid, kind=None, where=None, mag_m=np.nan, n_fix=0, planted=False,
                skip_reason="", err_s=np.nan, rank=False, caught=np.nan)
-    st0 = section_timing(base, a, b, ctx.corridor)
+    aref = ctx.accel_ref(cid)
+    st0 = section_timing(base, a, b, ctx.corridor, accel_ref=aref)
     if not st0.rank_eligible:
         row["skip_reason"] = "unrankable"
         return row
@@ -400,7 +406,7 @@ def _v2_trial(ctx, ref, g, base, fr, s_fix, rng, *, g2: bool) -> dict:
         dy = np.full(len(g), mag * np.sin(ang))
     h = plant_offset(g, rows, dx, dy, ctx.frame, ref)
     traj = estimate_trajectory(h, ctx.corridor, ctx.frame)
-    st = section_timing(traj, a, b, ctx.corridor)
+    st = section_timing(traj, a, b, ctx.corridor, accel_ref=aref)
     caught = (float(not traj.evidence[rows].any()) if kind != "slow_drift" else float("nan"))
     row.update(mag_m=mag, n_fix=n_fix, planted=True, err_s=st.time_s - st0.time_s,
                rank=bool(st.rank_eligible), caught=caught)
@@ -432,8 +438,9 @@ def run_v3(ctx, laps) -> pd.DataFrame:
         t_o = estimate_trajectory(g, ctx.corridor, ctx.frame)
         t_g = estimate_trajectory(gps_only_emulation(g), ctx.corridor, ctx.frame)
         for cid, (a, b) in ctx.bounds.items():
-            so = section_timing(t_o, a, b, ctx.corridor)
-            sg = section_timing(t_g, a, b, ctx.corridor)
+            aref = ctx.accel_ref(cid)
+            so = section_timing(t_o, a, b, ctx.corridor, accel_ref=aref)
+            sg = section_timing(t_g, a, b, ctx.corridor, accel_ref=aref)
             out.append(dict(track=ctx.track, session_id=sid, lap=lap, corner_id=cid,
                             t_obd=so.time_s, rank_obd=bool(so.rank_eligible),
                             t_gps=sg.time_s, sigma_gps=sg.sigma_s, rank_gps=bool(sg.rank_eligible)))
@@ -445,7 +452,7 @@ def run_v4(ctx, laps) -> pd.DataFrame:
     for sid, lap, g in laps:
         traj = estimate_trajectory(g, ctx.corridor, ctx.frame)
         for cid, (a, b) in ctx.bounds.items():
-            st = section_timing(traj, a, b, ctx.corridor)
+            st = section_timing(traj, a, b, ctx.corridor, accel_ref=ctx.accel_ref(cid))
             out.append(dict(track=ctx.track, session_id=sid, lap=lap, corner_id=cid,
                             t_prod=st.time_s, rank=bool(st.rank_eligible),
                             t_odo=odometer_section_time(g, a, b)))

@@ -788,3 +788,42 @@ def test_build_session_corners_emits_gps_jump_n(sample_data_root):
     assert "gps_jump_n" in df.columns
     assert (df["gps_jump_n"] >= 0).all()
     assert df["gps_jump_n"].dtype.kind in "iu"
+
+
+def test_load_track_carries_accel_speed_check_table():
+    # SPEC labeler.load_track: Track.accel_speed_check is the track JSON's
+    # `accel_speed_check` block (per-corner accel-speed references), None when absent.
+    for track_id in ("ridge", "pir"):
+        t = load_track(track_id)
+        assert t.accel_speed_check is None or isinstance(t.accel_speed_check.get("corners"), dict)
+
+
+def test_build_session_corners_passes_each_corners_accel_reference(sample_data_root, monkeypatch):
+    # SPEC labeler.build_session_corners (W3 amendment): each transit's section verdict
+    # is judged against THAT corner's accel-speed reference from the track table
+    # (trajectory.accel_ref_for); a corner without an entry gets none.
+    import dataclasses
+
+    from lap_analyzer import trajectory
+    from lap_analyzer.analysis import load_samples
+    from lap_analyzer.config import sessions_dir
+    sid = "20260517-100304"
+    s = load_samples("ridge", sid)
+    laps = pd.read_csv(sessions_dir("ridge") / sid / "laps.csv")
+    track = dataclasses.replace(load_track("ridge"), accel_speed_check={
+        "provenance": "test", "corners": {"T6": {"offset_mps": 0.5, "tol_mps": 7.7, "n": 50}}})
+    seen = []
+    real = trajectory.section_timing
+
+    def spy(traj, a, b, corridor, accel_ref=None):
+        seen.append(((a, b), accel_ref))
+        return real(traj, a, b, corridor, accel_ref=accel_ref)
+    monkeypatch.setattr(trajectory, "section_timing", spy)
+    assert len(build_session_corners(s, laps, track, sid, "2026-05-17"))
+    from lap_analyzer.analysis import section_bounds
+    sb = section_bounds({"corners": [{"id": c.id, "start_m": c.start_m, "end_m": c.end_m}
+                                     for c in track.corners],
+                         "lap_length_internal_m": track.lap_length_m})
+    refs = {bounds: ref for bounds, ref in seen}
+    assert refs[sb["T6"]] == pytest.approx((0.5, 7.7))
+    assert refs[sb["T7"]] is None

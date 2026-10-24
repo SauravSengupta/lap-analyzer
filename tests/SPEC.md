@@ -276,6 +276,8 @@ Signature: `(track_id: str) -> Track` (dataclass).
     anchors whose `corner_id` has no matching corner are dropped.
   - `reference_session_id`/`reference_lap` come from the JSON `reference_lap`
     block (`""`/`0` if absent).
+  - `accel_speed_check` is the JSON's top-level `accel_speed_check` block (the
+    per-corner accel-speed references, see `trajectory.section_timing`), None if absent.
 - Use the real `tracks/ridge.json` / `tracks/pir.json` (read via `tracks_dir()`,
   not `data/samples`).
 
@@ -789,15 +791,37 @@ on one lap's estimate, and reports honest per-section σ with three physical σ-
   `rank_eligible == (tier == 'A' and status == 'ok')`.
 - **Accel-speed check (W3 amendment, 2026-10-22):** `resid = Δv_backbone − ∫long_g·g dt`
   over `[t_a, t_b]` (m/s; Δv from `v_at`, trapezoid over finite `long_g` samples with
-  interpolated end points). A record `accel_speed_resid_mps` (threshold
-  `ACCEL_SPEED_TOL_MPS`, corpus-derived by `scripts/derive_accel_speed_tol.py`: p99
-  |resid| on the GPS-only emulation of clean calibration-split OBD laps) is ALWAYS
-  emitted. NaN when `long_g` is None, the window has < 2 samples, or fewer than
-  `ACCEL_MIN_COVERAGE` of its samples have finite `long_g` (NaN is never filled with 0).
+  interpolated end points). NaN when `long_g` is None, the window has < 2 samples, or
+  fewer than `ACCEL_MIN_COVERAGE` of its samples have finite `long_g` (NaN is never
+  filled with 0). The reference is **per corner** (user decision 2026-10-24 — clean
+  residuals carry grade-like per-corner offsets and very different spreads, so one
+  pooled tolerance let the PIR T1 fake through): `section_timing(..., accel_ref=(offset_mps,
+  tol_mps))`. The record `accel_speed_resid_mps` is ALWAYS emitted with value = the
+  **centred** resid `resid − offset`, threshold = `tol`, and an extra field `raw` = the
+  uncentred resid; pass = finite and `|resid − offset| ≤ tol`. So a constant
+  inconsistency equal to the corner's offset is that corner's normal and passes.
+  **`accel_ref=None`** (no reference: a multi-corner range, or a corner missing from the
+  table) → unevaluable: value = raw resid, threshold NaN, pass False on `gps_backbone`
+  laps (unverified → tier A withheld), True on OBD laps.
   **Enforced only on `gps_backbone` laps** (GPS speed is their odometer, so no other net
-  has an independent sensor): a failing OR NaN check withholds tier A (A → B; σ, value
-  and B/C unchanged), so the row is not rank-eligible. On OBD laps it is diagnostic only
-  (a NaN resid passes; tier and σ are never changed).
+  has an independent sensor): a failing, NaN or unreferenced check withholds tier A (A → B;
+  σ, value and B/C unchanged), so the row is not rank-eligible. On OBD laps it is
+  diagnostic only (tier and σ are never changed).
+  - **Where the table lives:** `tracks/{track}.json` top-level `accel_speed_check` =
+    `{provenance, corners: {corner_id: {offset_mps, tol_mps, n}}}`.
+    `trajectory.accel_ref_for(track_def, corner_id)` reads it from an already-loaded
+    dict (no I/O) → `(offset_mps, tol_mps)`, or None when the block/corner is absent.
+    Callers pass it wherever the section is ONE named corner: `labeler` transits
+    (`Track.accel_speed_check`), `analysis.section_times` (per corner),
+    `range_section_times` (the corner's reference for a single-corner range, None for a
+    multi-corner range — GPS-only laps cannot reach tier A on custom ranges), and the
+    `scripts/validation_checks.py` runners (`TrackCtx.accel_ref`).
+  - **How it is derived** (`scripts/derive_accel_speed_tol.py [--write]`): over the
+    status-ok sections of the GPS-only emulation of clean calibration-split OBD laps,
+    reading `raw` from `section_timing(...)` called with no reference, per (track,
+    corner): offset = median(resid) (0.01 m/s), tol = p99 |resid − offset| rounded UP to
+    0.1 m/s, n; corners with n < 20 get no entry. `--write` splices only that block into
+    the track JSON (every other byte unchanged).
 - **Structured checks (R12):** every row carries records `{name, value, threshold,
   pass}` for at least the driven-band, consistency, and speed-consistency nets, so a
   post-mortem can read *why* a row is/ isn't rankable straight from the object.

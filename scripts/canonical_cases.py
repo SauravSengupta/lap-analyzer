@@ -19,12 +19,13 @@ from lap_analyzer.analysis import load_centerline, load_samples, section_bounds
 from lap_analyzer.config import sessions_dir
 from lap_analyzer.gates import TrackFrame
 from lap_analyzer.trajectory import (
-    estimate_trajectory, load_corridor, section_timing,
+    accel_ref_for, estimate_trajectory, load_corridor, section_timing,
 )
 
 CORR = load_corridor("ridge")
 FRAME = TrackFrame.from_centerline(load_centerline("ridge"))
-BOUNDS = section_bounds(json.load(open("tracks/ridge.json")))
+TDEF = json.load(open("tracks/ridge.json", encoding="utf-8"))
+BOUNDS = section_bounds(TDEF)
 
 # case, session, lap, corner, (lo, hi) expected value, expected tier predicate
 CASES = [
@@ -47,7 +48,7 @@ def _time_one(sid: str, lap: int, corner: str):
         return None
     traj = estimate_trajectory(g, CORR, FRAME)
     a, b = BOUNDS[corner]
-    return section_timing(traj, a, b, CORR)
+    return section_timing(traj, a, b, CORR, accel_ref=accel_ref_for(TDEF, corner))
 
 
 def _check_tier(pred: str, st) -> bool:
@@ -101,7 +102,7 @@ def t11_leaderboard():
                 continue
             try:
                 traj = estimate_trajectory(g, CORR, FRAME)
-                st = section_timing(traj, a, b, CORR)
+                st = section_timing(traj, a, b, CORR, accel_ref=accel_ref_for(TDEF, "T11"))
             except Exception:
                 continue
             if st.rank_eligible and np.isfinite(st.time_s):
