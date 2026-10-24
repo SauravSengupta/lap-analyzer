@@ -404,6 +404,15 @@ def find_best_lap(range_corners: list[str], is_full_lap: bool,
     return (r["session_id"], int(r["lap"]), float(r["section_time_s"]))
 
 
+def _gps_only_tag(sec_t_df: pd.DataFrame, sid_: str, lap_: int) -> str:
+    """' (GPS-only)' when this (sid, lap)'s section row came from a GPS-only
+    trajectory (no OBD speed), else ''. Provenance for the 'fastest through' label."""
+    if "gps_only" not in sec_t_df.columns:
+        return ""
+    r = sec_t_df[(sec_t_df["session_id"] == sid_) & (sec_t_df["lap"] == lap_)]
+    return " (GPS-only)" if (not r.empty and bool(r["gps_only"].iloc[0])) else ""
+
+
 # --- sidebar: Corner section ------------------------------------------------
 
 with st.sidebar:
@@ -451,7 +460,8 @@ with st.sidebar:
             best_date = laps[(laps["session_id"] == best_sid) & (laps["lap"] == best_lap)].iloc[0]["date"]
             st.info(
                 f"**Fastest through {section_label}**  \n"
-                f"{best_date} {session_hhmm(best_sid)} L{best_lap} — "
+                f"{best_date} {session_hhmm(best_sid)} L{best_lap}"
+                f"{_gps_only_tag(range_sec_t, best_sid, best_lap)} — "
                 f"{best_section_s:.2f}s in section"
             )
             if st.button(f"⤵ Load fastest {section_label} lap", use_container_width=True):
@@ -659,6 +669,9 @@ if not is_full_lap:
             c3.metric(f"Exit speed ({to_choice})", f"{xv:.1f} mph", delta=xd)
         else:
             c3.metric(f"Exit speed ({to_choice})", "—")
+
+    if section_t_val is not None and _gps_only_tag(range_sec_t, sid, lap):
+        st.caption("GPS-only lap (no OBD speed): this section time is GPS-derived.")
 
     if section_t_val is not None and not _range_rank_eligible(sid, lap):
         _sig = _range_sigma(sid, lap)

@@ -201,8 +201,8 @@ def test_time_at_returns_none_outside_range(sample_data_root):
 
 
 def test_estimate_trajectory_gps_only_is_gps_backbone(make_lap_samples):
-    # SPEC: a GPS-only lap (no OBD speed) → status 'gps_backbone' with the wider
-    # GPS σ floor, even with GPS evidence present. dist_lap_m stays valid
+    # SPEC: a GPS-only lap (no OBD speed) → status 'gps_backbone' with the
+    # rule-derived GPS σ floor (currently equal to the OBD floor), even with GPS evidence present. dist_lap_m stays valid
     # (normalize integrates it from speed_mph_gps).
     from lap_analyzer.gates import TrackFrame
     from lap_analyzer.trajectory import SIGMA_FLOOR_GPS_M, estimate_trajectory

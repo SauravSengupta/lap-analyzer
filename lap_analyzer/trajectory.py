@@ -500,7 +500,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     e_lat_all = _lap_lateral_offset(g, corridor, frame, td)
     # GPS-only laps (no OBD): dist_lap_m is already integrated from speed_mph_gps by
     # normalize, so it is a valid backbone — but the lap rides on GPS alone, so it
-    # carries status='gps_backbone' and the wider GPS σ floor throughout (plan §4.1).
+    # carries status='gps_backbone' and the rule-derived GPS σ floor (== OBD's today) throughout (plan §4.1).
     backbone_status = "gps_backbone" if not has_obd else "ok"
     sigma_floor = SIGMA_FLOOR_GPS_M if not has_obd else SIGMA_FLOOR_OBD_M
 

@@ -112,7 +112,7 @@ def section_bounds(track_def: dict, pre_m: float = 50.0, post_cap_m: float = 250
 _TRAJ_SAMPLE_COLS = ["lap", "t", "track_dist_m", "dist_lap_m", "lat", "long", "lat_g",
                      "long_g", "speed_mph", "speed_mph_gps", "gps_drift_lat_m", "gps_drift_lon_m"]
 _SECTION_TIME_COLS = ["session_id", "lap", "corner_id", "section_time_s", "sigma_t_s",
-                      "status", "driven_m", "rank_eligible", "checks_json"]
+                      "status", "driven_m", "rank_eligible", "checks_json", "gps_only"]
 _RANGE_TIME_COLS = [c for c in _SECTION_TIME_COLS if c != "corner_id"]
 
 
@@ -177,15 +177,16 @@ def _corpus_trajectories(track: str):
 
 
 def _section_row(traj, corridor, a: float, b: float, accel_ref=None):
-    """(section_time_s, sigma_t_s, status, driven_m, rank_eligible, checks_json)
+    """(section_time_s, sigma_t_s, status, driven_m, rank_eligible, checks_json, gps_only)
     for one (lap, section) — ALWAYS a row (design R10). `accel_ref` is the section's
-    per-corner accel-speed reference (trajectory.accel_ref_for), None for none."""
+    per-corner accel-speed reference (trajectory.accel_ref_for), None for none.
+    `gps_only` is True when the lap's trajectory is the GPS-only backbone (provenance)."""
     from .trajectory import section_timing
     if traj is None:
-        return (np.nan, np.nan, "no_coverage", np.nan, False, "[]")
+        return (np.nan, np.nan, "no_coverage", np.nan, False, "[]", False)
     st = section_timing(traj, a, b, corridor, accel_ref=accel_ref)
     return (st.time_s, st.sigma_s, st.status, st.driven_m, bool(st.rank_eligible),
-            json.dumps(st.checks))
+            json.dumps(st.checks), getattr(traj, "status", None) == "gps_backbone")
 
 
 def section_times(
@@ -201,7 +202,8 @@ def section_times(
     a row is ALWAYS emitted (R10) with `status ∈ {ok, no_coverage, rescale_invalid}`
     and NaN value where uncomputable. Long-form columns:
     session_id, lap, corner_id, section_time_s, sigma_t_s, status, driven_m,
-    rank_eligible, checks_json (structured audit records, R12). Each corner is judged
+    rank_eligible, checks_json (structured audit records, R12), gps_only (bool: the
+    lap's trajectory is the GPS-only backbone; False when there is no trajectory). Each corner is judged
     against its own accel-speed reference from `track_def` (accel_ref_for).
     """
     from .trajectory import accel_ref_for
@@ -210,8 +212,8 @@ def section_times(
     rows: list[tuple] = []
     for sid, lap_n, g, corridor, traj in _corpus_trajectories(track):
         for cid, (a, b) in bounds.items():
-            val, sig, status, driven, rank, checks = _section_row(traj, corridor, a, b, refs[cid])
-            rows.append((sid, lap_n, cid, val, sig, status, driven, rank, checks))
+            val, sig, status, driven, rank, checks, gps_only = _section_row(traj, corridor, a, b, refs[cid])
+            rows.append((sid, lap_n, cid, val, sig, status, driven, rank, checks, gps_only))
     return pd.DataFrame(rows, columns=_SECTION_TIME_COLS)
 
 
@@ -396,7 +398,7 @@ def range_section_times(
     `section_timing`; a row is ALWAYS emitted (R10). For from_id == to_id this
     matches `section_times()` for that corner. Long-form columns match
     `section_times` minus `corner_id`: session_id, lap, section_time_s, sigma_t_s,
-    status, driven_m, rank_eligible, checks_json.
+    status, driven_m, rank_eligible, checks_json, gps_only.
 
     The accel-speed reference is per corner: a single-corner range uses that corner's
     (so it still matches `section_times`); a multi-corner range has none, so GPS-only
@@ -407,8 +409,8 @@ def range_section_times(
     ref = accel_ref_for(track_def, from_id) if from_id == to_id else None
     rows: list[tuple] = []
     for sid, lap_n, g, corridor, traj in _corpus_trajectories(track):
-        val, sig, status, driven, rank, checks = _section_row(traj, corridor, a, b, ref)
-        rows.append((sid, lap_n, val, sig, status, driven, rank, checks))
+        val, sig, status, driven, rank, checks, gps_only = _section_row(traj, corridor, a, b, ref)
+        rows.append((sid, lap_n, val, sig, status, driven, rank, checks, gps_only))
     return pd.DataFrame(rows, columns=_RANGE_TIME_COLS)
 
 

@@ -68,7 +68,8 @@ pinned) — are high-rate and glitch-free. Anything measured *from OBD* — a ch
 value at a sample, or "how far has the car driven" — is trustworthy. (Exception:
 ~12% of sessions log without OBD; those fall back to GPS speed, are flagged
 `obd_present=False` / `speed_source="gps"`, and the trajectory backbone becomes
-`∫ v_gps dt` with a wider σ floor — see Mode notes below.)
+`∫ v_gps dt` with its own rule-derived σ floor, `SIGMA_FLOOR_GPS_M`, currently equal
+to the OBD floor — see Mode notes below.)
 
 ## GPS failure taxonomy (four distinct modes)
 
@@ -184,9 +185,11 @@ Quality **tiers are derived from σ, never stored as independent booleans**:
 
 GPS-only (`gps_backbone`) laps are tiered by their own σ (since 2026-10, W3); there
 is no blanket tier-B cap. Evidence: dropping OBD from tier-A OBD laps changes section
-times by a median 0.006 s (p90 ≤ 0.033 s); the lower `SIGMA_FLOOR_GPS_M` (1.0 m,
-the smallest floor in a 0.5 m grid starting at the OBD floor at which GPS-only
-emulation is ≥ 95% within 2σ) keeps their σ honest. On the calibration split
+times by a median 0.006 s (p90 ≤ 0.033 s). `SIGMA_FLOOR_GPS_M` is derived by rule
+(smallest floor in a 0.5 m grid at which GPS-only emulation is ≥ 95% within 2σ); the
+rule passed at the grid's first point (1.0 m, equal to the OBD floor), so it did not
+constrain the value. The protection against real GPS-only failures is the accel-speed
+check below, not the floor. On the calibration split
 (2244 transits) emulation is 0.998 within 2σ, tier-A share 0.966, and 99.9% of
 tier-A transits within 0.10 s of the OBD answer; on held-out sessions 0.997 within
 2σ and 99.8% of 1816 emulated GPS-only tier-A transits within 0.10 s. Real GPS-only
@@ -195,6 +198,19 @@ coverage rises PIR 0.790 → 0.892, Ridge 0.808 → 0.845. Caveat: the floor rul
 validated on emulated GPS-only laps (OBD laps with OBD channels removed); real
 GPS-only sessions may have worse GPS, and their driven-band "odometer" is GPS speed,
 so the nets are less independent there.
+
+GPS-only accel-speed check (W3). Why: a confirmed fake on PIR 20260926-111509 L2 T1,
+GPS-only 4.307 s, tier A and corner-fastest. GPS speed said 116.6 to 83.7 mph while
+integrated long_g said 116.8 to 49.9 mph; on GPS-only laps the odometer is GPS speed,
+so no net had an independent sensor. The check, per section: backbone Δv minus
+∫long_g·g dt (`accel_speed_resid_mps`), centred on the corner's clean median, with the
+corner's p99 |centred| as tolerance, derived on GPS-only emulation of clean calibration
+OBD laps (2244 sections; `scripts/derive_accel_speed_tol.py`, references in
+`tracks/{track}.json` `accel_speed_check`). Tolerances run from 2.4 to 31.7 m/s: strong
+on low-noise corners (PIR T1 3.9, T8 3.3, T10 3.0; Ridge T16 2.4), weak on high-noise
+ones (Ridge T6 31.7, PIR T12 20.8). The fake now measures 15.2 m/s centred against 3.9,
+so it is tier B. GPS-only sections with no reference (multi-corner ranges) or without
+accelerometer data do not reach tier A; OBD laps carry the record as a diagnostic only.
 
 Only tier-A (`rank_eligible`) transits win the "fastest through" benchmark — a
 Mode-3/4 or coarse-GPS lap has wide σ and is excluded (design R2: σ decides

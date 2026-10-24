@@ -383,7 +383,7 @@ def test_span_time_immune_to_lateral_line_offset(make_lap_samples):
 
 _SECTION_SCHEMA = [
     "session_id", "lap", "corner_id", "section_time_s", "sigma_t_s", "status",
-    "driven_m", "rank_eligible", "checks_json"]
+    "driven_m", "rank_eligible", "checks_json", "gps_only"]
 _RANGE_SCHEMA = [c for c in _SECTION_SCHEMA if c != "corner_id"]
 
 
@@ -397,6 +397,7 @@ def test_section_times_new_schema_always_emits(sample_data_root):
     assert list(df.columns) == _SECTION_SCHEMA
     assert set(df["status"]) <= {"ok", "no_coverage", "rescale_invalid"}
     assert df["rank_eligible"].dtype == bool
+    assert df["gps_only"].dtype == bool
     assert set(df["corner_id"]) == {c["id"] for c in td["corners"]}
     ok = df[df["status"] == "ok"]
     assert ok["section_time_s"].notna().all() and (ok["sigma_t_s"] >= 0).all()
@@ -413,6 +414,21 @@ def test_range_section_times_new_schema(sample_data_root):
     assert set(df["status"]) <= {"ok", "no_coverage", "rescale_invalid"}
     assert (df[df["status"] == "ok"]["section_time_s"] > 0).all()
     assert df["session_id"].nunique() >= 2
+
+
+def test_section_row_gps_only_provenance(monkeypatch):
+    # SPEC: section rows carry provenance — gps_only is True exactly for a
+    # 'gps_backbone' trajectory; OBD-backed and no-trajectory rows are False.
+    from types import SimpleNamespace
+
+    import lap_analyzer.trajectory as T
+    from lap_analyzer.analysis import _section_row
+    fake = SimpleNamespace(time_s=4.0, sigma_s=0.05, status="ok", driven_m=100.0,
+                           rank_eligible=True, checks=[])
+    monkeypatch.setattr(T, "section_timing", lambda *a, **k: fake)
+    assert _section_row(SimpleNamespace(status="gps_backbone"), None, 0.0, 100.0)[-1] is True
+    assert _section_row(SimpleNamespace(status="ok"), None, 0.0, 100.0)[-1] is False
+    assert _section_row(None, None, 0.0, 100.0)[-1] is False
 
 
 def _accel_thresholds(df) -> set:

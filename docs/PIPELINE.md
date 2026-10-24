@@ -468,7 +468,9 @@ python -m lap_analyzer.cli.build_corpus --track ridge
 by rule, not by hand: `scripts/derive_trust_constants.py` (trust-net constants),
 `scripts/derive_jump_threshold.py` (GPS jump-detector threshold) and
 `scripts/derive_gps_sigma_floor.py` (`SIGMA_FLOOR_GPS_M`) print the replacement
-lines. `scripts/trust_validation.py` is the independent held-out validation report
+lines; `scripts/derive_accel_speed_tol.py --write` rewrites each track's per-corner
+`accel_speed_check` references in `tracks/{track}.json`. `scripts/trust_validation.py`
+is the independent held-out validation report
 (planted faults, GPS-only emulation, odometer-only times), compared against a
 baseline report:
 
