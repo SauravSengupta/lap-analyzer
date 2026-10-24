@@ -202,5 +202,70 @@
       "apex_m": 2630,
       "notes": null
     }
-  ]
+  ],
+  "accel_speed_check": {
+    "provenance": "2026-10-24, per-corner median + p99 |centred| of accel_speed_resid_mps on GPS-only emulation of clean calibration OBD laps (W3 amendment)",
+    "corners": {
+      "T1": {
+        "offset_mps": -0.21,
+        "tol_mps": 3.9,
+        "n": 67
+      },
+      "T10": {
+        "offset_mps": 0.25,
+        "tol_mps": 3.0,
+        "n": 67
+      },
+      "T11": {
+        "offset_mps": -1.04,
+        "tol_mps": 3.9,
+        "n": 67
+      },
+      "T12": {
+        "offset_mps": 1.96,
+        "tol_mps": 20.8,
+        "n": 67
+      },
+      "T2": {
+        "offset_mps": -0.88,
+        "tol_mps": 5.5,
+        "n": 67
+      },
+      "T3": {
+        "offset_mps": 0.36,
+        "tol_mps": 4.5,
+        "n": 67
+      },
+      "T4": {
+        "offset_mps": 1.19,
+        "tol_mps": 18.7,
+        "n": 67
+      },
+      "T5": {
+        "offset_mps": -0.88,
+        "tol_mps": 15.0,
+        "n": 67
+      },
+      "T6": {
+        "offset_mps": -0.73,
+        "tol_mps": 19.8,
+        "n": 67
+      },
+      "T7": {
+        "offset_mps": 1.2,
+        "tol_mps": 7.9,
+        "n": 67
+      },
+      "T8": {
+        "offset_mps": -0.03,
+        "tol_mps": 3.3,
+        "n": 67
+      },
+      "T9": {
+        "offset_mps": 0.29,
+        "tol_mps": 6.4,
+        "n": 67
+      }
+    }
+  }
 }
