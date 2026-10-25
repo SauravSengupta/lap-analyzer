@@ -229,7 +229,7 @@ of sessions, not sections). Per-session accelerometer calibration is the follow-
 
 Only tier-A (`rank_eligible`) transits win the "fastest through" benchmark — a
 Mode-3/4 or coarse-GPS lap has wide σ and is excluded (design R2: σ decides
-rankability), but it is surfaced with its estimate ± σ, never silently dropped.
+rankability; GPS-only laps must also pass the cross-checks above), but it is surfaced with its estimate ± σ, never silently dropped.
 
 Bridged (tier-B/C) values are the OBD prior dressed up, not a measurement — the UI
 labels them "estimate ± σ", never "corrected" (R11).

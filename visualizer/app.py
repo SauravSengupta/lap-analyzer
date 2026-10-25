@@ -282,14 +282,22 @@ def _section_time_help(sid_: str, lap_: int, corner: str) -> str | None:
                     f"failed a cross-check ({labels or 'unknown'}) and has no independent "
                     f"sensor (OBD) to confirm it, so the section is withheld from ranking"
                     + (f" — {why}." if why else "."))
+        # wide σ: only the σ-inflating nets explain it (the accel check never touches σ)
+        why = "; ".join(_fmt_check(c) for c in failed_verdict_checks(checks, False))
         return (f"Estimate ± σ = {sig:.2f}s is too wide to rank (below tier A)"
                 + (f" — {why}." if why else "."))
     return None
 
 
 def _fmt_check(c: dict) -> str:
-    """'name = value (vs threshold)'; a NaN threshold means the check had no reference."""
+    """'name = value (vs threshold)'; a NaN threshold means the check had no reference,
+    a NaN value that it couldn't be evaluated (too little accelerometer data)."""
     thr = c.get("threshold")
+    try:
+        if not np.isfinite(float(c.get("value"))):
+            return f"{c['name']} unevaluable (insufficient sensor data)"
+    except (TypeError, ValueError):
+        pass
     try:
         has_ref = thr is not None and np.isfinite(float(thr))
     except (TypeError, ValueError):

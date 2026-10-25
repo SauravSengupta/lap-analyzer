@@ -687,6 +687,7 @@ def test_gps_backbone_withhold_matches_failed_verdict_checks():
     # gps_backbone row with tier-A σ is withheld exactly when failed_verdict_checks is
     # non-empty (so a "withheld because …" message can always name a cause).
     from lap_analyzer.trajectory import (
+        CONSISTENCY_STD_M,
         TIER_A_S,
         _section_heading_rad,
         failed_verdict_checks,
@@ -695,7 +696,7 @@ def test_gps_backbone_withhold_matches_failed_verdict_checks():
     corr = _curved_corridor(0.001)
     H = _section_heading_rad(corr, 500.0, 1000.0)
     cases = [_net_geometry_trajectory("gps_backbone"),                       # all pass
-             _net_geometry_trajectory("gps_backbone", e_lat=11.0 / H),       # consistency
+             _net_geometry_trajectory("gps_backbone", e_lat=(2 * CONSISTENCY_STD_M + 1) / H),  # consistency
              _net_geometry_trajectory("gps_backbone", e_lat=None)]           # NaN consis
     lg_bad = _net_geometry_trajectory("gps_backbone")
     lg_bad.long_g[:] = -1.0                                                  # accel

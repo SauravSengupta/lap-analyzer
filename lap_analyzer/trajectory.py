@@ -717,7 +717,8 @@ def _prior_blend(dh, sig, knots):
 class SectionTiming:
     """One (lap, section) timing row — ALWAYS emitted (design R10). Value and
     confidence come from the SAME trajectory pass (R1); the three σ-nets inflate
-    σ, they never reject."""
+    σ, they never reject. On a gps_backbone lap a failed net or accel-speed check
+    also withholds tier A (σ unchanged)."""
 
     time_s: float               # t_b − t_a (NaN if no_coverage)
     sigma_s: float              # correlation-aware 1σ in seconds, after the σ-nets
@@ -725,7 +726,7 @@ class SectionTiming:
     t_b: float
     driven_m: float             # odometer distance between the posterior crossings
     status: str                 # 'ok' | 'no_coverage' | 'rescale_invalid'
-    tier: str                   # 'A' | 'B' | 'C' (derived from sigma_s)
+    tier: str                   # 'A' | 'B' | 'C' (from sigma_s; gps_backbone A→B on a failed check)
     rank_eligible: bool         # tier == 'A' and status == 'ok'
     checks: list = field(default_factory=list)  # structured audit records (R12)
 

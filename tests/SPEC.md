@@ -791,7 +791,7 @@ on one lap's estimate, and reports honest per-section σ with three physical σ-
   - **speed-consistency tripwire:** `|time_s − obd_anchored_time|` vs
     `(|δ_a|+|δ_b|)/v̄ + 0.2s` — a **diagnostic** check record only, never inflates.
 - **Derived tiers (never stored booleans):** `A` if `sigma_s ≤ 0.10`, `B` if
-  `≤ 0.30`, else `C`. A `gps_backbone` (GPS-only) trajectory is tiered by its own σ like any other (W3, 2026-10; the former tier-B cap is retired — dropping OBD changes tier-A section times by a median 0.006 s). `SIGMA_FLOOR_GPS_M` is rule-derived and currently equals the OBD floor (1.0 m); tier A on a GPS-only section additionally requires the per-corner accel-speed check (`accel_speed_resid_mps`).
+  `≤ 0.30`, else `C`. A `gps_backbone` (GPS-only) trajectory is tiered by its own σ like any other (W3, 2026-10; the former tier-B cap is retired — dropping OBD changes tier-A section times by a median 0.006 s). `SIGMA_FLOOR_GPS_M` is rule-derived and currently equals the OBD floor (1.0 m); tier A on a GPS-only section additionally requires the per-corner accel-speed check (`accel_speed_resid_mps`) and both σ-nets (driven-band, consistency) to pass — see the gps_backbone enforcement bullets below.
   `rank_eligible == (tier == 'A' and status == 'ok')`.
 - **Accel-speed check (W3 amendment, 2026-10-22):** `resid = Δv_backbone − ∫long_g·g dt`
   over `[t_a, t_b]` (m/s; Δv from `v_at`, trapezoid over finite `long_g` samples with
