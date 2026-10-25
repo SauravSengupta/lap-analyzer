@@ -391,7 +391,9 @@ def test_section_timing_rescale_invalid_emits_value_not_rankable(make_lap_sample
 def test_section_timing_gps_backbone_earns_tier_by_sigma():
     # SPEC (W3, spec 2026-10-10; replaces reserved §9.3 cap with user approval): a
     # gps_backbone trajectory is tiered by its own σ like any other — tight σ reaches A,
-    # wide σ does not. Its status stays 'gps_backbone' as provenance.
+    # wide σ does not. Its status stays 'gps_backbone' as provenance. Tier A on a
+    # gps_backbone lap also needs the accel, driven-band and consistency checks to pass
+    # (16b–16d); the on-centerline straight with driven == b−a passes both nets.
     from lap_analyzer.trajectory import section_timing
     # long_g ≡ 0 matches the constant speed, so the accel-speed check verifies the lap.
     # A per-corner reference (0, 1) m/s lets the accel-speed check be evaluated.
@@ -560,6 +562,149 @@ def test_accel_check_without_reference_is_unverified():
     assert st.sigma_s == pytest.approx(st_ref.sigma_s, rel=1e-12)   # σ never touched
     obd = section_timing(_straight_trajectory(sigma0=0.5, long_g=0.0), 500.0, 1000.0, corr)
     assert obd.tier == "A" and obd.rank_eligible is True and _accel_check(obd)["pass"] is True
+
+
+def _net_geometry_trajectory(status, short_m=0.0, e_lat=0.0, v=40.0, n=500):
+    """Straight-speed lap whose odometer is shortened by `short_m` over the ruler
+    section [500, 1000] (driven = 500 − short_m), constant lateral offset `e_lat`
+    (None = no lateral data → consistency unevaluable), long_g ≡ 0 (accel-consistent).
+    Tight per-sample σ, so a net failing by a small margin barely inflates σ."""
+    from lap_analyzer.trajectory import Trajectory
+    s_hat = np.linspace(0.0, 2500.0, n)
+    comp = np.interp(s_hat, [500.0, 1000.0], [0.0, short_m])
+    dl = s_hat - comp
+    t = s_hat / v
+    knots = np.arange(dl.min(), dl.max(), 10.0)
+    e = None if e_lat is None else np.full(n, float(e_lat))
+    return Trajectory(
+        t=t, s_hat=s_hat, sigma_m=np.full(n, 0.5), delta_hat=s_hat - dl, dl=dl,
+        v=np.full(n, v), evidence=np.ones(n, bool), status=status, knots=knots,
+        knot_sigma=np.full(len(knots), 0.5), e_lat=e, checks=[], long_g=np.zeros(n))
+
+
+def _curved_corridor(kappa, n=300):
+    c = _straight_corridor(n=n)
+    return Corridor(s_bin=c.s_bin, e_lo=c.e_lo, e_hi=c.e_hi, tx=c.tx, ty=c.ty,
+                    gx=c.gx, gy=c.gy, kappa_signed=np.full(n, float(kappa)), meta=c.meta)
+
+
+def _check_rec(st, name):
+    recs = [c for c in st.checks if c["name"] == name]
+    assert len(recs) == 1
+    return recs[0]
+
+
+def test_failed_driven_band_withholds_tier_a_on_gps_backbone_only():
+    # SPEC (W3 amendment 16d): on a gps_backbone lap the odometer IS GPS speed, so a
+    # failed driven-band net means the GPS geometry disagrees with itself and nothing
+    # independent vouches for the time → tier A withheld (A → B, σ unchanged) even when
+    # the net's σ-inflation alone leaves σ tight. On an OBD lap the same net only
+    # inflates σ: tier is exactly _tier(σ).
+    from lap_analyzer.trajectory import (
+        DRIVEN_BAND_FLOOR_M,
+        DRIVEN_BAND_HDG_SCALE,
+        TIER_A_S,
+        _section_heading_rad,
+        _tier,
+        section_timing,
+    )
+    k = 0.001
+    corr = _curved_corridor(k)
+    # the lap's lateral line explains the shortening exactly (consistency passes) …
+    H = _section_heading_rad(corr, 500.0, 1000.0)
+    band = H * DRIVEN_BAND_HDG_SCALE + DRIVEN_BAND_FLOOR_M
+    short = band + 0.6                       # … but the driven-band fails by a hair
+    e = -short / H
+    gps = _net_geometry_trajectory("gps_backbone", short_m=short, e_lat=e)
+    obd = _net_geometry_trajectory("ok", short_m=short, e_lat=e)
+    st_g = section_timing(gps, 500.0, 1000.0, corr, accel_ref=_REF)
+    st_o = section_timing(obd, 500.0, 1000.0, corr, accel_ref=_REF)
+    assert _check_rec(st_g, "driven_band_dev_m")["pass"] is False
+    assert _check_rec(st_g, "consistency_resid_m")["pass"] is True
+    assert _check_rec(st_g, "accel_speed_resid_mps")["pass"] is True
+    assert st_g.sigma_s <= TIER_A_S                   # σ alone would have ranked it
+    assert st_g.tier == "B" and st_g.rank_eligible is False
+    assert st_o.sigma_s == pytest.approx(st_g.sigma_s, rel=1e-12)   # σ never touched
+    assert st_o.tier == _tier(st_o.sigma_s) == "A" and st_o.rank_eligible is True
+
+
+def test_failed_consistency_withholds_tier_a_on_gps_backbone():
+    # SPEC (W3 amendment 16d): a failed line-length consistency net withholds tier A on
+    # a gps_backbone lap (driven-band and accel both pass); OBD lap: σ-inflation only.
+    from lap_analyzer.trajectory import (
+        CONSISTENCY_STD_M,
+        TIER_A_S,
+        _section_heading_rad,
+        _tier,
+        section_timing,
+    )
+    k = 0.001
+    corr = _curved_corridor(k)
+    # driven == b−a, but a lateral line that predicts ~(2·STD + 1) m of extra length
+    H = _section_heading_rad(corr, 500.0, 1000.0)
+    e = (2 * CONSISTENCY_STD_M + 1.0) / H
+    gps = _net_geometry_trajectory("gps_backbone", e_lat=e)
+    obd = _net_geometry_trajectory("ok", e_lat=e)
+    st_g = section_timing(gps, 500.0, 1000.0, corr, accel_ref=_REF)
+    st_o = section_timing(obd, 500.0, 1000.0, corr, accel_ref=_REF)
+    assert _check_rec(st_g, "consistency_resid_m")["pass"] is False
+    assert _check_rec(st_g, "driven_band_dev_m")["pass"] is True
+    assert st_g.sigma_s <= TIER_A_S
+    assert st_g.tier == "B" and st_g.rank_eligible is False
+    assert st_o.tier == _tier(st_o.sigma_s) == "A" and st_o.rank_eligible is True
+
+
+def test_unevaluable_consistency_does_not_withhold_gps_backbone():
+    # SPEC (W3 amendment 16d): a NaN consistency resid (no lateral data) records
+    # pass=True and does NOT withhold tier A — only the accel check has the
+    # "unevaluable ⇒ withhold" rule.
+    from lap_analyzer.trajectory import section_timing
+    gps = _net_geometry_trajectory("gps_backbone", e_lat=None)
+    st = section_timing(gps, 500.0, 1000.0, _straight_corridor(n=300), accel_ref=_REF)
+    rec = _check_rec(st, "consistency_resid_m")
+    assert np.isnan(rec["value"]) and rec["pass"] is True
+    assert st.tier == "A" and st.rank_eligible is True
+
+
+def test_failed_verdict_checks_drops_diagnostic_checks():
+    # SPEC (16d): failed_verdict_checks lists only the failed records that bore on the
+    # verdict — OBD laps: driven-band + consistency (accel & speed-consistency are
+    # diagnostic there); GPS-only laps: those plus accel (speed-consistency diagnostic).
+    from lap_analyzer.trajectory import failed_verdict_checks
+    recs = [{"name": "coverage", "pass": True},
+            {"name": "driven_band_dev_m", "pass": False},
+            {"name": "consistency_resid_m", "pass": True},
+            {"name": "speed_consistency_s", "pass": False},
+            {"name": "accel_speed_resid_mps", "pass": False}]
+    assert [c["name"] for c in failed_verdict_checks(recs, gps_only=False)] == ["driven_band_dev_m"]
+    assert [c["name"] for c in failed_verdict_checks(recs, gps_only=True)] == [
+        "driven_band_dev_m", "accel_speed_resid_mps"]
+    assert failed_verdict_checks([], gps_only=True) == []
+
+
+def test_gps_backbone_withhold_matches_failed_verdict_checks():
+    # SPEC (16d): the explanation helper agrees with the layer's own enforcement — a
+    # gps_backbone row with tier-A σ is withheld exactly when failed_verdict_checks is
+    # non-empty (so a "withheld because …" message can always name a cause).
+    from lap_analyzer.trajectory import (
+        TIER_A_S,
+        _section_heading_rad,
+        failed_verdict_checks,
+        section_timing,
+    )
+    corr = _curved_corridor(0.001)
+    H = _section_heading_rad(corr, 500.0, 1000.0)
+    cases = [_net_geometry_trajectory("gps_backbone"),                       # all pass
+             _net_geometry_trajectory("gps_backbone", e_lat=11.0 / H),       # consistency
+             _net_geometry_trajectory("gps_backbone", e_lat=None)]           # NaN consis
+    lg_bad = _net_geometry_trajectory("gps_backbone")
+    lg_bad.long_g[:] = -1.0                                                  # accel
+    cases.append(lg_bad)
+    for tr in cases:
+        st = section_timing(tr, 500.0, 1000.0, corr, accel_ref=_REF)
+        assert st.sigma_s <= TIER_A_S
+        withheld = st.tier != "A"
+        assert withheld == bool(failed_verdict_checks(st.checks, gps_only=True))
 
 
 def test_accel_ref_for_reads_the_track_table():

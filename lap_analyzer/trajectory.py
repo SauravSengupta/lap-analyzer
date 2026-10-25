@@ -730,6 +730,23 @@ class SectionTiming:
     checks: list = field(default_factory=list)  # structured audit records (R12)
 
 
+# Which R12 check records bear on a section's verdict (for consumers that EXPLAIN a
+# verdict — never to re-derive it). OBD laps: the two σ-nets (they inflate σ); the
+# accel-speed check and the speed-consistency tripwire are diagnostic. gps_backbone
+# laps: the σ-nets AND the accel-speed check, any failure withholding tier A (see
+# section_timing); the tripwire is still diagnostic.
+OBD_VERDICT_CHECKS = ("driven_band_dev_m", "consistency_resid_m")
+GPS_VERDICT_CHECKS = OBD_VERDICT_CHECKS + ("accel_speed_resid_mps",)
+
+
+def failed_verdict_checks(checks: list, gps_only: bool) -> list:
+    """The failed check records (in emitted order) that actually affected this row's
+    verdict: diagnostic-only checks for the lap's provenance are dropped. Pure."""
+    counted = GPS_VERDICT_CHECKS if gps_only else OBD_VERDICT_CHECKS
+    return [c for c in (checks or [])
+            if c.get("name") in counted and not c.get("pass", True)]
+
+
 def _tier(sigma_s: float) -> str:
     if not np.isfinite(sigma_s):
         return "C"
@@ -813,6 +830,7 @@ def section_timing(traj: Trajectory, dist_a: float, dist_b: float,
     The value (t at the monotone s_hat crossings) and its σ come from the same pass
     (R1). σ is correlation-aware, then inflated (never rejected) by the driven-band
     and line-length-consistency nets; the speed-consistency tripwire is diagnostic.
+    On a gps_backbone lap a failed net or accel-speed check also withholds tier A.
     `accel_ref` = the section's (offset_mps, tol_mps) accel-speed reference
     (accel_ref_for, for a single named corner); None = no reference, so a GPS-only
     lap cannot be verified and is withheld from tier A.
@@ -889,9 +907,20 @@ def section_timing(traj: Trajectory, dist_a: float, dist_b: float,
     rec["raw"] = round(float(a_resid), 3)
     checks.append(rec)
 
+    # --- gps_backbone enforcement (W3 amendments 16b–16d): withhold tier A (A → B; σ and
+    # value untouched) when ANY of accel-speed, driven-band or consistency fails. On a
+    # gps_backbone lap the odometer IS integrated GPS speed, so a failed driven-band or
+    # consistency net is GPS disagreeing with itself — no independent sensor vouches for
+    # the time, and the nets' σ-inflation alone can still leave a tight (tier-A) σ. On
+    # OBD laps the nets stay σ-inflation only (the odometer is independent of GPS) and
+    # the accel check is diagnostic. An unevaluable consistency resid (NaN, recorded
+    # pass) does NOT withhold; only the accel check has "unevaluable ⇒ withhold". The
+    # speed-consistency tripwire is never enforced.
+    band_ok = next(c["pass"] for c in checks if c["name"] == "driven_band_dev_m")
+    consis_ok = next(c["pass"] for c in checks if c["name"] == "consistency_resid_m")
     status = "rescale_invalid" if traj.status == "rescale_invalid" else "ok"
     tier = _tier(sigma_s)
-    if gps_only and not accel_ok and tier == "A":
+    if gps_only and tier == "A" and not (accel_ok and band_ok and consis_ok):
         tier = "B"
     rank_eligible = (tier == "A") and (status == "ok")
     return SectionTiming(time_s, sigma_s, t_a, t_b, driven, status, tier,

@@ -548,6 +548,9 @@ and confidence come from ONE evidence pass (design R1). See `docs/GPS_TRUST.md`.
   timed where the lap's monotone `s_hat` crosses `dist_a`/`dist_b`. When `corridor`
   is `None` a `default_corridor` (flat ±env, zero κ, smoothed centerline field) is
   built from `centerline` — real callers pass the loaded per-track corridor.
+  span_time passes **no accel-speed reference** (`accel_ref=None`: a span is generally
+  not one named corner), so a GPS-only (`gps_backbone`) span is always unverified and
+  never reaches tier A / rank-eligible; OBD spans are unaffected.
 - **Invariants:**
   - **Always returns a row (design R10), never `None`.** A bound outside the lap's
     `s_hat` range → `status='no_coverage'`, `time_s` NaN, not rank-eligible.
@@ -808,6 +811,17 @@ on one lap's estimate, and reports honest per-section σ with three physical σ-
   has an independent sensor): a failing, NaN or unreferenced check withholds tier A (A → B;
   σ, value and B/C unchanged), so the row is not rank-eligible. On OBD laps it is
   diagnostic only (tier and σ are never changed).
+- **gps_backbone enforcement of the σ-nets (W3 amendment 16d, user decision 2026-10-25):**
+  on a `gps_backbone` lap the backbone odometer IS integrated GPS speed, so a failed
+  driven-band (`driven_band_dev_m`) or consistency (`consistency_resid_m`) net means the
+  GPS geometry disagrees with itself and nothing independent vouches for the time; the
+  nets' σ-inflation alone can still leave a tier-A σ. So tier A is withheld (A → B; σ,
+  value and the check records unchanged) when **any** of accel-speed, driven-band or
+  consistency fails: `gps_only and tier == 'A' and not (accel_ok and band_ok and
+  consis_ok) → 'B'`. An unevaluable consistency resid (NaN, recorded `pass=True`) does
+  NOT withhold — only the accel check has "unevaluable ⇒ withhold". The
+  speed-consistency tripwire is never enforced. On OBD (`ok`) laps the nets remain
+  σ-inflation only: `tier == _tier(sigma_s)`.
   - **Where the table lives:** `tracks/{track}.json` top-level `accel_speed_check` =
     `{provenance, corners: {corner_id: {offset_mps, tol_mps, n}}}`.
     `trajectory.accel_ref_for(track_def, corner_id)` reads it from an already-loaded

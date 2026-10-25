@@ -790,12 +790,23 @@ def test_build_session_corners_emits_gps_jump_n(sample_data_root):
     assert df["gps_jump_n"].dtype.kind in "iu"
 
 
-def test_load_track_carries_accel_speed_check_table():
+def test_load_track_carries_accel_speed_check_table(tmp_path, monkeypatch):
     # SPEC labeler.load_track: Track.accel_speed_check is the track JSON's
     # `accel_speed_check` block (per-corner accel-speed references), None when absent.
+    import json
+
+    import lap_analyzer.labeler as labeler_mod
     for track_id in ("ridge", "pir"):
+        raw = json.loads((tracks_dir() / f"{track_id}.json").read_text(encoding="utf-8"))
         t = load_track(track_id)
-        assert t.accel_speed_check is None or isinstance(t.accel_speed_check.get("corners"), dict)
+        assert t.accel_speed_check == raw["accel_speed_check"]   # the JSON block, as-is
+        assert isinstance(t.accel_speed_check["corners"], dict) and t.accel_speed_check["corners"]
+    # a track definition without the block → None (not an empty / fabricated table)
+    raw = json.loads((tracks_dir() / "ridge.json").read_text(encoding="utf-8"))
+    raw.pop("accel_speed_check")
+    (tmp_path / "ridge.json").write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setattr(labeler_mod, "tracks_dir", lambda: tmp_path)
+    assert load_track("ridge").accel_speed_check is None
 
 
 def test_build_session_corners_passes_each_corners_accel_reference(sample_data_root, monkeypatch):
