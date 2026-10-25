@@ -188,16 +188,25 @@ is no blanket tier-B cap. Evidence: dropping OBD from tier-A OBD laps changes se
 times by a median 0.006 s (p90 ≤ 0.033 s). `SIGMA_FLOOR_GPS_M` is derived by rule
 (smallest floor in a 0.5 m grid at which GPS-only emulation is ≥ 95% within 2σ); the
 rule passed at the grid's first point (1.0 m, equal to the OBD floor), so it did not
-constrain the value. The protection against real GPS-only failures is the accel-speed
-check below, not the floor. On the calibration split
-(2244 transits) emulation is 0.998 within 2σ, tier-A share 0.966, and 99.9% of
-tier-A transits within 0.10 s of the OBD answer; on held-out sessions 0.997 within
-2σ and 99.8% of 1816 emulated GPS-only tier-A transits within 0.10 s. Real GPS-only
-sessions go from 0% to 86.5% rank-eligible (PIR) and 81.9% (Ridge); overall tier-A
-coverage rises PIR 0.790 → 0.892, Ridge 0.808 → 0.845. Caveat: the floor rule is
-validated on emulated GPS-only laps (OBD laps with OBD channels removed); real
-GPS-only sessions may have worse GPS, and their driven-band "odometer" is GPS speed,
-so the nets are less independent there.
+constrain the value. On the calibration split (2244 transits) emulation is 0.998
+within 2σ, tier-A share 0.966, and 99.9% of tier-A transits within 0.10 s of the OBD
+answer; on held-out sessions 0.997 within 2σ and 99.9% of 1653 emulated GPS-only
+tier-A transits within 0.10 s. Caveat: the floor rule is validated on emulated GPS-only
+laps (OBD laps with OBD channels removed); real GPS-only sessions may have worse GPS,
+and on them the driven-band "odometer" is GPS speed, so σ alone is not enough. A
+GPS-only section therefore reaches tier A only if, besides a tier-A σ, it passes the
+accel-speed check below **and** both σ-nets (driven-band, line-length consistency). On
+an OBD lap a failed net only inflates σ; on a GPS-only lap it is GPS disagreeing with
+itself, with no independent sensor to settle it, so it withholds tier A (A → B, σ
+unchanged). Why: PIR 20260612-103325 L4 T8 ranked GPS-only fastest at 4.245 s (−0.226 s
+vs the OBD best) with σ 0.034 s, although its consistency net failed and both
+neighbours failed the driven-band net. That is a gate-position fault, which the
+accel-speed check (a speed check) cannot see; Ridge 20260517-111618 L3 T12 (−0.127 s)
+showed the same pattern. Coverage now (status-ok sections): PIR 83.5% rank-eligible
+overall, 61.1% of 624 GPS-only sections (from 0% before W3); Ridge 78.4% overall, 83.6%
+of 304 GPS-only. Two GPS-only corner-fastest times remain: PIR 20251004-112120 L5 T11
+(−0.174 s, consistent with its neighbours on review) and Ridge 20251018-131451 L3 T9
+(−0.031 s, within noise).
 
 GPS-only accel-speed check (W3). Why: a confirmed fake on PIR 20260926-111509 L2 T1,
 GPS-only 4.307 s, tier A and corner-fastest. GPS speed said 116.6 to 83.7 mph while
@@ -210,7 +219,13 @@ OBD laps (2244 sections; `scripts/derive_accel_speed_tol.py`, references in
 on low-noise corners (PIR T1 3.9, T8 3.3, T10 3.0; Ridge T16 2.4), weak on high-noise
 ones (Ridge T6 31.7, PIR T12 20.8). The fake now measures 15.2 m/s centred against 3.9,
 so it is tier B. GPS-only sections with no reference (multi-corner ranges) or without
-accelerometer data do not reach tier A; OBD laps carry the record as a diagnostic only.
+accelerometer data do not reach tier A; OBD laps carry the record as a diagnostic only. The check
+is a speed check only: it catches GPS speed that disagrees with the accelerometer, not
+a correct-speed lap whose gate crossings are misplaced (that is the σ-nets' job, above).
+It is also weak where the tolerance is wide: 8 of 28 corners have tol ≥ 15 m/s (Ridge T6
+31.7, T8 21.1, T11 16.2, T12 15.9; PIR T12 20.8, T6 19.8, T4 18.7, T5 15.0), because the spread is
+accelerometer noise that varies between sessions (the effective sample size is the number
+of sessions, not sections). Per-session accelerometer calibration is the follow-up.
 
 Only tier-A (`rank_eligible`) transits win the "fastest through" benchmark — a
 Mode-3/4 or coarse-GPS lap has wide σ and is excluded (design R2: σ decides

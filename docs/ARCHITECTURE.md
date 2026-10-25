@@ -397,6 +397,24 @@ T1); inferring position lag from a `track_dist_m − dist_lap_m` regression
 (over-corrected PIR); a single session-wide speed τ (left residual drift); a
 looser correlation cutoff (would accept noise as measurement).
 
+### 8. Three sensors, measured: recalibrate and detect, don't rebuild (2026-10)
+
+**What we do.** Keep `trajectory.py` as the single trust decision point; add a
+GPS-independent jump detector (odometer + lat_g path shape over ±1.5 s) that drops
+inconsistent fixes from evidence; re-derive the trust-net constants by their original
+rules on corrected data; let GPS-only laps earn tier A by σ, provided their
+accel-speed check and σ-nets pass (on a GPS-only lap the odometer is GPS speed, so a
+failed net withholds tier A instead of only inflating σ). An independent validation
+harness (`scripts/trust_validation.py`: Accel-Z road-profile ruler, planted faults,
+GPS-only emulation, odometer-only times) scores every change on held-out sessions.
+
+**Why not one fused estimator.** Measured before deciding: along-track GPS error is
+~2–4 m against 9–15 m of driver brake-point scatter; OBD contributes ~0.006 s to 8 Hz
+section times; the phone accelerometer (no gyro) holds heading only ~1–2 s. A fused
+smoother's main gain would be reconstructing bad GPS — which we chose not to do: bad
+GPS is flagged and excluded, never synthesized. Spec:
+docs/superpowers/specs/2026-10-10-sensor-fusion-rethink-design.md (local).
+
 ---
 
 ## Quality flags
@@ -448,19 +466,3 @@ Raw metrics kept on the transit row for custom thresholds:
 `gps_drift_disagreement_m` (anchor-offset spread per lap),
 `track_dist_offset_max_m` (within-corner deviation from the centerline),
 `neighborhood_offset_max_m` (max across this corner + both neighbors).
-
-### 8. Three sensors, measured: recalibrate and detect, don't rebuild (2026-10)
-
-**What we do.** Keep `trajectory.py` as the single trust decision point; add a
-GPS-independent jump detector (odometer + lat_g path shape over ±1.5 s) that drops
-inconsistent fixes from evidence; re-derive the trust-net constants by their original
-rules on corrected data; let GPS-only laps earn tier A by σ. An independent validation
-harness (`scripts/trust_validation.py`: Accel-Z road-profile ruler, planted faults,
-GPS-only emulation, odometer-only times) scores every change on held-out sessions.
-
-**Why not one fused estimator.** Measured before deciding: along-track GPS error is
-~2–4 m against 9–15 m of driver brake-point scatter; OBD contributes ~0.006 s to 8 Hz
-section times; the phone accelerometer (no gyro) holds heading only ~1–2 s. A fused
-smoother's main gain would be reconstructing bad GPS — which we chose not to do: bad
-GPS is flagged and excluded, never synthesized. Spec:
-docs/superpowers/specs/2026-10-10-sensor-fusion-rethink-design.md (local).
