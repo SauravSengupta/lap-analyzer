@@ -28,7 +28,8 @@ from lap_analyzer.analysis import (
     top_decile_laps,
 )
 from lap_analyzer.gates import TrackFrame
-from lap_analyzer.trajectory import estimate_trajectory, load_corridor
+from lap_analyzer.trajectory import (TIER_A_S, estimate_trajectory, failed_verdict_checks,
+                                     load_corridor)
 from shared import available_tracks, current_track
 from shared import corpus as _corpus, laps as _laps, track_def as _track_def
 from shared import samples as _samples, session_hhmm, format_lap_time
@@ -265,15 +266,44 @@ def _section_time_help(sid_: str, lap_: int, corner: str) -> str | None:
                 "position on the ruler can't be trusted — any value is a prior-only "
                 "estimate, excluded from ranking (status: rescale_invalid).")
     if not bool(r["rank_eligible"]):
+        gps_only = bool(r["gps_only"]) if "gps_only" in r.index else False
         try:
-            failed = [c for c in json.loads(r["checks_json"] or "[]")
-                      if not c.get("pass", True) and c.get("name") != "coverage"]
+            checks = json.loads(r["checks_json"] or "[]")
         except (ValueError, TypeError):
-            failed = []
-        why = "; ".join(f"{c['name']} = {c['value']} (vs {c['threshold']})" for c in failed)
-        return (f"Estimate ± σ = {r['sigma_t_s']:.2f}s is too wide to rank (below tier A)"
+            checks = []
+        # only the checks that bore on the verdict (the layer's own list; diagnostic
+        # checks for this lap's provenance are left out)
+        failed = failed_verdict_checks(checks, gps_only)
+        why = "; ".join(_fmt_check(c) for c in failed)
+        sig = float(r["sigma_t_s"])
+        if gps_only and np.isfinite(sig) and sig <= TIER_A_S:
+            labels = ", ".join(_CHECK_LABELS.get(c["name"], c["name"]) for c in failed)
+            return (f"Estimate ± σ = {sig:.2f}s is tight enough to rank, but this GPS-only lap "
+                    f"failed a cross-check ({labels or 'unknown'}) and has no independent "
+                    f"sensor (OBD) to confirm it, so the section is withheld from ranking"
+                    + (f" — {why}." if why else "."))
+        # wide σ: only the σ-inflating nets explain it (the accel check never touches σ)
+        why = "; ".join(_fmt_check(c) for c in failed_verdict_checks(checks, False))
+        return (f"Estimate ± σ = {sig:.2f}s is too wide to rank (below tier A)"
                 + (f" — {why}." if why else "."))
     return None
+
+
+def _fmt_check(c: dict) -> str:
+    """'name = value (vs threshold)'; a NaN threshold means the check had no reference,
+    a NaN value that it couldn't be evaluated (too little accelerometer data)."""
+    thr = c.get("threshold")
+    try:
+        if not np.isfinite(float(c.get("value"))):
+            return f"{c['name']} unevaluable (insufficient sensor data)"
+    except (TypeError, ValueError):
+        pass
+    try:
+        has_ref = thr is not None and np.isfinite(float(thr))
+    except (TypeError, ValueError):
+        has_ref = False
+    return (f"{c['name']} = {c['value']} (vs {thr})" if has_ref
+            else f"{c['name']} = {c['value']} (no reference for this corner)")
 
 
 # Friendly names for the R12 net checks, for the lap-level banner summary (the
@@ -282,6 +312,7 @@ _CHECK_LABELS = {
     "driven_band_dev_m": "odometer drift",
     "consistency_resid_m": "line-length",
     "speed_consistency_s": "speed-time",
+    "accel_speed_resid_mps": "accelerometer speed",
 }
 
 
@@ -290,7 +321,8 @@ def _lap_audit(sid_: str, lap_: int, lo: float | None, hi: float | None, full: b
     records (sec_t `status` + `checks_json`), never a re-derivation — same source as
     _section_time_help, so the banner can't contradict the per-corner tooltips.
     Returns (whole_lap_rescale_invalid, [(corner_id, [reason, ...]), ...]) for the
-    in-view corners the drift/consistency nets flagged (and left non-rank-eligible)."""
+    in-view corners whose verdict-bearing checks failed (trajectory.failed_verdict_checks:
+    the σ-nets, plus the accel-speed check on GPS-only laps) and left non-rank-eligible."""
     rows = sec_t[(sec_t["session_id"] == sid_) & (sec_t["lap"] == lap_)]
     if rows.empty:
         return False, []
@@ -303,9 +335,10 @@ def _lap_audit(sid_: str, lap_: int, lo: float | None, hi: float | None, full: b
             continue
         if r.status != "ok" or bool(r.rank_eligible):
             continue
+        gps_only = bool(getattr(r, "gps_only", False))
         try:
-            names = {c["name"] for c in json.loads(r.checks_json or "[]")
-                     if not c.get("pass", True) and c["name"] != "coverage"}
+            names = {c["name"] for c in failed_verdict_checks(
+                json.loads(r.checks_json or "[]"), gps_only)}
         except (ValueError, TypeError):
             names = set()
         if names:
@@ -404,6 +437,15 @@ def find_best_lap(range_corners: list[str], is_full_lap: bool,
     return (r["session_id"], int(r["lap"]), float(r["section_time_s"]))
 
 
+def _gps_only_tag(sec_t_df: pd.DataFrame, sid_: str, lap_: int) -> str:
+    """' (GPS-only)' when this (sid, lap)'s section row came from a GPS-only
+    trajectory (no OBD speed), else ''. Provenance for the 'fastest through' label."""
+    if "gps_only" not in sec_t_df.columns:
+        return ""
+    r = sec_t_df[(sec_t_df["session_id"] == sid_) & (sec_t_df["lap"] == lap_)]
+    return " (GPS-only)" if (not r.empty and bool(r["gps_only"].iloc[0])) else ""
+
+
 # --- sidebar: Corner section ------------------------------------------------
 
 with st.sidebar:
@@ -451,7 +493,8 @@ with st.sidebar:
             best_date = laps[(laps["session_id"] == best_sid) & (laps["lap"] == best_lap)].iloc[0]["date"]
             st.info(
                 f"**Fastest through {section_label}**  \n"
-                f"{best_date} {session_hhmm(best_sid)} L{best_lap} — "
+                f"{best_date} {session_hhmm(best_sid)} L{best_lap}"
+                f"{_gps_only_tag(range_sec_t, best_sid, best_lap)} — "
                 f"{best_section_s:.2f}s in section"
             )
             if st.button(f"⤵ Load fastest {section_label} lap", use_container_width=True):
@@ -659,6 +702,9 @@ if not is_full_lap:
             c3.metric(f"Exit speed ({to_choice})", f"{xv:.1f} mph", delta=xd)
         else:
             c3.metric(f"Exit speed ({to_choice})", "—")
+
+    if section_t_val is not None and _gps_only_tag(range_sec_t, sid, lap):
+        st.caption("GPS-only lap (no OBD speed): this section time is GPS-derived.")
 
     if section_t_val is not None and not _range_rank_eligible(sid, lap):
         _sig = _range_sigma(sid, lap)

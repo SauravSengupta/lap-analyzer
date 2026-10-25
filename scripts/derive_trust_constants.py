@@ -83,7 +83,7 @@ def _collect():
             mid = (traj.knots >= traj.knots.min() + PRIOR_TAPER_M) & (traj.knots <= traj.knots.max() - PRIOR_TAPER_M)
             prior.append(np.interp(traj.knots[mid], dl, traj.delta_hat))
             for cid, (a, b) in ctx.bounds.items():
-                st = section_timing(traj, a, b, ctx.corridor)
+                st = section_timing(traj, a, b, ctx.corridor, accel_ref=ctx.accel_ref(cid))
                 if st.status != "ok":
                     continue
                 ck = {c["name"]: c["value"] for c in st.checks}

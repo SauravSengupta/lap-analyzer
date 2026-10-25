@@ -298,3 +298,16 @@ def test_clean_laps_cap_uses_hash_order_across_sessions(sample_data_root):
     capped = [(s, lap) for s, lap, _ in vc.clean_laps(ctx, sids, max_laps=2)]
     assert len(every) >= 2
     assert capped == sorted(every, key=lambda x: vc.lap_hash(*x))[:2]
+
+
+def test_trackctx_carries_track_def_and_per_corner_accel_reference():
+    # SPEC W3 amendment: the runners judge each corner against its own accel-speed
+    # reference, so TrackCtx carries the track definition and exposes accel_ref(cid)
+    # (None for a corner without an entry — G4 measures GPS-only tier A with these).
+    vc = _vc()
+    td = {"corners": [], "accel_speed_check": {
+        "provenance": "test", "corners": {"T1": {"offset_mps": -0.2, "tol_mps": 3.6, "n": 67}}}}
+    ctx = vc.TrackCtx(track="t", corridor=None, frame=None, bounds={}, track_def=td)
+    assert ctx.accel_ref("T1") == pytest.approx((-0.2, 3.6))
+    assert ctx.accel_ref("T2") is None
+    assert vc.TrackCtx(track="t", corridor=None, frame=None, bounds={}).accel_ref("T1") is None

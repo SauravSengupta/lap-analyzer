@@ -276,6 +276,8 @@ Signature: `(track_id: str) -> Track` (dataclass).
     anchors whose `corner_id` has no matching corner are dropped.
   - `reference_session_id`/`reference_lap` come from the JSON `reference_lap`
     block (`""`/`0` if absent).
+  - `accel_speed_check` is the JSON's top-level `accel_speed_check` block (the
+    per-corner accel-speed references, see `trajectory.section_timing`), None if absent.
 - Use the real `tracks/ridge.json` / `tracks/pir.json` (read via `tracks_dir()`,
   not `data/samples`).
 
@@ -546,6 +548,9 @@ and confidence come from ONE evidence pass (design R1). See `docs/GPS_TRUST.md`.
   timed where the lap's monotone `s_hat` crosses `dist_a`/`dist_b`. When `corridor`
   is `None` a `default_corridor` (flat ±env, zero κ, smoothed centerline field) is
   built from `centerline` — real callers pass the loaded per-track corridor.
+  span_time passes **no accel-speed reference** (`accel_ref=None`: a span is generally
+  not one named corner), so a GPS-only (`gps_backbone`) span is always unverified and
+  never reaches tier A / rank-eligible; OBD spans are unaffected.
 - **Invariants:**
   - **Always returns a row (design R10), never `None`.** A bound outside the lap's
     `s_hat` range → `status='no_coverage'`, `time_s` NaN, not rank-eligible.
@@ -562,7 +567,8 @@ and confidence come from ONE evidence pass (design R1). See `docs/GPS_TRUST.md`.
     interpolated at the OBD-distance bounds.
 
 `section_times` / `range_section_times` emit `section_time_s, sigma_t_s, status,
-driven_m, rank_eligible, checks_json` (one row per section, always — design R10).
+driven_m, rank_eligible, checks_json, gps_only` (one row per section, always — design R10).
+`gps_only` is provenance: True exactly when the lap's trajectory status is `gps_backbone`; False for OBD-backed laps and rows with no trajectory.
 
 ## analysis.section_range_bounds
 
@@ -737,6 +743,11 @@ corridor-weighted, slope-bounded smooth of the offset evidence
   On OBD laps the odometer speed is scaled by the lap's median GPS/OBD speed ratio
   (over samples where both speeds are finite and > 15 m/s; ≥ 50 such samples, else 1). `jump_gps_odo` is 1.0 on GPS-only laps
   (GPS speed as the distance source) and 0.0 otherwise.
+- **`long_g`** (W3 amendment, 2026-10-22): per time-sorted sample, the frame's `long_g`
+  column (phone longitudinal accel in g, + = accelerating), aligned with `t`; `None`
+  when the frame has no `long_g` column. Carried on every status (including prior-only
+  laps). Consumed by the section accel-speed check. The trajectory sample reader
+  (`analysis._read_traj_samples`) loads it, filling NaN when a parquet lacks it.
 
 ## trajectory.section_timing
 
@@ -780,8 +791,52 @@ on one lap's estimate, and reports honest per-section σ with three physical σ-
   - **speed-consistency tripwire:** `|time_s − obd_anchored_time|` vs
     `(|δ_a|+|δ_b|)/v̄ + 0.2s` — a **diagnostic** check record only, never inflates.
 - **Derived tiers (never stored booleans):** `A` if `sigma_s ≤ 0.10`, `B` if
-  `≤ 0.30`, else `C`. A `gps_backbone` trajectory caps at `B` (reserved §9.3).
+  `≤ 0.30`, else `C`. A `gps_backbone` (GPS-only) trajectory is tiered by its own σ like any other (W3, 2026-10; the former tier-B cap is retired — dropping OBD changes tier-A section times by a median 0.006 s). `SIGMA_FLOOR_GPS_M` is rule-derived and currently equals the OBD floor (1.0 m); tier A on a GPS-only section additionally requires the per-corner accel-speed check (`accel_speed_resid_mps`) and both σ-nets (driven-band, consistency) to pass — see the gps_backbone enforcement bullets below.
   `rank_eligible == (tier == 'A' and status == 'ok')`.
+- **Accel-speed check (W3 amendment, 2026-10-22):** `resid = Δv_backbone − ∫long_g·g dt`
+  over `[t_a, t_b]` (m/s; Δv from `v_at`, trapezoid over finite `long_g` samples with
+  interpolated end points). NaN when `long_g` is None, the window has < 2 samples, or
+  fewer than `ACCEL_MIN_COVERAGE` of its samples have finite `long_g` (NaN is never
+  filled with 0). The reference is **per corner** (user decision 2026-10-24 — clean
+  residuals carry grade-like per-corner offsets and very different spreads, so one
+  pooled tolerance let the PIR T1 fake through): `section_timing(..., accel_ref=(offset_mps,
+  tol_mps))`. The record `accel_speed_resid_mps` is ALWAYS emitted with value = the
+  **centred** resid `resid − offset`, threshold = `tol`, and an extra field `raw` = the
+  uncentred resid; pass = finite and `|resid − offset| ≤ tol`. So a constant
+  inconsistency equal to the corner's offset is that corner's normal and passes.
+  **`accel_ref=None`** (no reference: a multi-corner range, or a corner missing from the
+  table) → unevaluable: value = raw resid, threshold NaN, pass False on `gps_backbone`
+  laps (unverified → tier A withheld), True on OBD laps.
+  **Enforced only on `gps_backbone` laps** (GPS speed is their odometer, so no other net
+  has an independent sensor): a failing, NaN or unreferenced check withholds tier A (A → B;
+  σ, value and B/C unchanged), so the row is not rank-eligible. On OBD laps it is
+  diagnostic only (tier and σ are never changed).
+- **gps_backbone enforcement of the σ-nets (W3 amendment 16d, user decision 2026-10-25):**
+  on a `gps_backbone` lap the backbone odometer IS integrated GPS speed, so a failed
+  driven-band (`driven_band_dev_m`) or consistency (`consistency_resid_m`) net means the
+  GPS geometry disagrees with itself and nothing independent vouches for the time; the
+  nets' σ-inflation alone can still leave a tier-A σ. So tier A is withheld (A → B; σ,
+  value and the check records unchanged) when **any** of accel-speed, driven-band or
+  consistency fails: `gps_only and tier == 'A' and not (accel_ok and band_ok and
+  consis_ok) → 'B'`. An unevaluable consistency resid (NaN, recorded `pass=True`) does
+  NOT withhold — only the accel check has "unevaluable ⇒ withhold". The
+  speed-consistency tripwire is never enforced. On OBD (`ok`) laps the nets remain
+  σ-inflation only: `tier == _tier(sigma_s)`.
+  - **Where the table lives:** `tracks/{track}.json` top-level `accel_speed_check` =
+    `{provenance, corners: {corner_id: {offset_mps, tol_mps, n}}}`.
+    `trajectory.accel_ref_for(track_def, corner_id)` reads it from an already-loaded
+    dict (no I/O) → `(offset_mps, tol_mps)`, or None when the block/corner is absent.
+    Callers pass it wherever the section is ONE named corner: `labeler` transits
+    (`Track.accel_speed_check`), `analysis.section_times` (per corner),
+    `range_section_times` (the corner's reference for a single-corner range, None for a
+    multi-corner range — GPS-only laps cannot reach tier A on custom ranges), and the
+    `scripts/validation_checks.py` runners (`TrackCtx.accel_ref`).
+  - **How it is derived** (`scripts/derive_accel_speed_tol.py [--write]`): over the
+    status-ok sections of the GPS-only emulation of clean calibration-split OBD laps,
+    reading `raw` from `section_timing(...)` called with no reference, per (track,
+    corner): offset = median(resid) (0.01 m/s), tol = p99 |resid − offset| rounded UP to
+    0.1 m/s, n; corners with n < 20 get no entry. `--write` splices only that block into
+    the track JSON (every other byte unchanged).
 - **Structured checks (R12):** every row carries records `{name, value, threshold,
   pass}` for at least the driven-band, consistency, and speed-consistency nets, so a
   post-mortem can read *why* a row is/ isn't rankable straight from the object.

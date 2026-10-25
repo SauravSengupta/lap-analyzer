@@ -383,7 +383,7 @@ def test_span_time_immune_to_lateral_line_offset(make_lap_samples):
 
 _SECTION_SCHEMA = [
     "session_id", "lap", "corner_id", "section_time_s", "sigma_t_s", "status",
-    "driven_m", "rank_eligible", "checks_json"]
+    "driven_m", "rank_eligible", "checks_json", "gps_only"]
 _RANGE_SCHEMA = [c for c in _SECTION_SCHEMA if c != "corner_id"]
 
 
@@ -397,6 +397,7 @@ def test_section_times_new_schema_always_emits(sample_data_root):
     assert list(df.columns) == _SECTION_SCHEMA
     assert set(df["status"]) <= {"ok", "no_coverage", "rescale_invalid"}
     assert df["rank_eligible"].dtype == bool
+    assert df["gps_only"].dtype == bool
     assert set(df["corner_id"]) == {c["id"] for c in td["corners"]}
     ok = df[df["status"] == "ok"]
     assert ok["section_time_s"].notna().all() and (ok["sigma_t_s"] >= 0).all()
@@ -413,6 +414,49 @@ def test_range_section_times_new_schema(sample_data_root):
     assert set(df["status"]) <= {"ok", "no_coverage", "rescale_invalid"}
     assert (df[df["status"] == "ok"]["section_time_s"] > 0).all()
     assert df["session_id"].nunique() >= 2
+
+
+def test_section_row_gps_only_provenance(monkeypatch):
+    # SPEC: section rows carry provenance — gps_only is True exactly for a
+    # 'gps_backbone' trajectory; OBD-backed and no-trajectory rows are False.
+    from types import SimpleNamespace
+
+    import lap_analyzer.trajectory as T
+    from lap_analyzer.analysis import _section_row
+    fake = SimpleNamespace(time_s=4.0, sigma_s=0.05, status="ok", driven_m=100.0,
+                           rank_eligible=True, checks=[])
+    monkeypatch.setattr(T, "section_timing", lambda *a, **k: fake)
+    assert _section_row(SimpleNamespace(status="gps_backbone"), None, 0.0, 100.0)[-1] is True
+    assert _section_row(SimpleNamespace(status="ok"), None, 0.0, 100.0)[-1] is False
+    assert _section_row(None, None, 0.0, 100.0)[-1] is False
+
+
+def _accel_thresholds(df) -> set:
+    out = set()
+    for cj in df["checks_json"]:
+        for c in json.loads(cj):
+            if c["name"] == "accel_speed_resid_mps":
+                out.add("nan" if c["threshold"] != c["threshold"] else c["threshold"])
+    return out
+
+
+def test_section_times_pass_each_corners_accel_reference(sample_data_root):
+    # SPEC (W3 amendment): section_times judges each corner against ITS reference from
+    # the track's accel_speed_check table; a corner without an entry has no reference
+    # (threshold NaN). range_section_times passes the corner's reference for a
+    # single-corner range and none for a multi-corner range.
+    from lap_analyzer.analysis import range_section_times, section_times
+    td = _ridge_track_def()
+    td["accel_speed_check"] = {"provenance": "test",
+                               "corners": {"T6": {"offset_mps": 0.5, "tol_mps": 7.7, "n": 50}}}
+    df = section_times("ridge", td)
+    ok = df[df["status"] != "no_coverage"]
+    assert _accel_thresholds(ok[ok["corner_id"] == "T6"]) == {7.7}
+    assert _accel_thresholds(ok[ok["corner_id"] == "T7"]) == {"nan"}
+    one = range_section_times("ridge", td, "T6", "T6")
+    assert _accel_thresholds(one[one["status"] != "no_coverage"]) == {7.7}
+    multi = range_section_times("ridge", td, "T6", "T7")
+    assert _accel_thresholds(multi[multi["status"] != "no_coverage"]) == {"nan"}
 
 
 # ---------------------------------------------------------------------------
@@ -695,3 +739,22 @@ def test_lap_index_with_track_joins_lap_time_and_clean(sample_data_root, ridge_c
     idx = lap_index(ridge_corpus, track="ridge")
     assert "lap_time_s" in idx.columns
     assert "is_clean" in idx.columns
+
+
+def test_read_traj_samples_carries_long_g_and_fills_nan_when_absent(tmp_path):
+    # SPEC (W3 amendment): the trajectory sample reader feeds long_g to the estimator
+    # (accel-speed check); a parquet without it gets an all-NaN column (unevaluable,
+    # never a fabricated 0 g).
+    from lap_analyzer.analysis import _read_traj_samples
+    n = 5
+    base = pd.DataFrame({"lap": 1, "t": np.arange(n) * 0.1, "track_dist_m": np.arange(n) * 4.0,
+                         "dist_lap_m": np.arange(n) * 4.0, "lat": 45.0, "long": -122.0,
+                         "lat_g": 0.0, "speed_mph": 80.0, "speed_mph_gps": 80.0})
+    with_lg = tmp_path / "a.parquet"
+    base.assign(long_g=np.linspace(-1, 1, n)).to_parquet(with_lg)
+    s = _read_traj_samples(with_lg)
+    assert np.allclose(s["long_g"].to_numpy(), np.linspace(-1, 1, n))
+    without = tmp_path / "b.parquet"
+    base.to_parquet(without)
+    s2 = _read_traj_samples(without)
+    assert "long_g" in s2.columns and s2["long_g"].isna().all()

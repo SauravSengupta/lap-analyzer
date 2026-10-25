@@ -337,7 +337,9 @@ SLOPE_BOUND_FLOOR = 0.10     # 2026-07-11, straight-line offset-slope floor (pla
 SLOPE_BOUND_CAP = 0.80       # 2026-07-11, max plausible offset slope (prototype)
 SIGMA_FIT_CAP_M = 15.0       # 2026-07-11, cap on SE_fit before combining (prototype)
 SIGMA_FLOOR_OBD_M = 1.0      # 2026-07-11, σ floor with OBD backbone (design §Uncertainty)
-SIGMA_FLOOR_GPS_M = 3.0      # 2026-07-11, σ floor on GPS-only backbone (design §Architecture)
+# SIGMA_FLOOR_GPS_M: 2026-07-11 value 3.0 (design §Architecture). W3 rule: smallest floor in a 0.5 m grid
+# from 1.0 m (= the OBD floor; the grid does not go below it) with GPS-only emulation ≥95% within 2σ.
+SIGMA_FLOOR_GPS_M = 1.0      # 2026-10-20, smallest floor with GPS-only emulation ≥95% within 2σ (calibration split, 2244 transits, 0.998; W3)
 
 # --- jump detector (W1, spec 2026-10-10 sensor-fusion rethink) ----------------
 # A fix whose residual vs the odometer + lat_g path shape (gps_consistency) exceeds
@@ -379,6 +381,19 @@ CONSISTENCY_STD_M = 5.1  # 2026-10-17, 1.4826·MAD consistency resid, 2572 clean
 SPEED_CONSIST_TOL_S = 0.2     # 2026-07-11, speed-consistency slack (design tripwire)
 TIER_A_S = 0.10              # 2026-07-11, rankable σ_t ceiling (PROVISIONAL until R7, §9.1)
 TIER_B_S = 0.30             # 2026-07-11, shown-shaded σ_t ceiling (PROVISIONAL until R7, §9.1)
+# accel-speed check (W3 amendment, user decision 2026-10-22): on a GPS-only lap the
+# backbone odometer IS GPS speed, so no σ-net has an independent sensor. Compare the
+# backbone speed change across a section with ∫long_g·g dt; a gps_backbone section that
+# disagrees by more than the tolerance (or cannot be checked) is withheld from tier A.
+# Diagnostic only on OBD laps. The reference is PER CORNER (user decision 2026-10-24:
+# clean residuals carry grade-like per-corner offsets and 10× different spreads, so one
+# pooled tolerance let the PIR T1 fake through). Each corner's (offset_mps, tol_mps) lives
+# in tracks/{track}.json `accel_speed_check.corners` — offset = median resid, tol = p99
+# |resid − offset| rounded up to 0.1 m/s, on the GPS-only emulation of clean
+# calibration-split OBD laps (scripts/derive_accel_speed_tol.py --write). Read with
+# accel_ref_for(); no reference → the check is unverified.
+ACCEL_MIN_COVERAGE = 0.9     # 2026-10-22, min finite-long_g share of samples in [t_a, t_b] to evaluate the check
+G_MPS2 = 9.80665             # standard gravity (exact), long_g [g] → m/s²
 
 
 @dataclass
@@ -398,6 +413,7 @@ class Trajectory:
     e_lat: np.ndarray | None = None  # drift-corrected signed lateral offset per sample
     checks: list = field(default_factory=list)  # structured audit records (R12)
     jump_fix: np.ndarray | None = None  # per sample: True at each fix flagged by the jump detector (W1); None = not run
+    long_g: np.ndarray | None = None  # per-sample longitudinal accel (g, + = accelerating), aligned with t; None = no column
 
     def time_at(self, s: float):
         """(t, sigma_t) at ruler position s, or None if s is outside the lap's
@@ -472,6 +488,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     dl = g["dist_lap_m"].to_numpy(dtype=float)
     td = g["track_dist_m"].to_numpy(dtype=float)
     checks = []
+    long_g = g["long_g"].to_numpy(dtype=float) if "long_g" in g.columns else None
 
     obd = g["speed_mph"].to_numpy(dtype=float)
     has_obd = bool(np.isfinite(obd).any())
@@ -483,7 +500,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     e_lat_all = _lap_lateral_offset(g, corridor, frame, td)
     # GPS-only laps (no OBD): dist_lap_m is already integrated from speed_mph_gps by
     # normalize, so it is a valid backbone — but the lap rides on GPS alone, so it
-    # carries status='gps_backbone' and the wider GPS σ floor throughout (plan §4.1).
+    # carries status='gps_backbone' and the rule-derived GPS σ floor (== OBD's today) throughout (plan §4.1).
     backbone_status = "gps_backbone" if not has_obd else "ok"
     sigma_floor = SIGMA_FLOOR_GPS_M if not has_obd else SIGMA_FLOOR_OBD_M
 
@@ -495,7 +512,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     if abs(med_delta) > RESCALE_INVALID_M or not np.isfinite(med_delta):
         checks.append(_check("rescale_median_delta", med_delta, RESCALE_INVALID_M, False))
         return _prior_only_trajectory(t, dl, v, "rescale_invalid", corridor, checks,
-                                      e_lat=e_lat_all)
+                                      e_lat=e_lat_all, long_g=long_g)
 
     # --- Step 1: evidence extraction (fresh → snap-mask → Hampel) ---
     fresh = np.ones(n, bool)
@@ -535,7 +552,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     if not ev.any():
         return _prior_only_trajectory(t, dl, v, backbone_status, corridor, checks,
                                       sigma_floor=sigma_floor, e_lat=e_lat_all,
-                                      jump_fix=jump_fix)
+                                      jump_fix=jump_fix, long_g=long_g)
 
     # --- Step 2: corridor weighting (the Mode-4 discriminator) ---
     e_lat = e_lat_all
@@ -548,7 +565,8 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     knots = np.arange(dl.min(), dl.max(), KNOT_SPACING_M)
     if len(knots) < 2:
         return _prior_only_trajectory(t, dl, v, backbone_status, corridor, checks,
-                                      sigma_floor=sigma_floor, jump_fix=jump_fix)
+                                      sigma_floor=sigma_floor, jump_fix=jump_fix,
+                                      long_g=long_g)
     dh, se, _neff = _knot_fit(dl[ev], delta[ev], w_env[ev], knots)
     slope_bound = _slope_bound(knots, dl, v, g["lat_g"].to_numpy(dtype=float), corridor, td)
     dh, clip_mag = _rate_limit(dh, slope_bound, knots)
@@ -560,11 +578,13 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     s_hat = np.maximum.accumulate(dl + d_smp)
     return Trajectory(t=t, s_hat=s_hat, sigma_m=np.interp(dl, knots, sig), delta_hat=d_smp,
                       dl=dl, v=v, evidence=ev, status=backbone_status, knots=knots,
-                      knot_sigma=sig, e_lat=e_lat_all, checks=checks, jump_fix=jump_fix)
+                      knot_sigma=sig, e_lat=e_lat_all, checks=checks, jump_fix=jump_fix,
+                      long_g=long_g)
 
 
 def _prior_only_trajectory(t, dl, v, status, corridor, checks,
-                           sigma_floor=SIGMA_FLOOR_OBD_M, e_lat=None, jump_fix=None):
+                           sigma_floor=SIGMA_FLOOR_OBD_M, e_lat=None, jump_fix=None,
+                           long_g=None):
     """δ̂ ≡ 0 (OBD/GPS backbone), σ = the tapered δ=0 prior — reproduces the
     OBD-anchored fallback in the zero-GPS-evidence limit (design R6)."""
     dl = dl.astype(float)
@@ -574,7 +594,8 @@ def _prior_only_trajectory(t, dl, v, status, corridor, checks,
     return Trajectory(t=t, s_hat=s_hat, sigma_m=np.interp(dl, knots, sig),
                       delta_hat=np.zeros(len(dl)), dl=dl, v=v,
                       evidence=np.zeros(len(dl), bool), status=status, knots=knots,
-                      knot_sigma=sig, e_lat=e_lat, checks=checks, jump_fix=jump_fix)
+                      knot_sigma=sig, e_lat=e_lat, checks=checks, jump_fix=jump_fix,
+                      long_g=long_g)
 
 
 def _lap_lateral_offset(g: pd.DataFrame, corridor: Corridor, frame: TrackFrame,
@@ -696,7 +717,8 @@ def _prior_blend(dh, sig, knots):
 class SectionTiming:
     """One (lap, section) timing row — ALWAYS emitted (design R10). Value and
     confidence come from the SAME trajectory pass (R1); the three σ-nets inflate
-    σ, they never reject."""
+    σ, they never reject. On a gps_backbone lap a failed net or accel-speed check
+    also withholds tier A (σ unchanged)."""
 
     time_s: float               # t_b − t_a (NaN if no_coverage)
     sigma_s: float              # correlation-aware 1σ in seconds, after the σ-nets
@@ -704,15 +726,32 @@ class SectionTiming:
     t_b: float
     driven_m: float             # odometer distance between the posterior crossings
     status: str                 # 'ok' | 'no_coverage' | 'rescale_invalid'
-    tier: str                   # 'A' | 'B' | 'C' (derived from sigma_s)
+    tier: str                   # 'A' | 'B' | 'C' (from sigma_s; gps_backbone A→B on a failed check)
     rank_eligible: bool         # tier == 'A' and status == 'ok'
     checks: list = field(default_factory=list)  # structured audit records (R12)
 
 
-def _tier(sigma_s: float, cap_b: bool = False) -> str:
+# Which R12 check records bear on a section's verdict (for consumers that EXPLAIN a
+# verdict — never to re-derive it). OBD laps: the two σ-nets (they inflate σ); the
+# accel-speed check and the speed-consistency tripwire are diagnostic. gps_backbone
+# laps: the σ-nets AND the accel-speed check, any failure withholding tier A (see
+# section_timing); the tripwire is still diagnostic.
+OBD_VERDICT_CHECKS = ("driven_band_dev_m", "consistency_resid_m")
+GPS_VERDICT_CHECKS = OBD_VERDICT_CHECKS + ("accel_speed_resid_mps",)
+
+
+def failed_verdict_checks(checks: list, gps_only: bool) -> list:
+    """The failed check records (in emitted order) that actually affected this row's
+    verdict: diagnostic-only checks for the lap's provenance are dropped. Pure."""
+    counted = GPS_VERDICT_CHECKS if gps_only else OBD_VERDICT_CHECKS
+    return [c for c in (checks or [])
+            if c.get("name") in counted and not c.get("pass", True)]
+
+
+def _tier(sigma_s: float) -> str:
     if not np.isfinite(sigma_s):
         return "C"
-    if sigma_s <= TIER_A_S and not cap_b:
+    if sigma_s <= TIER_A_S:
         return "A"
     if sigma_s <= TIER_B_S:
         return "B"
@@ -748,13 +787,54 @@ def _consistency_resid(traj: Trajectory, corridor: Corridor, a: float, b: float,
     return driven - predicted
 
 
+def _accel_speed_resid(traj: Trajectory, t_a: float, t_b: float) -> float:
+    """resid = Δv_backbone − ∫long_g·g dt over [t_a, t_b] (m/s). On a gps_backbone lap
+    Δv_backbone is GPS speed, so this is the only independent-sensor check it has.
+    NaN when there is no long_g, the window holds < 2 samples, or fewer than
+    ACCEL_MIN_COVERAGE of its samples have finite long_g. Integrates over finite
+    samples only (NaN is never filled with 0); end points are linearly interpolated."""
+    lg = traj.long_g
+    if lg is None or not (t_b > t_a):
+        return np.nan
+    lg = np.asarray(lg, dtype=float)
+    t = traj.t
+    inside = (t >= t_a) & (t <= t_b)
+    n_in = int(inside.sum())
+    if n_in < 2:
+        return np.nan
+    fin = np.isfinite(lg)
+    if (fin & inside).sum() / n_in < ACCEL_MIN_COVERAGE:
+        return np.nan
+    tf, af = t[fin], lg[fin]
+    m = (tf > t_a) & (tf < t_b)
+    tt = np.concatenate([[t_a], tf[m], [t_b]])
+    aa = np.concatenate([[np.interp(t_a, tf, af)], af[m], [np.interp(t_b, tf, af)]])
+    dv_accel = float(np.sum(0.5 * (aa[1:] + aa[:-1]) * np.diff(tt))) * G_MPS2
+    return (traj.v_at(t_b) - traj.v_at(t_a)) - dv_accel
+
+
+def accel_ref_for(track_def: dict, corner_id: str) -> tuple[float, float] | None:
+    """The corner's accel-speed reference (offset_mps, tol_mps) from an already-loaded
+    track definition's `accel_speed_check.corners` table; None when the block or the
+    corner is absent. No I/O."""
+    ent = ((track_def or {}).get("accel_speed_check") or {}).get("corners", {}).get(corner_id)
+    if not ent:
+        return None
+    return float(ent["offset_mps"]), float(ent["tol_mps"])
+
+
 def section_timing(traj: Trajectory, dist_a: float, dist_b: float,
-                   corridor: Corridor) -> SectionTiming:
+                   corridor: Corridor,
+                   accel_ref: tuple[float, float] | None = None) -> SectionTiming:
     """Time the section [dist_a, dist_b] on one lap's estimate; ALWAYS emit a row.
 
     The value (t at the monotone s_hat crossings) and its σ come from the same pass
     (R1). σ is correlation-aware, then inflated (never rejected) by the driven-band
     and line-length-consistency nets; the speed-consistency tripwire is diagnostic.
+    On a gps_backbone lap a failed net or accel-speed check also withholds tier A.
+    `accel_ref` = the section's (offset_mps, tol_mps) accel-speed reference
+    (accel_ref_for, for a single named corner); None = no reference, so a GPS-only
+    lap cannot be verified and is withheld from tier A.
     Design: docs/…/trajectory-design.md §Section timing; SPEC tests/SPEC.md.
     """
     s, t = traj.s_hat, traj.t
@@ -811,8 +891,38 @@ def section_timing(traj: Trajectory, dist_a: float, dist_b: float,
     checks.append(_check("speed_consistency_s", time_s - obd_time, tol,
                          abs(time_s - obd_time) <= tol))
 
+    # --- accel-speed check (W3 amendment): Δv_backbone vs ∫long_g. ALWAYS recorded;
+    # ENFORCED only on gps_backbone laps (no independent speed sensor), where a failed
+    # or unevaluable check withholds tier A (A → B; σ untouched). Diagnostic on OBD laps.
+    # The value is centred on the corner's reference offset; `raw` keeps the uncentred
+    # resid (what the derivation reads). No reference → unevaluable (threshold NaN).
+    gps_only = traj.status == "gps_backbone"
+    a_resid = _accel_speed_resid(traj, t_a, t_b)
+    if accel_ref is None:
+        a_val, a_tol = a_resid, np.nan
+        accel_ok = not gps_only
+    else:
+        a_val, a_tol = a_resid - float(accel_ref[0]), float(accel_ref[1])
+        accel_ok = (abs(a_val) <= a_tol) if np.isfinite(a_val) else not gps_only
+    rec = _check("accel_speed_resid_mps", a_val, a_tol, accel_ok)
+    rec["raw"] = round(float(a_resid), 3)
+    checks.append(rec)
+
+    # --- gps_backbone enforcement (W3 amendments 16b–16d): withhold tier A (A → B; σ and
+    # value untouched) when ANY of accel-speed, driven-band or consistency fails. On a
+    # gps_backbone lap the odometer IS integrated GPS speed, so a failed driven-band or
+    # consistency net is GPS disagreeing with itself — no independent sensor vouches for
+    # the time, and the nets' σ-inflation alone can still leave a tight (tier-A) σ. On
+    # OBD laps the nets stay σ-inflation only (the odometer is independent of GPS) and
+    # the accel check is diagnostic. An unevaluable consistency resid (NaN, recorded
+    # pass) does NOT withhold; only the accel check has "unevaluable ⇒ withhold". The
+    # speed-consistency tripwire is never enforced.
+    band_ok = next(c["pass"] for c in checks if c["name"] == "driven_band_dev_m")
+    consis_ok = next(c["pass"] for c in checks if c["name"] == "consistency_resid_m")
     status = "rescale_invalid" if traj.status == "rescale_invalid" else "ok"
-    tier = _tier(sigma_s, cap_b=(traj.status == "gps_backbone"))
+    tier = _tier(sigma_s)
+    if gps_only and tier == "A" and not (accel_ok and band_ok and consis_ok):
+        tier = "B"
     rank_eligible = (tier == "A") and (status == "ok")
     return SectionTiming(time_s, sigma_s, t_a, t_b, driven, status, tier,
                          rank_eligible, checks)
