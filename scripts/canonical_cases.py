@@ -19,7 +19,7 @@ from lap_analyzer.analysis import load_centerline, load_samples, section_bounds
 from lap_analyzer.config import sessions_dir
 from lap_analyzer.gates import TrackFrame
 from lap_analyzer.trajectory import (
-    accel_ref_for, estimate_trajectory, load_corridor, section_timing,
+    accel_ref_for, estimate_trajectory, fit_accel_calibration, load_corridor, section_timing,
 )
 
 CORR = load_corridor("ridge")
@@ -41,14 +41,27 @@ CASES = [
 ]
 
 
+def _session_trajs(s) -> dict:
+    """{lap: Trajectory} for every lap of a session (degenerate laps skipped)."""
+    out = {}
+    for lap, g in s.groupby("lap"):
+        if len(g) < 2:
+            continue
+        try:
+            out[int(lap)] = estimate_trajectory(g, CORR, FRAME)
+        except Exception:
+            continue
+    return out
+
+
 def _time_one(sid: str, lap: int, corner: str):
     s = load_samples("ridge", sid)
-    g = s[s["lap"] == lap]
-    if g.empty:
+    trajs = _session_trajs(s)
+    if lap not in trajs:
         return None
-    traj = estimate_trajectory(g, CORR, FRAME)
     a, b = BOUNDS[corner]
-    return section_timing(traj, a, b, CORR, accel_ref=accel_ref_for(TDEF, corner))
+    return section_timing(trajs[lap], a, b, CORR, accel_ref=accel_ref_for(TDEF, corner),
+                          accel_cal=fit_accel_calibration(list(trajs.values()), TDEF))
 
 
 def _check_tier(pred: str, st) -> bool:
@@ -97,12 +110,14 @@ def t11_leaderboard():
             s = load_samples("ridge", sd.name)
         except Exception:
             continue
+        trajs = _session_trajs(s)
+        cal = fit_accel_calibration(list(trajs.values()), TDEF)
         for lap, g in s.groupby("lap"):
-            if len(g) < 100:
+            if len(g) < 100 or int(lap) not in trajs:
                 continue
             try:
-                traj = estimate_trajectory(g, CORR, FRAME)
-                st = section_timing(traj, a, b, CORR, accel_ref=accel_ref_for(TDEF, "T11"))
+                st = section_timing(trajs[int(lap)], a, b, CORR,
+                                    accel_ref=accel_ref_for(TDEF, "T11"), accel_cal=cal)
             except Exception:
                 continue
             if st.rank_eligible and np.isfinite(st.time_s):

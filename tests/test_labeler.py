@@ -823,14 +823,29 @@ def test_build_session_corners_passes_each_corners_accel_reference(sample_data_r
     laps = pd.read_csv(sessions_dir("ridge") / sid / "laps.csv")
     track = dataclasses.replace(load_track("ridge"), accel_speed_check={
         "provenance": "test", "corners": {"T6": {"offset_mps": 0.5, "tol_mps": 7.7, "n": 50}}})
-    seen = []
+    seen, cals, fitted = [], [], []
     real = trajectory.section_timing
+    real_fit = trajectory.fit_accel_calibration
 
-    def spy(traj, a, b, corridor, accel_ref=None):
+    def spy(traj, a, b, corridor, accel_ref=None, accel_cal=None):
         seen.append(((a, b), accel_ref))
-        return real(traj, a, b, corridor, accel_ref=accel_ref)
+        cals.append(accel_cal)
+        return real(traj, a, b, corridor, accel_ref=accel_ref, accel_cal=accel_cal)
+
+    def spy_fit(trajs, track_def):
+        trajs = list(trajs)
+        out = real_fit(trajs, track_def)
+        fitted.append((len(trajs), out))
+        return out
     monkeypatch.setattr(trajectory, "section_timing", spy)
+    monkeypatch.setattr(trajectory, "fit_accel_calibration", spy_fit)
     assert len(build_session_corners(s, laps, track, sid, "2026-05-17"))
+    # session calibration (2026-10-25): ONE fit per session, over every lap of it (not
+    # only the clean ones), and every transit is judged with that same calibration.
+    assert len(fitted) == 1
+    n_laps = int((s.groupby("lap").size() >= 50).sum())
+    assert fitted[0][0] == n_laps and n_laps > int(laps["is_clean"].astype(bool).sum())
+    assert all(c is fitted[0][1] for c in cals)
     from lap_analyzer.analysis import section_bounds
     sb = section_bounds({"corners": [{"id": c.id, "start_m": c.start_m, "end_m": c.end_m}
                                      for c in track.corners],

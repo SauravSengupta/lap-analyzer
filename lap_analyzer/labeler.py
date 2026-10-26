@@ -454,7 +454,7 @@ def build_session_corners(
     loaded on demand from the track here when omitted (single-session use / tests)."""
     from .analysis import load_centerline, section_bounds
     from .gates import TrackFrame
-    from .trajectory import accel_ref_for, section_timing
+    from .trajectory import accel_ref_for, fit_accel_calibration, section_timing
     if corridor is None or frame is None:
         from .analysis import _load_or_build_corridor
         if corridor is None:
@@ -472,13 +472,26 @@ def build_session_corners(
     }
     sec_bounds = section_bounds(track_def_lite)
     rows: list[dict] = []
+    # One trajectory per lap of the WHOLE session (clean or not): the session's
+    # accelerometer calibration is fitted over all of them (as analysis.section_times
+    # does), then only the clean laps emit transits.
     clean_laps = laps[laps["is_clean"].astype(bool)]
-    for _, lap in clean_laps.iterrows():
-        lap_num = int(lap["lap"])
-        lap_samples = samples[samples["lap"] == lap_num]
+    clean_nums = {int(n) for n in clean_laps["lap"]}
+    attached = {}
+    for lap_num, lap_samples in samples.groupby("lap"):
         if len(lap_samples) < 50:
             continue
-        lap_samples, traj = _attach_trajectory(lap_samples, corridor, frame)
+        try:
+            attached[int(lap_num)] = _attach_trajectory(lap_samples, corridor, frame)
+        except Exception:  # a degenerate non-clean lap only drops out of the fit
+            if int(lap_num) in clean_nums:
+                raise
+    accel_cal = fit_accel_calibration([tr for _, tr in attached.values()], track_def_lite)
+    for _, lap in clean_laps.iterrows():
+        lap_num = int(lap["lap"])
+        if lap_num not in attached:
+            continue
+        lap_samples, traj = attached[lap_num]
         # Drift columns were already computed in label_samples and written to samples.parquet.
         # Pull the per-lap values from any sample in this lap.
         first = lap_samples.iloc[0]
@@ -494,7 +507,8 @@ def build_session_corners(
             # the A-tier rank_eligible quality.py reuses for transit_reliable_traj.
             a, b = sec_bounds[corner.id]
             st = section_timing(traj, a, b, corridor,
-                                accel_ref=accel_ref_for(track_def_lite, corner.id))
+                                accel_ref=accel_ref_for(track_def_lite, corner.id),
+                                accel_cal=accel_cal)
             transit["section_sigma_t_s"] = round(st.sigma_s, 3) if np.isfinite(st.sigma_s) else np.nan
             transit["section_status"] = st.status
             transit["rank_eligible"] = bool(st.rank_eligible)

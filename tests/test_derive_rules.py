@@ -89,6 +89,47 @@ def test_corner_refs_centre_on_median_and_tol_is_ceil_p99_of_centred():
     assert refs[("t", "B")]["offset_mps"] == pytest.approx(-6.0, abs=0.1)
 
 
+def test_joint_refs_remove_per_session_mount_error_before_the_rule():
+    # Session-calibration rule (user decision 2026-10-25): offsets and per-session
+    # (b, ψ) fits are alternated to a fixed point, then the per-corner rule (median,
+    # ceil p99 of |centred|) runs on the CALIBRATED residuals of clean sections. With
+    # sessions whose phones are mounted differently, the raw rule would give wide
+    # tolerances; the joint rule recovers each corner's offset and a tolerance near the
+    # within-session noise. A session too short to fit contributes no references.
+    import pandas as pd
+
+    from lap_analyzer.trajectory import ACCEL_FIT_MIN_SECTIONS, G_MPS2
+    da = _da()
+    rng = np.random.default_rng(11)
+    corners = {f"T{i}": (rng.uniform(-5, 5), rng.uniform(4, 17), rng.uniform(-6, 6)) for i in range(8)}
+    rows = []
+    for k in range(25):
+        b, psi = rng.normal(0, 0.01), np.radians(rng.normal(0, 6))
+        for lap in range(4):
+            for cid, (off, T, L) in corners.items():
+                Tl, Ll = T * rng.uniform(0.95, 1.05), L * rng.uniform(0.9, 1.1)
+                r = off - G_MPS2 * (b * Tl + psi * Ll) + rng.normal(0, 0.3)
+                rows.append({"track": "t", "session_id": f"s{k}", "lap": lap, "corner_id": cid,
+                             "resid": r, "T": Tl, "ilat": Ll, "clean": True, "fit": True})
+    short = [{"track": "t", "session_id": "short", "lap": 0, "corner_id": cid, "resid": 50.0,
+              "T": T, "ilat": L, "clean": True, "fit": True}
+             for cid, (off, T, L) in list(corners.items())[:ACCEL_FIT_MIN_SECTIONS - 1]]
+    df = pd.DataFrame(rows + short, columns=da.COLS)
+    refs, dropped, cals, iters = da.joint_refs(df)
+    assert not dropped and iters < da.MAX_ITERS
+    assert cals[("t", "short")] is None                       # too short → no calibration
+    raw, _ = da.corner_refs(df[df["session_id"] != "short"])
+    for cid in corners:
+        r = refs[("t", cid)]
+        assert r["n"] == 25 * 4                               # the short session is not counted
+        assert r["tol_mps"] < 1.5                             # ≈ p99 of the 0.3 m/s noise
+        assert r["tol_mps"] < raw[("t", cid)]["tol_mps"]      # tighter than the raw rule
+    # per-session params are median-centred: the track-wide part sits in the offsets
+    fitted = [c for c in cals.values() if c is not None]
+    assert abs(np.median([c.b_g for c in fitted])) < 1e-9
+    assert abs(np.median([c.psi_rad for c in fitted])) < 1e-9
+
+
 def test_splice_accel_block_adds_or_replaces_only_that_key():
     # --write edits tracks/{track}.json surgically: the accel_speed_check block is added
     # (or replaced in place) and every other byte of the file is left as it was.

@@ -807,6 +807,27 @@ on one lap's estimate, and reports honest per-section σ with three physical σ-
   **`accel_ref=None`** (no reference: a multi-corner range, or a corner missing from the
   table) → unevaluable: value = raw resid, threshold NaN, pass False on `gps_backbone`
   laps (unverified → tier A withheld), True on OBD laps.
+  **Session accelerometer calibration (user decision 2026-10-25):** clean residuals are
+  96–99% between-session on the wide corners, explained by lat_g leaking into long_g (a
+  per-session phone yaw misalignment ψ) plus a long_g bias b. `section_timing(...,
+  accel_cal=AccelCalibration(b_g, psi_rad, n_sections))` compares the CORRECTED resid:
+  value = `resid − accel_correction(cal, T, ∫lat_g dt) − offset`, where
+  `accel_correction = −g·(b·T + ψ·∫lat_g dt)` over the section's `[t_a, t_b]` (T = t_b −
+  t_a; `∫lat_g` integrated like `long_g`, from `Trajectory.lat_g`). The record adds
+  `correction` (m/s, NaN when uncalibrated) and `calibrated` (bool). **`accel_cal=None`
+  with a reference** (the session was too short to calibrate) → unevaluable: value =
+  `raw − offset`, threshold = tol, `calibrated=False`, pass False on `gps_backbone` laps,
+  True on OBD laps — the references are derived on calibrated residuals, so an
+  uncalibrated comparison is never judged. `fit_accel_params(y, T, ∫lat_g)` is the
+  Huber-IRLS (`ACCEL_HUBER_K`) least-squares fit of `y = −g·(b·T + ψ·∫lat_g)`; None below
+  `ACCEL_FIT_MIN_SECTIONS` finite sections; one faulty section is not absorbed.
+  `fit_accel_calibration(trajs, track_def)` = that fit over EVERY referenced corner section
+  (`section_bounds`) of every lap of ONE session, `y = raw − offset`, skipping
+  `rescale_invalid` rulers; None without a reference table. Callers fit once per session
+  over all its laps (clean or not) and judge every section of it with that fit:
+  `labeler.build_session_corners`, `analysis.section_times` / `range_section_times`
+  (`_corpus_sessions`), `scripts/validation_checks.run_v3` (per session over the
+  population's laps), `scripts/canonical_cases.py`.
   **Enforced only on `gps_backbone` laps** (GPS speed is their odometer, so no other net
   has an independent sensor): a failing, NaN or unreferenced check withholds tier A (A → B;
   σ, value and B/C unchanged), so the row is not rank-eligible. On OBD laps it is
@@ -831,12 +852,16 @@ on one lap's estimate, and reports honest per-section σ with three physical σ-
     `range_section_times` (the corner's reference for a single-corner range, None for a
     multi-corner range — GPS-only laps cannot reach tier A on custom ranges), and the
     `scripts/validation_checks.py` runners (`TrackCtx.accel_ref`).
-  - **How it is derived** (`scripts/derive_accel_speed_tol.py [--write]`): over the
-    status-ok sections of the GPS-only emulation of clean calibration-split OBD laps,
-    reading `raw` from `section_timing(...)` called with no reference, per (track,
-    corner): offset = median(resid) (0.01 m/s), tol = p99 |resid − offset| rounded UP to
-    0.1 m/s, n; corners with n < 20 get no entry. `--write` splices only that block into
-    the track JSON (every other byte unchanged).
+  - **How it is derived** (`scripts/derive_accel_speed_tol.py [--write]`): on the
+    GPS-only emulation of the calibration-split sessions with clean OBD laps, reading
+    `raw` from `section_timing(...)` called with no reference. Every lap of such a session
+    (not `rescale_invalid`) feeds its session fit; only status-ok sections of clean laps
+    feed the references. `joint_refs` alternates to a fixed point (no offset moves more
+    than `CONVERGE_MPS`): fit each session against the current offsets, median-centre the
+    session (b, ψ) per track, recompute per (track, corner) offset = median(calibrated
+    resid) (0.01 m/s); then tol = p99 |calibrated − offset| rounded UP to 0.1 m/s, n;
+    corners with n < 20 get no entry; a session too short to fit contributes nothing.
+    `--write` splices only that block into the track JSON (every other byte unchanged).
 - **Structured checks (R12):** every row carries records `{name, value, threshold,
   pass}` for at least the driven-band, consistency, and speed-consistency nets, so a
   post-mortem can read *why* a row is/ isn't rankable straight from the object.

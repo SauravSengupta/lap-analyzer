@@ -291,7 +291,8 @@ def _section_time_help(sid_: str, lap_: int, corner: str) -> str | None:
 
 def _fmt_check(c: dict) -> str:
     """'name = value (vs threshold)'; a NaN threshold means the check had no reference,
-    a NaN value that it couldn't be evaluated (too little accelerometer data)."""
+    a NaN value that it couldn't be evaluated (too little accelerometer data), and
+    calibrated=False that the session was too short to calibrate the accelerometer."""
     thr = c.get("threshold")
     try:
         if not np.isfinite(float(c.get("value"))):
@@ -302,6 +303,8 @@ def _fmt_check(c: dict) -> str:
         has_ref = thr is not None and np.isfinite(float(thr))
     except (TypeError, ValueError):
         has_ref = False
+    if has_ref and c.get("calibrated") is False:
+        return f"{c['name']} unevaluable (session too short to calibrate the accelerometer)"
     return (f"{c['name']} = {c['value']} (vs {thr})" if has_ref
             else f"{c['name']} = {c['value']} (no reference for this corner)")
 

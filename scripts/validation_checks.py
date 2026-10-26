@@ -335,7 +335,7 @@ def run_v1(track: str, session_ids: list[str], grid_len_m: float = 4200.0) -> pd
 
 # --- V2 / V3 / V4 runners ------------------------------------------------------
 
-from lap_analyzer.trajectory import estimate_trajectory, section_timing  # noqa: E402
+from lap_analyzer.trajectory import estimate_trajectory, fit_accel_calibration, section_timing  # noqa: E402
 
 V2_KINDS = ("spike", "burst", "slow_drift")
 V2_MAGS_M = (5.0, 10.0, 15.0, 20.0, 30.0)
@@ -433,14 +433,20 @@ def run_v2(ctx, laps, ref, seed: int, trials_per_lap: int = 6,
 
 
 def run_v3(ctx, laps) -> pd.DataFrame:
+    """OBD vs GPS-only emulation of the same laps. The emulated laps' accelerometer
+    calibration is fitted per session over that session's laps in `laps` (as production
+    fits over a session's laps)."""
     out = []
-    for sid, lap, g in laps:
-        t_o = estimate_trajectory(g, ctx.corridor, ctx.frame)
-        t_g = estimate_trajectory(gps_only_emulation(g), ctx.corridor, ctx.frame)
+    built = [(sid, lap, estimate_trajectory(g, ctx.corridor, ctx.frame),
+              estimate_trajectory(gps_only_emulation(g), ctx.corridor, ctx.frame))
+             for sid, lap, g in laps]
+    cals = {sid: fit_accel_calibration([b[3] for b in built if b[0] == sid], ctx.track_def or {})
+            for sid in {b[0] for b in built}}
+    for sid, lap, t_o, t_g in built:
         for cid, (a, b) in ctx.bounds.items():
             aref = ctx.accel_ref(cid)
             so = section_timing(t_o, a, b, ctx.corridor, accel_ref=aref)
-            sg = section_timing(t_g, a, b, ctx.corridor, accel_ref=aref)
+            sg = section_timing(t_g, a, b, ctx.corridor, accel_ref=aref, accel_cal=cals[sid])
             out.append(dict(track=ctx.track, session_id=sid, lap=lap, corner_id=cid,
                             t_obd=so.time_s, rank_obd=bool(so.rank_eligible),
                             t_gps=sg.time_s, sigma_gps=sg.sigma_s, rank_gps=bool(sg.rank_eligible)))
