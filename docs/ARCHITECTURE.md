@@ -407,6 +407,11 @@ accel-speed check and σ-nets pass (on a GPS-only lap the odometer is GPS speed,
 failed net withholds tier A instead of only inflating σ). An independent validation
 harness (`scripts/trust_validation.py`: Accel-Z road-profile ruler, planted faults,
 GPS-only emulation, odometer-only times) scores every change on held-out sessions.
+The GPS-only accel-speed check is calibrated per session (2026-10-25): each session
+fits its phone's long_g bias and yaw misalignment (lat_g leaking into long_g) from its
+own sections, so the check compares the corrected residual against per-corner
+tolerances of 1.6–5.0 m/s instead of up to 31.7 (docs/GPS_TRUST.md). This recalibrates
+a sensor; it reconstructs nothing.
 
 **Why not one fused estimator.** Measured before deciding: along-track GPS error is
 ~2–4 m against 9–15 m of driver brake-point scatter; OBD contributes ~0.006 s to 8 Hz

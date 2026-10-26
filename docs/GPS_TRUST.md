@@ -212,20 +212,38 @@ GPS-only accel-speed check (W3). Why: a confirmed fake on PIR 20260926-111509 L2
 GPS-only 4.307 s, tier A and corner-fastest. GPS speed said 116.6 to 83.7 mph while
 integrated long_g said 116.8 to 49.9 mph; on GPS-only laps the odometer is GPS speed,
 so no net had an independent sensor. The check, per section: backbone Δv minus
-∫long_g·g dt (`accel_speed_resid_mps`), centred on the corner's clean median, with the
-corner's p99 |centred| as tolerance, derived on GPS-only emulation of clean calibration
-OBD laps (2244 sections; `scripts/derive_accel_speed_tol.py`, references in
-`tracks/{track}.json` `accel_speed_check`). Tolerances run from 2.4 to 31.7 m/s: strong
-on low-noise corners (PIR T1 3.9, T8 3.3, T10 3.0; Ridge T16 2.4), weak on high-noise
-ones (Ridge T6 31.7, PIR T12 20.8). The fake now measures 15.2 m/s centred against 3.9,
-so it is tier B. GPS-only sections with no reference (multi-corner ranges) or without
-accelerometer data do not reach tier A; OBD laps carry the record as a diagnostic only. The check
-is a speed check only: it catches GPS speed that disagrees with the accelerometer, not
-a correct-speed lap whose gate crossings are misplaced (that is the σ-nets' job, above).
-It is also weak where the tolerance is wide: 8 of 28 corners have tol ≥ 15 m/s (Ridge T6
-31.7, T8 21.1, T11 16.2, T12 15.9; PIR T12 20.8, T6 19.8, T4 18.7, T5 15.0), because the spread is
-accelerometer noise that varies between sessions (the effective sample size is the number
-of sessions, not sections). Per-session accelerometer calibration is the follow-up.
+∫long_g·g dt (`accel_speed_resid_mps`), minus the session's accelerometer correction
+(below), centred on the corner's clean median, with the corner's p99 |centred| as
+tolerance, derived on GPS-only emulation of clean calibration OBD laps (2244 sections;
+`scripts/derive_accel_speed_tol.py`, references in `tracks/{track}.json`
+`accel_speed_check`). GPS-only sections with no reference (multi-corner ranges), without
+accelerometer data, or in a session too short to calibrate do not reach tier A; OBD laps
+carry the record as a diagnostic only. The check is a speed check only: it catches GPS
+speed that disagrees with the accelerometer, not a correct-speed lap whose gate crossings
+are misplaced (that is the σ-nets' job, above).
+
+Per-session accelerometer calibration (2026-10-25). Why: with one reference per corner,
+8 of 28 corners had tolerance ≥ 15 m/s (Ridge T6 31.7, T8 21.1, T11 16.2, T12 15.9; PIR
+T12 20.8, T6 19.8, T4 18.7, T5 15.0), so the check was weak there. On those corners
+96–99% of the clean residual variance is between sessions (within-session p99 1.4–3.6
+m/s). Per session, section duration T alone explains 11–30% of the pattern across
+corners; T plus ∫lat_g dt explains 87–96%. So the error is mostly lateral G leaking into
+long_g (the phone's yaw misalignment, which changes with where it sits: glove box or
+mesh net), plus a small long_g bias. Each session fits resid − offset = −g·(b·T +
+ψ·∫lat_g dt) over all its sections (a 2-parameter Huber fit, from backbone speed and the
+accelerometer, no OBD) and the check compares the corrected residual. Fitted ψ spans
+about ±7° (sd) between sessions; b about 0.01 g. The references are re-derived by the
+same rule on corrected residuals (offsets and session fits alternated to a fixed point):
+tolerances now run from 1.6 to 5.0 m/s, none ≥ 15 (Ridge T6 31.7 → 3.0, T8 21.1 → 3.4,
+PIR T12 20.8 → 1.6). Held-out emulation exceeds its tolerance 2.2% of the time (3.3%
+before). A +10 m/s error planted on one section survives the session refit (median
+99.8%), and the PIR T1 fake still fails (14.3 m/s against 3.0). A rejected alternative:
+fitting ψ from lat_g vs long_g on straights needs two thresholds, and the result swings
+with them (tolerance median 3.5–11.3 m/s), so it would be a tuned constant. Open: real
+GPS-only sections exceed the new tolerances more often than the emulation does (about
+15% vs 2%, mostly within 1.4× the tolerance). There is no OBD to tell whether their GPS
+is worse or the emulation differs. Real GPS-only coverage (status-ok, in-memory rebuild):
+PIR 61.7% → 61.1% of 588, Ridge 83.6% → 80.3% of 304.
 
 Only tier-A (`rank_eligible`) transits win the "fastest through" benchmark — a
 Mode-3/4 or coarse-GPS lap has wide σ and is excluded (design R2: σ decides

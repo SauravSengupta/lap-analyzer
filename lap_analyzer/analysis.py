@@ -176,15 +176,29 @@ def _corpus_trajectories(track: str):
             yield sid_dir.name, int(lap_n), g, corridor, traj
 
 
-def _section_row(traj, corridor, a: float, b: float, accel_ref=None):
+def _corpus_sessions(track: str, track_def: dict):
+    """Yield (session_id, [(lap, lap_df, corridor, Trajectory|None)], AccelCalibration|None)
+    per session: the `_corpus_trajectories` laps grouped by session (they arrive in
+    session order) plus the session's accelerometer calibration fitted over ALL of its
+    laps (trajectory.fit_accel_calibration) — the same fit build_session_corners uses."""
+    from itertools import groupby
+
+    from .trajectory import fit_accel_calibration
+    for sid, items in groupby(_corpus_trajectories(track), key=lambda x: x[0]):
+        laps = [(lap_n, g, corridor, traj) for _, lap_n, g, corridor, traj in items]
+        yield sid, laps, fit_accel_calibration([x[3] for x in laps], track_def)
+
+
+def _section_row(traj, corridor, a: float, b: float, accel_ref=None, accel_cal=None):
     """(section_time_s, sigma_t_s, status, driven_m, rank_eligible, checks_json, gps_only)
     for one (lap, section) — ALWAYS a row (design R10). `accel_ref` is the section's
-    per-corner accel-speed reference (trajectory.accel_ref_for), None for none.
+    per-corner accel-speed reference (trajectory.accel_ref_for), None for none;
+    `accel_cal` the session's accelerometer calibration, None for none.
     `gps_only` is True when the lap's trajectory is the GPS-only backbone (provenance)."""
     from .trajectory import section_timing
     if traj is None:
         return (np.nan, np.nan, "no_coverage", np.nan, False, "[]", False)
-    st = section_timing(traj, a, b, corridor, accel_ref=accel_ref)
+    st = section_timing(traj, a, b, corridor, accel_ref=accel_ref, accel_cal=accel_cal)
     return (st.time_s, st.sigma_s, st.status, st.driven_m, bool(st.rank_eligible),
             json.dumps(st.checks), getattr(traj, "status", None) == "gps_backbone")
 
@@ -204,16 +218,19 @@ def section_times(
     session_id, lap, corner_id, section_time_s, sigma_t_s, status, driven_m,
     rank_eligible, checks_json (structured audit records, R12), gps_only (bool: the
     lap's trajectory is the GPS-only backbone; False when there is no trajectory). Each corner is judged
-    against its own accel-speed reference from `track_def` (accel_ref_for).
+    against its own accel-speed reference from `track_def` (accel_ref_for), after the
+    session's accelerometer calibration (fit over all the session's laps).
     """
     from .trajectory import accel_ref_for
     bounds = section_bounds(track_def, pre_m=pre_m, post_cap_m=post_cap_m)
     refs = {cid: accel_ref_for(track_def, cid) for cid in bounds}
     rows: list[tuple] = []
-    for sid, lap_n, g, corridor, traj in _corpus_trajectories(track):
-        for cid, (a, b) in bounds.items():
-            val, sig, status, driven, rank, checks, gps_only = _section_row(traj, corridor, a, b, refs[cid])
-            rows.append((sid, lap_n, cid, val, sig, status, driven, rank, checks, gps_only))
+    for sid, laps, cal in _corpus_sessions(track, track_def):
+        for lap_n, g, corridor, traj in laps:
+            for cid, (a, b) in bounds.items():
+                val, sig, status, driven, rank, checks, gps_only = _section_row(
+                    traj, corridor, a, b, refs[cid], cal)
+                rows.append((sid, lap_n, cid, val, sig, status, driven, rank, checks, gps_only))
     return pd.DataFrame(rows, columns=_SECTION_TIME_COLS)
 
 
@@ -408,9 +425,10 @@ def range_section_times(
     a, b = section_range_bounds(track_def, from_id, to_id, pre_m, post_cap_m)
     ref = accel_ref_for(track_def, from_id) if from_id == to_id else None
     rows: list[tuple] = []
-    for sid, lap_n, g, corridor, traj in _corpus_trajectories(track):
-        val, sig, status, driven, rank, checks, gps_only = _section_row(traj, corridor, a, b, ref)
-        rows.append((sid, lap_n, val, sig, status, driven, rank, checks, gps_only))
+    for sid, laps, cal in _corpus_sessions(track, track_def):
+        for lap_n, g, corridor, traj in laps:
+            val, sig, status, driven, rank, checks, gps_only = _section_row(traj, corridor, a, b, ref, cal)
+            rows.append((sid, lap_n, val, sig, status, driven, rank, checks, gps_only))
     return pd.DataFrame(rows, columns=_RANGE_TIME_COLS)
 
 

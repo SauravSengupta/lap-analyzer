@@ -278,86 +278,86 @@
     }
   ],
   "accel_speed_check": {
-    "provenance": "2026-10-24, per-corner median + p99 |centred| of accel_speed_resid_mps on GPS-only emulation of clean calibration OBD laps (W3 amendment)",
+    "provenance": "2026-10-26, per-corner median + p99 |centred| of session-calibrated accel_speed_resid_mps on GPS-only emulation of clean calibration OBD laps (W3 amendment + per-session accelerometer calibration)",
     "corners": {
       "T1": {
-        "offset_mps": 0.58,
-        "tol_mps": 6.1,
+        "offset_mps": 0.78,
+        "tol_mps": 1.9,
         "n": 90
       },
       "T10": {
-        "offset_mps": -1.7,
-        "tol_mps": 7.3,
+        "offset_mps": -1.72,
+        "tol_mps": 2.9,
         "n": 90
       },
       "T11": {
-        "offset_mps": -0.37,
-        "tol_mps": 16.2,
+        "offset_mps": 0.44,
+        "tol_mps": 2.7,
         "n": 90
       },
       "T12": {
-        "offset_mps": -1.17,
-        "tol_mps": 15.9,
+        "offset_mps": -1.86,
+        "tol_mps": 1.7,
         "n": 90
       },
       "T13": {
-        "offset_mps": 4.62,
-        "tol_mps": 6.8,
+        "offset_mps": 5.03,
+        "tol_mps": 1.9,
         "n": 90
       },
       "T14": {
-        "offset_mps": 9.98,
-        "tol_mps": 4.2,
-        "n": 90
-      },
-      "T15": {
-        "offset_mps": 4.9,
-        "tol_mps": 11.7,
-        "n": 90
-      },
-      "T16": {
-        "offset_mps": 0.45,
-        "tol_mps": 2.4,
-        "n": 90
-      },
-      "T2": {
-        "offset_mps": -1.62,
-        "tol_mps": 13.4,
-        "n": 90
-      },
-      "T3": {
-        "offset_mps": -6.09,
+        "offset_mps": 9.74,
         "tol_mps": 3.3,
         "n": 90
       },
+      "T15": {
+        "offset_mps": 4.74,
+        "tol_mps": 2.8,
+        "n": 90
+      },
+      "T16": {
+        "offset_mps": 0.21,
+        "tol_mps": 1.8,
+        "n": 90
+      },
+      "T2": {
+        "offset_mps": -0.99,
+        "tol_mps": 4.0,
+        "n": 90
+      },
+      "T3": {
+        "offset_mps": -6.08,
+        "tol_mps": 2.8,
+        "n": 90
+      },
       "T4": {
-        "offset_mps": -0.75,
-        "tol_mps": 7.1,
+        "offset_mps": -1.07,
+        "tol_mps": 4.6,
         "n": 90
       },
       "T5": {
-        "offset_mps": -3.1,
-        "tol_mps": 12.2,
+        "offset_mps": -2.62,
+        "tol_mps": 2.3,
         "n": 90
       },
       "T6": {
-        "offset_mps": -2.31,
-        "tol_mps": 31.7,
+        "offset_mps": -1.11,
+        "tol_mps": 3.0,
         "n": 90
       },
       "T7": {
-        "offset_mps": 2.71,
-        "tol_mps": 7.2,
+        "offset_mps": 2.57,
+        "tol_mps": 4.0,
         "n": 90
       },
       "T8": {
-        "offset_mps": -1.06,
-        "tol_mps": 21.1,
+        "offset_mps": -1.57,
+        "tol_mps": 3.4,
         "n": 90
       },
       "T9": {
-        "offset_mps": -3.1,
-        "tol_mps": 13.7,
+        "offset_mps": -3.42,
+        "tol_mps": 1.9,
         "n": 90
       }
     }

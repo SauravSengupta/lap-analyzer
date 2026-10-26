@@ -459,6 +459,34 @@ def test_section_times_pass_each_corners_accel_reference(sample_data_root):
     assert _accel_thresholds(multi[multi["status"] != "no_coverage"]) == {"nan"}
 
 
+def test_section_times_fit_one_accel_calibration_per_session(sample_data_root, monkeypatch):
+    # SPEC (session calibration, 2026-10-25): section_times fits the accelerometer
+    # calibration ONCE per session over ALL of that session's laps (the same lap set
+    # build_session_corners fits on) and judges every row of the session with it.
+    from lap_analyzer import analysis, trajectory
+    td = _ridge_track_def()
+    fits, used = [], []
+    real_fit, real_st = trajectory.fit_accel_calibration, trajectory.section_timing
+
+    def spy_fit(trajs, track_def):
+        trajs = list(trajs)
+        out = real_fit(trajs, track_def)
+        fits.append((len(trajs), out))
+        return out
+
+    def spy_st(traj, a, b, corridor, accel_ref=None, accel_cal=None):
+        used.append(accel_cal)
+        return real_st(traj, a, b, corridor, accel_ref=accel_ref, accel_cal=accel_cal)
+    monkeypatch.setattr(trajectory, "fit_accel_calibration", spy_fit)
+    monkeypatch.setattr(trajectory, "section_timing", spy_st)
+    df = analysis.section_times("ridge", td)
+    per_session = df.groupby("session_id")["lap"].nunique()
+    assert len(fits) == len(per_session)
+    assert sorted(n for n, _ in fits) == sorted(per_session.tolist())
+    assert any(c is not None for _, c in fits)           # the shipped table calibrates real sessions
+    assert set(map(id, used)) <= {id(c) for _, c in fits}
+
+
 # ---------------------------------------------------------------------------
 # section_range_bounds
 # ---------------------------------------------------------------------------

@@ -392,8 +392,27 @@ TIER_B_S = 0.30             # 2026-07-11, shown-shaded σ_t ceiling (PROVISIONAL
 # |resid − offset| rounded up to 0.1 m/s, on the GPS-only emulation of clean
 # calibration-split OBD laps (scripts/derive_accel_speed_tol.py --write). Read with
 # accel_ref_for(); no reference → the check is unverified.
+# Per-session accelerometer calibration (user decision 2026-10-25): clean residuals are
+# 96–99% between-session on the wide corners, explained by lat_g leaking into long_g
+# (phone yaw misalignment, glove box vs mesh net) plus a small long_g bias. Each session
+# fits resid − offset_c = −g·(b·T + ψ·∫lat_g dt) over all its sections (Huber IRLS, from
+# backbone speed + the accelerometer; no OBD) and the check compares the CORRECTED resid,
+# so the references above are derived on corrected residuals. A session with fewer than
+# ACCEL_FIT_MIN_SECTIONS evaluable sections has no calibration → the check is unverified.
 ACCEL_MIN_COVERAGE = 0.9     # 2026-10-22, min finite-long_g share of samples in [t_a, t_b] to evaluate the check
 G_MPS2 = 9.80665             # standard gravity (exact), long_g [g] → m/s²
+ACCEL_FIT_MIN_SECTIONS = 12  # 2026-10-25, one lap at the smaller track (PIR, 12 corners); 1-lap held-out fits exceed tol 3.7%
+ACCEL_HUBER_K = 1.345        # Huber tuning constant (95% Gaussian efficiency), in robust-scale units
+ACCEL_FIT_ITERS = 20         # IRLS iterations for the 2-parameter session fit
+
+
+@dataclass(frozen=True)
+class AccelCalibration:
+    """A session's accelerometer calibration for the accel-speed check (fit_accel_calibration)."""
+
+    b_g: float         # long_g bias (g): measured − true along-track accel
+    psi_rad: float     # lat→long coupling (small-angle phone yaw misalignment, rad)
+    n_sections: int    # evaluable sections the fit used
 
 
 @dataclass
@@ -414,6 +433,7 @@ class Trajectory:
     checks: list = field(default_factory=list)  # structured audit records (R12)
     jump_fix: np.ndarray | None = None  # per sample: True at each fix flagged by the jump detector (W1); None = not run
     long_g: np.ndarray | None = None  # per-sample longitudinal accel (g, + = accelerating), aligned with t; None = no column
+    lat_g: np.ndarray | None = None  # per-sample lateral accel (g, + = right), aligned with t; None = no column
 
     def time_at(self, s: float):
         """(t, sigma_t) at ruler position s, or None if s is outside the lap's
@@ -489,6 +509,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     td = g["track_dist_m"].to_numpy(dtype=float)
     checks = []
     long_g = g["long_g"].to_numpy(dtype=float) if "long_g" in g.columns else None
+    lat_g = g["lat_g"].to_numpy(dtype=float) if "lat_g" in g.columns else None
 
     obd = g["speed_mph"].to_numpy(dtype=float)
     has_obd = bool(np.isfinite(obd).any())
@@ -512,7 +533,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     if abs(med_delta) > RESCALE_INVALID_M or not np.isfinite(med_delta):
         checks.append(_check("rescale_median_delta", med_delta, RESCALE_INVALID_M, False))
         return _prior_only_trajectory(t, dl, v, "rescale_invalid", corridor, checks,
-                                      e_lat=e_lat_all, long_g=long_g)
+                                      e_lat=e_lat_all, long_g=long_g, lat_g=lat_g)
 
     # --- Step 1: evidence extraction (fresh → snap-mask → Hampel) ---
     fresh = np.ones(n, bool)
@@ -552,7 +573,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     if not ev.any():
         return _prior_only_trajectory(t, dl, v, backbone_status, corridor, checks,
                                       sigma_floor=sigma_floor, e_lat=e_lat_all,
-                                      jump_fix=jump_fix, long_g=long_g)
+                                      jump_fix=jump_fix, long_g=long_g, lat_g=lat_g)
 
     # --- Step 2: corridor weighting (the Mode-4 discriminator) ---
     e_lat = e_lat_all
@@ -566,7 +587,7 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     if len(knots) < 2:
         return _prior_only_trajectory(t, dl, v, backbone_status, corridor, checks,
                                       sigma_floor=sigma_floor, jump_fix=jump_fix,
-                                      long_g=long_g)
+                                      long_g=long_g, lat_g=lat_g)
     dh, se, _neff = _knot_fit(dl[ev], delta[ev], w_env[ev], knots)
     slope_bound = _slope_bound(knots, dl, v, g["lat_g"].to_numpy(dtype=float), corridor, td)
     dh, clip_mag = _rate_limit(dh, slope_bound, knots)
@@ -579,12 +600,12 @@ def estimate_trajectory(lap_samples: pd.DataFrame, corridor: Corridor,
     return Trajectory(t=t, s_hat=s_hat, sigma_m=np.interp(dl, knots, sig), delta_hat=d_smp,
                       dl=dl, v=v, evidence=ev, status=backbone_status, knots=knots,
                       knot_sigma=sig, e_lat=e_lat_all, checks=checks, jump_fix=jump_fix,
-                      long_g=long_g)
+                      long_g=long_g, lat_g=lat_g)
 
 
 def _prior_only_trajectory(t, dl, v, status, corridor, checks,
                            sigma_floor=SIGMA_FLOOR_OBD_M, e_lat=None, jump_fix=None,
-                           long_g=None):
+                           long_g=None, lat_g=None):
     """δ̂ ≡ 0 (OBD/GPS backbone), σ = the tapered δ=0 prior — reproduces the
     OBD-anchored fallback in the zero-GPS-evidence limit (design R6)."""
     dl = dl.astype(float)
@@ -595,7 +616,7 @@ def _prior_only_trajectory(t, dl, v, status, corridor, checks,
                       delta_hat=np.zeros(len(dl)), dl=dl, v=v,
                       evidence=np.zeros(len(dl), bool), status=status, knots=knots,
                       knot_sigma=sig, e_lat=e_lat, checks=checks, jump_fix=jump_fix,
-                      long_g=long_g)
+                      long_g=long_g, lat_g=lat_g)
 
 
 def _lap_lateral_offset(g: pd.DataFrame, corridor: Corridor, frame: TrackFrame,
@@ -787,30 +808,106 @@ def _consistency_resid(traj: Trajectory, corridor: Corridor, a: float, b: float,
     return driven - predicted
 
 
+def _window_integral(t: np.ndarray, a: np.ndarray, t_a: float, t_b: float) -> float:
+    """∫a dt over [t_a, t_b] on finite samples only (NaN is never filled with 0); end
+    points linearly interpolated. NaN when the window holds < 2 samples or fewer than
+    ACCEL_MIN_COVERAGE of its samples are finite."""
+    inside = (t >= t_a) & (t <= t_b)
+    n_in = int(inside.sum())
+    if n_in < 2 or not (t_b > t_a):
+        return np.nan
+    fin = np.isfinite(a)
+    if (fin & inside).sum() / n_in < ACCEL_MIN_COVERAGE:
+        return np.nan
+    tf, af = t[fin], a[fin]
+    m = (tf > t_a) & (tf < t_b)
+    tt = np.concatenate([[t_a], tf[m], [t_b]])
+    aa = np.concatenate([[np.interp(t_a, tf, af)], af[m], [np.interp(t_b, tf, af)]])
+    return float(np.sum(0.5 * (aa[1:] + aa[:-1]) * np.diff(tt)))
+
+
 def _accel_speed_resid(traj: Trajectory, t_a: float, t_b: float) -> float:
     """resid = Δv_backbone − ∫long_g·g dt over [t_a, t_b] (m/s). On a gps_backbone lap
     Δv_backbone is GPS speed, so this is the only independent-sensor check it has.
     NaN when there is no long_g, the window holds < 2 samples, or fewer than
     ACCEL_MIN_COVERAGE of its samples have finite long_g. Integrates over finite
     samples only (NaN is never filled with 0); end points are linearly interpolated."""
-    lg = traj.long_g
-    if lg is None or not (t_b > t_a):
+    if traj.long_g is None or not (t_b > t_a):
         return np.nan
-    lg = np.asarray(lg, dtype=float)
-    t = traj.t
-    inside = (t >= t_a) & (t <= t_b)
-    n_in = int(inside.sum())
-    if n_in < 2:
-        return np.nan
-    fin = np.isfinite(lg)
-    if (fin & inside).sum() / n_in < ACCEL_MIN_COVERAGE:
-        return np.nan
-    tf, af = t[fin], lg[fin]
-    m = (tf > t_a) & (tf < t_b)
-    tt = np.concatenate([[t_a], tf[m], [t_b]])
-    aa = np.concatenate([[np.interp(t_a, tf, af)], af[m], [np.interp(t_b, tf, af)]])
-    dv_accel = float(np.sum(0.5 * (aa[1:] + aa[:-1]) * np.diff(tt))) * G_MPS2
+    dv_accel = _window_integral(traj.t, np.asarray(traj.long_g, dtype=float), t_a, t_b) * G_MPS2
     return (traj.v_at(t_b) - traj.v_at(t_a)) - dv_accel
+
+
+def accel_section_features(traj: Trajectory, dist_a: float, dist_b: float):
+    """(raw accel-speed resid m/s, section duration T s, ∫lat_g dt g·s) for [dist_a,
+    dist_b] at the same monotone s_hat crossings section_timing uses; None when the
+    section is not covered. Entries are NaN where uncomputable (no long_g / lat_g)."""
+    s, t = traj.s_hat, traj.t
+    if not ((s[0] <= dist_a <= s[-1]) and (s[0] <= dist_b <= s[-1]) and dist_b > dist_a):
+        return None
+    t_a = float(np.interp(dist_a, s, t))
+    t_b = float(np.interp(dist_b, s, t))
+    ilat = (_window_integral(t, np.asarray(traj.lat_g, dtype=float), t_a, t_b)
+            if traj.lat_g is not None else np.nan)
+    return _accel_speed_resid(traj, t_a, t_b), t_b - t_a, ilat
+
+
+def accel_correction(cal: AccelCalibration, duration_s: float, ilat_gs: float) -> float:
+    """The session model's share of a section's accel-speed resid (m/s): a long_g bias b
+    reads as −g·b·T and lat→long coupling ψ as −g·ψ·∫lat_g dt."""
+    return -G_MPS2 * (cal.b_g * duration_s + cal.psi_rad * ilat_gs)
+
+
+def fit_accel_params(y, duration_s, ilat_gs) -> AccelCalibration | None:
+    """Huber-IRLS fit of y = −g·(b·T + ψ·∫lat_g) over a session's sections, y = raw
+    resid − the corner's reference offset. None when fewer than ACCEL_FIT_MIN_SECTIONS
+    sections are finite. Pure."""
+    y, T, L = (np.asarray(x, dtype=float) for x in (y, duration_s, ilat_gs))
+    m = np.isfinite(y) & np.isfinite(T) & np.isfinite(L)
+    n = int(m.sum())
+    if n < ACCEL_FIT_MIN_SECTIONS:
+        return None
+    X = -G_MPS2 * np.c_[T[m], L[m]]
+    y = y[m]
+    w = np.ones(n)
+    beta = np.zeros(2)
+    for _ in range(ACCEL_FIT_ITERS):
+        sw = np.sqrt(w)
+        beta = np.linalg.lstsq(X * sw[:, None], y * sw, rcond=None)[0]
+        r = y - X @ beta
+        scale = 1.4826 * float(np.median(np.abs(r - np.median(r))))
+        if not scale > 0:
+            break
+        u = np.abs(r) / (ACCEL_HUBER_K * scale)
+        w = np.where(u <= 1.0, 1.0, 1.0 / np.maximum(u, 1e-12))
+    return AccelCalibration(b_g=float(beta[0]), psi_rad=float(beta[1]), n_sections=n)
+
+
+def fit_accel_calibration(trajs, track_def: dict) -> AccelCalibration | None:
+    """One session's AccelCalibration from ALL its lap trajectories: every per-corner
+    section (analysis.section_bounds) that has a reference in track_def's
+    accel_speed_check table, on laps whose ruler is valid (rescale_invalid laps are
+    skipped). None when the track has no references or the session has fewer than
+    ACCEL_FIT_MIN_SECTIONS evaluable sections."""
+    from .analysis import section_bounds
+    if not ((track_def or {}).get("accel_speed_check") or {}).get("corners"):
+        return None
+    bounds = section_bounds(track_def)
+    refs = {cid: accel_ref_for(track_def, cid) for cid in bounds}
+    y, T, L = [], [], []
+    for traj in trajs:
+        if traj is None or traj.status == "rescale_invalid":
+            continue
+        for cid, (a, b) in bounds.items():
+            if refs[cid] is None:
+                continue
+            ft = accel_section_features(traj, a, b)
+            if ft is None:
+                continue
+            y.append(ft[0] - refs[cid][0])
+            T.append(ft[1])
+            L.append(ft[2])
+    return fit_accel_params(y, T, L)
 
 
 def accel_ref_for(track_def: dict, corner_id: str) -> tuple[float, float] | None:
@@ -825,7 +922,8 @@ def accel_ref_for(track_def: dict, corner_id: str) -> tuple[float, float] | None
 
 def section_timing(traj: Trajectory, dist_a: float, dist_b: float,
                    corridor: Corridor,
-                   accel_ref: tuple[float, float] | None = None) -> SectionTiming:
+                   accel_ref: tuple[float, float] | None = None,
+                   accel_cal: AccelCalibration | None = None) -> SectionTiming:
     """Time the section [dist_a, dist_b] on one lap's estimate; ALWAYS emit a row.
 
     The value (t at the monotone s_hat crossings) and its σ come from the same pass
@@ -834,7 +932,10 @@ def section_timing(traj: Trajectory, dist_a: float, dist_b: float,
     On a gps_backbone lap a failed net or accel-speed check also withholds tier A.
     `accel_ref` = the section's (offset_mps, tol_mps) accel-speed reference
     (accel_ref_for, for a single named corner); None = no reference, so a GPS-only
-    lap cannot be verified and is withheld from tier A.
+    lap cannot be verified and is withheld from tier A. `accel_cal` = the session's
+    accelerometer calibration (fit_accel_calibration); the references are derived on
+    calibrated residuals, so None (session too short to fit) also leaves a GPS-only
+    lap unverified.
     Design: docs/…/trajectory-design.md §Section timing; SPEC tests/SPEC.md.
     """
     s, t = traj.s_hat, traj.t
@@ -894,18 +995,29 @@ def section_timing(traj: Trajectory, dist_a: float, dist_b: float,
     # --- accel-speed check (W3 amendment): Δv_backbone vs ∫long_g. ALWAYS recorded;
     # ENFORCED only on gps_backbone laps (no independent speed sensor), where a failed
     # or unevaluable check withholds tier A (A → B; σ untouched). Diagnostic on OBD laps.
-    # The value is centred on the corner's reference offset; `raw` keeps the uncentred
-    # resid (what the derivation reads). No reference → unevaluable (threshold NaN).
+    # The value is the resid minus the session calibration's share, centred on the
+    # corner's reference offset; `raw` keeps the uncorrected, uncentred resid (what the
+    # derivation reads) and `correction` the calibration's share. No reference →
+    # unevaluable (threshold NaN). No calibration → unevaluable (calibrated=False).
     gps_only = traj.status == "gps_backbone"
     a_resid = _accel_speed_resid(traj, t_a, t_b)
+    corr = np.nan
     if accel_ref is None:
         a_val, a_tol = a_resid, np.nan
         accel_ok = not gps_only
-    else:
+    elif accel_cal is None:
         a_val, a_tol = a_resid - float(accel_ref[0]), float(accel_ref[1])
+        accel_ok = not gps_only
+    else:
+        ilat = (_window_integral(t, np.asarray(traj.lat_g, dtype=float), t_a, t_b)
+                if traj.lat_g is not None else np.nan)
+        corr = accel_correction(accel_cal, t_b - t_a, ilat)
+        a_val, a_tol = a_resid - corr - float(accel_ref[0]), float(accel_ref[1])
         accel_ok = (abs(a_val) <= a_tol) if np.isfinite(a_val) else not gps_only
     rec = _check("accel_speed_resid_mps", a_val, a_tol, accel_ok)
     rec["raw"] = round(float(a_resid), 3)
+    rec["correction"] = round(float(corr), 3)
+    rec["calibrated"] = accel_cal is not None
     checks.append(rec)
 
     # --- gps_backbone enforcement (W3 amendments 16b–16d): withhold tier A (A → B; σ and
