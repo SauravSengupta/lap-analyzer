@@ -92,8 +92,21 @@ crossings are impossible). Each transit carries its `sigma_t_s` and a
 `rank_eligible` flag: only tier-A (σ_t ≤ 0.10 s) transits win the "fastest through"
 ranking. A coarse-GPS or Mode-4-drift transit gets a wide σ, is shown as an
 "estimate ± σ" and **excluded from ranking** — surfaced with a warning rather than
-dropped. See [GPS_TRUST.md](GPS_TRUST.md). The channel chart adds ±200 m of context
-on each side so the adjacent brake zones are visible.
+dropped. See [GPS_TRUST.md](GPS_TRUST.md).
+
+On a **GPS-only** lap (OBD dropped out) a tier-A σ is not enough: GPS is the only
+odometer, so the section also has to pass the accel-speed check (GPS speed change
+vs integrated accelerometer, after the session's accelerometer calibration) and
+both σ-nets. A failure reads "tight enough to rank, but this GPS-only lap failed a
+cross-check", followed by each failed check's value and threshold. "Unevaluable"
+means the check couldn't run: too little accelerometer data, or a session too short
+to calibrate the accelerometer. "No reference for this corner" means the track JSON
+has no `accel_speed_check` entry for it (multi-corner ranges never do). Either way
+the section is withheld from ranking. On OBD laps the accel check is diagnostic
+only and never withholds a section.
+
+The channel chart adds ±200 m of context on each side so the adjacent brake zones
+are visible.
 
 ## The Δt panel
 

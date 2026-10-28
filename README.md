@@ -84,6 +84,16 @@ value and its confidence can never disagree. A fake-fast lap shows up as an hone
 estimate ± σ, excluded from ranking, not silently trusted. See
 [docs/GPS_TRUST.md](docs/GPS_TRUST.md).
 
+The three sensors (GPS, OBD, the phone's accelerometer) are measured against each
+other rather than fused. GPS position lags the car by ~0.15–0.18 s and GPS speed
+~0.12 s more, so normalize re-times both at ingest. Sessions where OBD dropped out
+(~12%) still rank in "fastest through" only when GPS
+passes cross-checks that don't depend on GPS: integrated accelerometer speed
+(with the phone's per-session bias and mount angle fitted out) and the trajectory
+layer's consistency nets. Bad GPS is flagged, never reconstructed. Every
+threshold is derived from the data by a written rule and checked by a held-out
+validation harness (`scripts/trust_validation.py`), not tuned by hand.
+
 All geometric truth derives from a handful of Google Maps satellite-pinned
 corner apexes per track — the only hand-curated input. The reasoning behind that
 and every other design choice is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -95,7 +105,7 @@ lap_analyzer/        # the library — one module per pipeline component
   cli/               # one CLI per component (python -m lap_analyzer.cli.<name>)
 visualizer/          # Streamlit app + track-specific analysis pages
 tests/               # pytest suite + tests/SPEC.md (intent-first behavioral spec)
-scripts/             # bootstrap & diagnostic tools (e.g. seed_pir_corners.py)
+scripts/             # bootstrap, diagnostics, rule-based constant derivation, trust validation
 tracks/              # per-track JSON definitions (ridge.json, pir.json)
 docs/                # ARCHITECTURE · PIPELINE · GPS_TRUST · DESIGN-JOURNEY · VISUALIZER · NEW-TRACK
 data/
@@ -110,7 +120,7 @@ local.
 
 - [docs/PIPELINE.md](docs/PIPELINE.md) — CLI runbook, CSV column contract, output schema.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — design rationale and the approaches that were rejected.
-- [docs/GPS_TRUST.md](docs/GPS_TRUST.md) — the GPS-vs-OBD trust model: what to trust for which question, the four GPS failure modes, and the one trajectory layer (`s_hat` + σ) that decides it.
+- [docs/GPS_TRUST.md](docs/GPS_TRUST.md) — the GPS-vs-OBD trust model: what to trust for which question, the four GPS failure modes, the one trajectory layer (`s_hat` + σ) that decides it, and the cross-checks GPS-only sessions must pass to rank.
 - [docs/DESIGN-JOURNEY.md](docs/DESIGN-JOURNEY.md) — how the GPS-trust layer was rebuilt from six detectors into one estimate, the dead ends, and the generalisable lessons.
 - [docs/VISUALIZER.md](docs/VISUALIZER.md) — what the Streamlit app shows and how to read it.
 - [docs/NEW-TRACK.md](docs/NEW-TRACK.md) — bootstrap a new track end-to-end.

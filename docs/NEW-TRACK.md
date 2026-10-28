@@ -65,6 +65,9 @@ python -m lap_analyzer.cli.normalize --track <slug> --all
 Expect some sessions to report `gpsonly` (no OBD channels logged — ~12% of
 sessions; they're ingested GPS-only, which is fine). Confirm every session
 produces `data/sessions/<slug>/<sid>/{samples.parquet, laps.csv, meta.json}`.
+Normalize also corrects the GPS lag automatically. OBD sessions are measured against
+OBD; GPS-only sessions use the fallback offset. Nothing to configure per track (see
+[PIPELINE.md](PIPELINE.md) on `gps_lag`).
 
 ## Step 3 — Set `lap_length_internal_m` from real data
 
@@ -221,6 +224,17 @@ block now points at the synthetic centerline:
 }
 ```
 
+Then build the trajectory **corridor** on the new centerline. It's the per-track
+GPS-trust model that section times, rankings and the visualizer all read:
+
+```powershell
+python -m lap_analyzer.trajectory build-corridor <slug>
+```
+
+If you skip this, `label_corners` builds an unsaved corridor on the fly. The corners
+are still correct, but section times and the visualizer have no persisted corridor to
+read. Rebuild it whenever you re-normalize or rebuild the centerline.
+
 > **The lap-wrap centerline gotcha.** `build_centerline` reads the corner boxes
 > from your track JSON and treats them as *protected ranges*. This matters: at
 > the start/finish wrap, the kd-tree can assign samples from physically different
@@ -242,6 +256,39 @@ python -m lap_analyzer.cli.label_corners --track <slug>
 python -m lap_analyzer.cli.flag_quality --track <slug>
 python -m lap_analyzer.cli.build_corpus --track <slug>
 ```
+
+## Step 10 — Accel-speed references (needed for GPS-only sessions to rank)
+
+GPS-only laps reach the "fastest through" ranking only if each section passes the
+accel-speed check, and that check needs a per-corner reference (`offset_mps`,
+`tol_mps`) in the `accel_speed_check` block of `tracks/<slug>.json`. A new track has
+none, so **until this step its GPS-only sections are never ranked**. They show "no
+reference for this corner" in the visualizer. OBD sessions are unaffected.
+
+The references are derived by rule from the GPS-only emulation of your **OBD**
+sessions (OBD channels removed, with each session's accelerometer bias and mount
+angle fitted out). See the docstring of `scripts/derive_accel_speed_tol.py` for the
+rule. Add `<slug>` to the script's `TRACKS` tuple (it lists `pir` and `ridge`), then:
+
+```powershell
+python scripts/derive_accel_speed_tol.py           # prints the per-corner table
+python scripts/derive_accel_speed_tol.py --write   # writes accel_speed_check into the track JSON
+python -m lap_analyzer.cli.label_corners --track <slug>
+python -m lap_analyzer.cli.flag_quality --track <slug>
+python -m lap_analyzer.cli.build_corpus --track <slug>
+```
+
+Re-running `label_corners` applies the new references to `corners.parquet`.
+
+- A corner gets a reference only with ≥ 20 clean sections from the calibration split
+  (about 60% of OBD sessions), so a thin first batch of data can leave some corners
+  without one. Re-derive as sessions accumulate.
+- A GPS-only session with too few sections for the accelerometer fit (12) is shown
+  as "unevaluable" and doesn't rank, whatever the references say.
+- The global trust constants (trust nets, jump threshold, GPS σ floor) were derived
+  on PIR and Ridge and apply as-is. To check them on your track, add `<slug>` to
+  `TRACKS` in `scripts/trust_validation.py` and run it (see
+  [PIPELINE.md](PIPELINE.md)).
 
 ---
 
@@ -280,6 +327,7 @@ print(df.groupby("corner_id").size())
 | Low `transit_reliable` rate, high `gps_drift_disagreement_m` | Pins too far from the actual kerbs — drift correction has no consistent anchor. Re-pin the worst corners. |
 | Front-straight "zigzag" in the centerline | Corner boxes weren't populated before `build_centerline`, so nothing was protected. Populate `corners[]` (Step 6), rebuild. |
 | A full-throttle corner has almost no transits / nonsensical apex | No lat-G cluster to seed from. Use the T9 pattern — pin-projected lap-distance directly (Step 6). |
+| GPS-only sections never rank; visualizer says "no reference for this corner" | No `accel_speed_check` entry for that corner. Run Step 10, or collect more OBD sessions if the corner had < 20 clean sections. |
 | `label_corners` errors with "no reference_lap defined" | First pass needs a real bootstrap reference (Step 7); set `reference_lap` to a real session+lap before the centerline exists. |
 
 ---
