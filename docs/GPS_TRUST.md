@@ -239,11 +239,27 @@ PIR T12 20.8 → 1.6). Held-out emulation exceeds its tolerance 2.2% of the time
 before). A +10 m/s error planted on one section survives the session refit (median
 99.8%), and the PIR T1 fake still fails (14.3 m/s against 3.0). A rejected alternative:
 fitting ψ from lat_g vs long_g on straights needs two thresholds, and the result swings
-with them (tolerance median 3.5–11.3 m/s), so it would be a tuned constant. Open: real
-GPS-only sections exceed the new tolerances more often than the emulation does (about
-15% vs 2%, mostly within 1.4× the tolerance). There is no OBD to tell whether their GPS
-is worse or the emulation differs. Real GPS-only coverage (status-ok, in-memory rebuild):
-PIR 61.7% → 61.1% of 588, Ridge 83.6% → 80.3% of 304.
+with them (tolerance median 3.5–11.3 m/s), so it would be a tuned constant. Real
+GPS-only coverage (status-ok, rebuilt data): PIR 61.7% → 61.1% of 588, Ridge 83.6% →
+80.3% of 304.
+
+Real GPS-only exceedance (diagnosed 2026-10-27, tolerances kept). Real GPS-only
+sections first appeared to fail the check far more often than the emulation (about 15%
+vs 2%). That compared different populations: the 2% counts clean emulated laps only,
+while real GPS-only sessions have no clean flag, so every lap counted. On all laps, PIR
+real GPS-only fails 17.9% (624 sections) vs 5.4–6.4% emulated, and Ridge 4.9% (304) vs
+10–11% emulated, so Ridge has no gap. PIR's excess sits in 3 of its 6 GPS-only sessions,
+which hold 72% of the failures: 20260926-111509 at 38% (the session with the confirmed
+T1 fake, whose GPS lag could not be measured), 20250927-111547 at 26%, 20251004-112120
+at 24%. Emulated sessions spread as widely (per-session rate median 5%, p90 20%, max
+45%). Three checks rule out a model or ingest fault. Scoring each GPS-only session with
+the median calibration of same-day OBD sessions never beats its own fit (20251004-112120:
+own ψ +12° vs same-day ≈ 0°, and swapping raises its failures 24% → 69%, so the phone sat
+differently that session). Leftover GPS lag would scale with the change in long_g across
+the section; it explains R² ≤ 0.07 of the residual, and removing a per-session lag term
+barely changes the failure rate. So the excess is most likely real bad GPS in those PIR
+sessions, which the check withholds as intended; the cost is ranking coverage, not wrong
+rankings.
 
 Only tier-A (`rank_eligible`) transits win the "fastest through" benchmark — a
 Mode-3/4 or coarse-GPS lap has wide σ and is excluded (design R2: σ decides
