@@ -140,9 +140,13 @@ least-squares line through per-corner bounds, not an envelope, so roughly half t
 corners' clean 3σ bound sits above the band; that is the source of the coverage
 trade-off: per-track OBD tier-A coverage −1.6 pp (PIR 0.913 → 0.896, Ridge 0.863 →
 0.847). The brake-point scatter gate was missed on PIR (13.091 → 13.132 m, +0.04 m vs
-W0; Ridge 13.612 → 13.317 m): accepted-unmet by the user 2026-10-20. Likely (not
-proven) cause: the two σ-shrinking changes, `RHO_SECTION` 0.45 → 0.66 and
-`SIGMA_PRIOR_MID_M` 12 → 6.5.
+W0; Ridge 13.612 → 13.317 m): accepted-unmet by the user 2026-10-17 (W1, already
++0.03 m) and 2026-10-20. The shift is noise, not a regression: the PIR figure is the
+median of 11 corners' brake-point std, i.e. T1's alone, and resampling held-out sessions
+(2000 draws) gives it a standard error of 2.05 m (95% 8.6–16.7 m), so +0.04 m is about
+2% of one standard error. The gate is strict "not worse" with no margin, so it keeps
+reporting FAIL at this value; re-examine it only if the figure moves by more than the
+noise.
 
 ## The four trust axes
 
