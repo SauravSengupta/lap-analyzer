@@ -379,8 +379,12 @@ DRIVEN_BAND_FLOOR_M = 10.3  # 2026-10-17, intercept of the same fit (W2)
 # Re-derived by the same rule on lag-corrected, jump-filtered data (W2, spec 2026-10-10).
 CONSISTENCY_STD_M = 5.1  # 2026-10-17, 1.4826·MAD consistency resid, 2572 clean transits (W2)
 SPEED_CONSIST_TOL_S = 0.2     # 2026-07-11, speed-consistency slack (design tripwire)
-TIER_A_S = 0.10              # 2026-07-11, rankable σ_t ceiling (PROVISIONAL until R7, §9.1)
-TIER_B_S = 0.30             # 2026-07-11, shown-shaded σ_t ceiling (PROVISIONAL until R7, §9.1)
+# Tier cut-offs, finalized by the user 2026-11-01 (§9.1) once R7 passed. Sweep of the A
+# cut-off 0.05–0.30 s: 0.10 is the largest value that passes G2 (planted gate bursts
+# bad-but-rankable 4.9% ≤ 5%; 0.125 → 6.3%). B only shades; no known fake is ranked at any
+# A ≤ 0.30, and the on-ribbon T8 fake (σ 0.303) sits just above B. See GPS_TRUST.md.
+TIER_A_S = 0.10              # 2026-11-01, rankable σ_t ceiling (largest A passing G2)
+TIER_B_S = 0.30             # 2026-11-01, shown-shaded σ_t ceiling (display only)
 # accel-speed check (W3 amendment, user decision 2026-10-22): on a GPS-only lap the
 # backbone odometer IS GPS speed, so no σ-net has an independent sensor. Compare the
 # backbone speed change across a section with ∫long_g·g dt; a gps_backbone section that

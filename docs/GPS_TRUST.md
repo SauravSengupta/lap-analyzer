@@ -184,8 +184,27 @@ Quality **tiers are derived from σ, never stored as independent booleans**:
 | **B** | ≤ `TIER_B_S` (0.30 s) | shown, shaded, labelled "estimate ± σ"; excluded from ranking |
 | **C** | otherwise | listed, excluded |
 
-> The 0.10 s / 0.30 s thresholds are **PROVISIONAL** pending a coverage/precision
-> sweep (design §9.1, reserved). Do not treat them as finalized.
+**Thresholds finalized 2026-11-01** (design §9.1, user decision). They were provisional
+until the R7 per-mode σ calibration passed, which it has in every validation run since W0.
+Only `TIER_A_S` affects ranking; `TIER_B_S` only decides shading. A sweep of the A cut-off
+on current data (clean, non-reference corpus laps for coverage; 1149 planted faults on
+held-out clean OBD laps, truth = the unfaulted time) gave:
+
+| A cut-off | PIR OBD coverage (worst corner) | Ridge OBD coverage (worst corner) | planted faults ranked with \|err\| > 0.05 s | gate bursts (G2, ≤ 5%) |
+|---|---|---|---|---|
+| 0.075 s | 86.4% (T3 69%) | 77.0% (T12 60%) | 5.0% | 3.5% |
+| **0.10 s** | 88.3% (T3 75%) | 78.4% (T12 64%) | 6.9% | **4.9%** |
+| 0.125 s | 89.6% | 80.3% | 8.4% | 6.3% (fails) |
+| 0.20 s | 93.9% | 89.2% | 10.0% | 6.9% (fails) |
+
+0.10 s is the largest cut-off that passes G2, with little margin; going lower buys fewer
+bad-but-ranked times at about 2 points of coverage. GPS-only emulation (1620 sections) is
+insensitive to the cut-off: 99.8–100% of errors are within 2σ in every σ band. No known
+fake is ranked at any A ≤ 0.30 s: the Ridge T8 fakes have σ 0.30–0.91 s, and the PIR T1
+fake (σ 0.019 s) is stopped by the GPS-only accel check, not by σ. The on-ribbon T8 fake
+(20260702-101432 L6, σ 0.303 s) sits just above `TIER_B_S`; raising B would shade it as
+an estimate, though it would still not be ranked. Re-run the sweep before moving either
+cut-off.
 
 GPS-only (`gps_backbone`) laps are tiered by their own σ (since 2026-10, W3); there
 is no blanket tier-B cap. Evidence: dropping OBD from tier-A OBD laps changes section
